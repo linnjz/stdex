@@ -1,0 +1,473 @@
+{
+  "version": 9,
+  "configurePresets": [
+    {
+      "name": "msvc-x64-local",
+      "hidden": true,
+      "inherits": [
+        "msvc-base"
+      ],
+      "installDir": "${sourceDir}/out/install/msvc_x64"
+    },
+    {
+      "name": "msvc_x64_debug",
+      "hidden": false,
+      "inherits": "msvc-x64-local",
+      "displayName": "x64 Debug msvc",
+      "description": "Debug build for msvc",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      },
+      "environment": {
+        "BUILD_MODE": "debug"
+      }
+    },
+    {
+      "name": "msvc_x64_relwithdebinfo",
+      "hidden": true,
+      "inherits": "msvc-x64-local",
+      "displayName": "x64 RelWithDebInfo msvc",
+      "description": "RelWithDebInfo build for msvc",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      },
+      "environment": {
+        "BUILD_MODE": "relwithdebinfo"
+      }
+    },
+    {
+      "name": "msvc_x64_release",
+      "hidden": false,
+      "inherits": "msvc-x64-local",
+      "displayName": "x64 Release msvc",
+      "description": "Release build for msvc",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      },
+      "environment": {
+        "BUILD_MODE": "release"
+      }
+    },
+    {
+      "name": "msvc_x64_minsizerel",
+      "hidden": true,
+      "inherits": "msvc-x64-local",
+      "displayName": "x64 MinSizeRel msvc",
+      "description": "MinSizeRel build for msvc",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "MinSizeRel"
+      },
+      "environment": {
+        "BUILD_MODE": "minsizerel"
+      }
+    },
+    {
+      "name": "clang-x64-local",
+      "hidden": true,
+      "inherits": [
+        "clang-base"
+      ],
+      "installDir": "${sourceDir}/out/install/clang_x64"
+    },
+    {
+      "name": "clang_x64_debug",
+      "hidden": true,
+      "inherits": "clang-x64-local",
+      "displayName": "x64 Debug clang",
+      "description": "Debug build for clang",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      },
+      "environment": {
+        "BUILD_MODE": "debug"
+      }
+    },
+    {
+      "name": "clang_x64_relwithdebinfo",
+      "hidden": true,
+      "inherits": "clang-x64-local",
+      "displayName": "x64 RelWithDebInfo clang",
+      "description": "RelWithDebInfo build for clang",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      },
+      "environment": {
+        "BUILD_MODE": "relwithdebinfo"
+      }
+    },
+    {
+      "name": "clang_x64_release",
+      "hidden": true,
+      "inherits": "clang-x64-local",
+      "displayName": "x64 Release clang",
+      "description": "Release build for clang",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      },
+      "environment": {
+        "BUILD_MODE": "release"
+      }
+    },
+    {
+      "name": "clang_x64_minsizerel",
+      "hidden": true,
+      "inherits": "clang-x64-local",
+      "displayName": "x64 MinSizeRel clang",
+      "description": "MinSizeRel build for clang",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "MinSizeRel"
+      },
+      "environment": {
+        "BUILD_MODE": "minsizerel"
+      }
+    },
+    {
+      "name": "gcc-x64-local",
+      "hidden": true,
+      "inherits": [
+        "gcc-base"
+      ],
+      "installDir": "${sourceDir}/out/install/gcc_x64"
+    },
+    {
+      "name": "gcc_x64_debug",
+      "hidden": true,
+      "inherits": "gcc-x64-local",
+      "displayName": "x64 Debug gcc",
+      "description": "Debug build for gcc",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      },
+      "environment": {
+        "BUILD_MODE": "debug"
+      }
+    },
+    {
+      "name": "gcc_x64_relwithdebinfo",
+      "hidden": true,
+      "inherits": "gcc-x64-local",
+      "displayName": "x64 RelWithDebInfo gcc",
+      "description": "RelWithDebInfo build for gcc",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      },
+      "environment": {
+        "BUILD_MODE": "relwithdebinfo"
+      }
+    },
+    {
+      "name": "gcc_x64_release",
+      "hidden": true,
+      "inherits": "gcc-x64-local",
+      "displayName": "x64 Release gcc",
+      "description": "Release build for gcc",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      },
+      "environment": {
+        "BUILD_MODE": "release"
+      }
+    },
+    {
+      "name": "gcc_x64_minsizerel",
+      "hidden": true,
+      "inherits": "gcc-x64-local",
+      "displayName": "x64 MinSizeRel gcc",
+      "description": "MinSizeRel build for gcc",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "MinSizeRel"
+      },
+      "environment": {
+        "BUILD_MODE": "minsizerel"
+      }
+    },
+    {
+      "name": "clang-cl-x64-local",
+      "hidden": true,
+      "inherits": [
+        "clang-cl-base"
+      ],
+      "installDir": "${sourceDir}/out/install/clang-cl_x64"
+    },
+    {
+      "name": "clang-cl_x64_debug",
+      "hidden": false,
+      "inherits": "clang-cl-x64-local",
+      "displayName": "x64 Debug clang-cl",
+      "description": "Debug build for clang-cl",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      },
+      "environment": {
+        "BUILD_MODE": "debug"
+      }
+    },
+    {
+      "name": "clang-cl_x64_relwithdebinfo",
+      "hidden": true,
+      "inherits": "clang-cl-x64-local",
+      "displayName": "x64 RelWithDebInfo clang-cl",
+      "description": "RelWithDebInfo build for clang-cl",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      },
+      "environment": {
+        "BUILD_MODE": "relwithdebinfo"
+      }
+    },
+    {
+      "name": "clang-cl_x64_release",
+      "hidden": false,
+      "inherits": "clang-cl-x64-local",
+      "displayName": "x64 Release clang-cl",
+      "description": "Release build for clang-cl",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      },
+      "environment": {
+        "BUILD_MODE": "release"
+      }
+    },
+    {
+      "name": "clang-cl_x64_minsizerel",
+      "hidden": true,
+      "inherits": "clang-cl-x64-local",
+      "displayName": "x64 MinSizeRel clang-cl",
+      "description": "MinSizeRel build for clang-cl",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "MinSizeRel"
+      },
+      "environment": {
+        "BUILD_MODE": "minsizerel"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "build-msvc_x64_debug",
+      "inherits": "build-base",
+      "configurePreset": "msvc_x64_debug",
+      "displayName": "Build msvc_x64_debug",
+      "hidden": false
+    },
+    {
+      "name": "build-msvc_x64_relwithdebinfo",
+      "inherits": "build-base",
+      "configurePreset": "msvc_x64_relwithdebinfo",
+      "displayName": "Build msvc_x64_relwithdebinfo",
+      "hidden": true
+    },
+    {
+      "name": "build-msvc_x64_release",
+      "inherits": "build-base",
+      "configurePreset": "msvc_x64_release",
+      "displayName": "Build msvc_x64_release",
+      "hidden": false
+    },
+    {
+      "name": "build-msvc_x64_minsizerel",
+      "inherits": "build-base",
+      "configurePreset": "msvc_x64_minsizerel",
+      "displayName": "Build msvc_x64_minsizerel",
+      "hidden": true
+    },
+    {
+      "name": "build-clang_x64_debug",
+      "inherits": "build-base",
+      "configurePreset": "clang_x64_debug",
+      "displayName": "Build clang_x64_debug",
+      "hidden": true
+    },
+    {
+      "name": "build-clang_x64_relwithdebinfo",
+      "inherits": "build-base",
+      "configurePreset": "clang_x64_relwithdebinfo",
+      "displayName": "Build clang_x64_relwithdebinfo",
+      "hidden": true
+    },
+    {
+      "name": "build-clang_x64_release",
+      "inherits": "build-base",
+      "configurePreset": "clang_x64_release",
+      "displayName": "Build clang_x64_release",
+      "hidden": true
+    },
+    {
+      "name": "build-clang_x64_minsizerel",
+      "inherits": "build-base",
+      "configurePreset": "clang_x64_minsizerel",
+      "displayName": "Build clang_x64_minsizerel",
+      "hidden": true
+    },
+    {
+      "name": "build-gcc_x64_debug",
+      "inherits": "build-base",
+      "configurePreset": "gcc_x64_debug",
+      "displayName": "Build gcc_x64_debug",
+      "hidden": true
+    },
+    {
+      "name": "build-gcc_x64_relwithdebinfo",
+      "inherits": "build-base",
+      "configurePreset": "gcc_x64_relwithdebinfo",
+      "displayName": "Build gcc_x64_relwithdebinfo",
+      "hidden": true
+    },
+    {
+      "name": "build-gcc_x64_release",
+      "inherits": "build-base",
+      "configurePreset": "gcc_x64_release",
+      "displayName": "Build gcc_x64_release",
+      "hidden": true
+    },
+    {
+      "name": "build-gcc_x64_minsizerel",
+      "inherits": "build-base",
+      "configurePreset": "gcc_x64_minsizerel",
+      "displayName": "Build gcc_x64_minsizerel",
+      "hidden": true
+    },
+    {
+      "name": "build-clang-cl_x64_debug",
+      "inherits": "build-base",
+      "configurePreset": "clang-cl_x64_debug",
+      "displayName": "Build clang-cl_x64_debug",
+      "hidden": false
+    },
+    {
+      "name": "build-clang-cl_x64_relwithdebinfo",
+      "inherits": "build-base",
+      "configurePreset": "clang-cl_x64_relwithdebinfo",
+      "displayName": "Build clang-cl_x64_relwithdebinfo",
+      "hidden": true
+    },
+    {
+      "name": "build-clang-cl_x64_release",
+      "inherits": "build-base",
+      "configurePreset": "clang-cl_x64_release",
+      "displayName": "Build clang-cl_x64_release",
+      "hidden": false
+    },
+    {
+      "name": "build-clang-cl_x64_minsizerel",
+      "inherits": "build-base",
+      "configurePreset": "clang-cl_x64_minsizerel",
+      "displayName": "Build clang-cl_x64_minsizerel",
+      "hidden": true
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "test-msvc_x64_debug",
+      "inherits": "test-base",
+      "configurePreset": "msvc_x64_debug",
+      "displayName": "Test msvc_x64_debug",
+      "hidden": false
+    },
+    {
+      "name": "test-msvc_x64_relwithdebinfo",
+      "inherits": "test-base",
+      "configurePreset": "msvc_x64_relwithdebinfo",
+      "displayName": "Test msvc_x64_relwithdebinfo",
+      "hidden": true
+    },
+    {
+      "name": "test-msvc_x64_release",
+      "inherits": "test-base",
+      "configurePreset": "msvc_x64_release",
+      "displayName": "Test msvc_x64_release",
+      "hidden": false
+    },
+    {
+      "name": "test-msvc_x64_minsizerel",
+      "inherits": "test-base",
+      "configurePreset": "msvc_x64_minsizerel",
+      "displayName": "Test msvc_x64_minsizerel",
+      "hidden": true
+    },
+    {
+      "name": "test-clang_x64_debug",
+      "inherits": "test-base",
+      "configurePreset": "clang_x64_debug",
+      "displayName": "Test clang_x64_debug",
+      "hidden": true
+    },
+    {
+      "name": "test-clang_x64_relwithdebinfo",
+      "inherits": "test-base",
+      "configurePreset": "clang_x64_relwithdebinfo",
+      "displayName": "Test clang_x64_relwithdebinfo",
+      "hidden": true
+    },
+    {
+      "name": "test-clang_x64_release",
+      "inherits": "test-base",
+      "configurePreset": "clang_x64_release",
+      "displayName": "Test clang_x64_release",
+      "hidden": true
+    },
+    {
+      "name": "test-clang_x64_minsizerel",
+      "inherits": "test-base",
+      "configurePreset": "clang_x64_minsizerel",
+      "displayName": "Test clang_x64_minsizerel",
+      "hidden": true
+    },
+    {
+      "name": "test-gcc_x64_debug",
+      "inherits": "test-base",
+      "configurePreset": "gcc_x64_debug",
+      "displayName": "Test gcc_x64_debug",
+      "hidden": true
+    },
+    {
+      "name": "test-gcc_x64_relwithdebinfo",
+      "inherits": "test-base",
+      "configurePreset": "gcc_x64_relwithdebinfo",
+      "displayName": "Test gcc_x64_relwithdebinfo",
+      "hidden": true
+    },
+    {
+      "name": "test-gcc_x64_release",
+      "inherits": "test-base",
+      "configurePreset": "gcc_x64_release",
+      "displayName": "Test gcc_x64_release",
+      "hidden": true
+    },
+    {
+      "name": "test-gcc_x64_minsizerel",
+      "inherits": "test-base",
+      "configurePreset": "gcc_x64_minsizerel",
+      "displayName": "Test gcc_x64_minsizerel",
+      "hidden": true
+    },
+    {
+      "name": "test-clang-cl_x64_debug",
+      "inherits": "test-base",
+      "configurePreset": "clang-cl_x64_debug",
+      "displayName": "Test clang-cl_x64_debug",
+      "hidden": false
+    },
+    {
+      "name": "test-clang-cl_x64_relwithdebinfo",
+      "inherits": "test-base",
+      "configurePreset": "clang-cl_x64_relwithdebinfo",
+      "displayName": "Test clang-cl_x64_relwithdebinfo",
+      "hidden": true
+    },
+    {
+      "name": "test-clang-cl_x64_release",
+      "inherits": "test-base",
+      "configurePreset": "clang-cl_x64_release",
+      "displayName": "Test clang-cl_x64_release",
+      "hidden": false
+    },
+    {
+      "name": "test-clang-cl_x64_minsizerel",
+      "inherits": "test-base",
+      "configurePreset": "clang-cl_x64_minsizerel",
+      "displayName": "Test clang-cl_x64_minsizerel",
+      "hidden": true
+    }
+  ]
+}

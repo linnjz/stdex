@@ -1,0 +1,28 @@
+# 1. pip install pre-commit
+# 2. Run "pre-commit install" in your project's root directory
+# 3. Manual full check (optional): pre-commit run --all-files
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0                        # python > 3.9
+    hooks:
+      - id: fix-byte-order-marker      # Strip UTF-8 byte order marker (BOM)
+      - id: mixed-line-ending          # Normalize or check mixed line endings
+        args: [--fix=lf]
+      - id: trailing-whitespace        # Remove trailing whitespace at the end of lines
+      - id: end-of-file-fixer          # Ensure file ends with exactly one newline
+      - id: check-yaml                 # Validate YAML syntax
+      - id: check-toml                 # Validate TOML syntax
+      - id: check-json                 # Validate JSON syntax
+        exclude: ^(\.vscode/(settings|semantic-rules)\.json|template/(\.vscode/settings\.json|CMakePresets\.json))$
+      #- id: pretty-format-json         # Pretty-print JSON (sort keys, indent); use --autofix, --no-sort-keys, --top-keys
+      #  args: [--no-sort-keys]
+      #- id: check-added-large-files    # Block large files (default 500kB; tune via --maxkb)
+      #  args: ['--maxkb=1000']
+      #  exclude: \.(png|jpg|jpeg|gif|ico|pdf|zip)$
+      #- id: no-commit-to-branch        # Prevent direct commits to protected branches (default: main/master)
+      - id: check-merge-conflict       # Detect leftover merge conflict markers
+      - id: detect-private-key         # Detect leaked private keys
+      - id: detect-aws-credentials     # Detect leaked AWS credentials
+        args: ['--allow-missing-credentials']
+      - id: requirements-txt-fixer     # Sort requirements.txt and drop bogus pkg-resources
+      - id: debug-statements           # Detect leftover debug statements (breakpoint(), pdb)
