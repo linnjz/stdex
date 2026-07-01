@@ -1,0 +1,3 @@
+[submodule "cmake-scaffold"]
+	path = third_party/cmake-scaffold
+	url = https://github.com/linnjz/cmake-scaffold
