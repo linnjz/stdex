@@ -45,3 +45,5 @@ Design references (no code copied)
   (ucrt/malloc.h `_malloca` / `_freea`, `_ALLOCA_S_THRESHOLD`,
   `_MarkAllocaS`, `_MallocaComputeSize`).
   Copyright (c) Microsoft Corporation.
+
+  include/fixed_string.hpp follows P3094R5 ("std::basic_fixed_string").
