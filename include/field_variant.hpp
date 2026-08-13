@@ -155,12 +155,15 @@ struct storage_meta
   }();
   static constexpr size_t tag_bits = metadata.tag_bits;
   static constexpr size_t tag_mask = tag_bits ? (1uz << tag_bits) - 1 : 0;
+  // niche opt-in (like map::is_transparent): declare using is_niche = void; inside the user type to explicitly enable the niche optimization,
+  // Disabled by default, falls back to the tagged version. A type alias is not a data member, so reflection and layout are unaffected and a requires check suffices.
+  static constexpr bool niche_opt_in = requires { typename T::is_niche; };
   // Reference niche: all reference members (adapted pointers are forced non-null, so null is freed) && enough alignment bits (bits=0 also works for a single member)
   static constexpr bool niche_capable =
-      metadata.is_all_ref && (member_count <= (1uz << tag_bits));
+      metadata.is_all_ref && (member_count <= (1uz << tag_bits)) && niche_opt_in;
   // bool niche: exactly 1 bool member + remaining empty classes; encoding space bool 2 states + 1 state per empty variant + disengaged 1 state <= 256
   static constexpr bool niche_bool_capable =
-      metadata.bool_cnt == 1 && (2 + metadata.empty_cnt + 1 <= 256);
+      metadata.bool_cnt == 1 && (2 + metadata.empty_cnt + 1 <= 256) && niche_opt_in;
 };
 
 // ============ Primary template only declared; constrained specializations are selected exclusively by niche_capable ============
