@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <array>
 #include <bit>
 #include <cassert>
 #include <cstddef>
@@ -143,15 +144,35 @@ struct storage_meta
     return all_ref && (member_count <= (1uz << tag_bits));
   }();
   static constexpr size_t tag_mask = tag_bits ? (1uz << tag_bits) - 1 : 0;
+
+  // ---- bool niche check (Rust semantics): exactly 1 bool member + all remaining members empty ----
+  // bool lends only its {0,1} intrinsic values (never shifted by variant index, overlapping ranges are indistinguishable):
+  //   bool member = 0/1 (valid bool representation, get can return a real bool&); j-th empty variant = 2+j; disengaged = member_count+1
+  // Two bool variants both occupy {0,1} -> overlap -> cannot niche, fall back to the tagged version
+  static constexpr bool niche_bool_capable = [] consteval noexcept {
+    size_t bool_cnt = 0, empty_cnt = 0;
+    template for (constexpr auto I : std::views::iota(0zu, member_count)) {
+      using member_plain_t = std::remove_cvref_t<member_type<I>>;
+      if constexpr (std::is_same_v<member_plain_t, bool>) {
+        ++bool_cnt;
+      } else if constexpr (std::is_empty_v<member_plain_t>) {
+        ++empty_cnt;
+      } else {
+        return false;
+      }
+    }
+    // Encoding space: bool 2 states + 1 state per empty variant + disengaged 1 state <= 256 -> member count <= 254
+    return bool_cnt == 1 && (2 + empty_cnt + 1 <= 256);
+  }();
 };
 
 // ============ Primary template only declared; constrained specializations are selected exclusively by niche_capable ============
 template <class T>
 struct storage_base;
 
-// ---- General version: byte array + separate tag (fallback when members include value types/plain pointers/insufficient alignment bits) ----
+// ---- General version: byte array + separate tag (fallback when members include value types/plain pointers/insufficient alignment bits/multiple bools) ----
 template <class T>
-  requires (!storage_meta<T>::niche_capable)
+  requires (!storage_meta<T>::niche_capable && !storage_meta<T>::niche_bool_capable)
 struct storage_base<T> : storage_meta<T>
 {
   using base = storage_meta<T>;
@@ -288,6 +309,95 @@ struct storage_base<T> : storage_meta<T>
     static_assert(I < member_count, "Index out of range");
     assert(index() == I && "destroy: member is not the active one");
     slot = 0;                                                 // reference members have no destructor, setting 0 means disengaged
+  }
+#pragma endregion
+};
+
+// ---- bool niche version: exactly 1 bool member + remaining empty classes, 1-byte slot, no tag field ----
+// Encoding: bool member = 0/1 (valid bool object representation, get returns a writable real bool&); j-th empty variant = 2+j; disengaged = member_count+1
+// bool value range never shifts with the variant index (Rust semantics): two bool variants overlap -> cannot niche, fall back to the tagged version
+template <class T>
+  requires (storage_meta<T>::niche_bool_capable)
+struct storage_base<T> : storage_meta<T>
+{
+  using base = storage_meta<T>;
+  static constexpr size_t member_count = base::member_count;
+  template <size_t I>
+  using member_type = typename base::template member_type<I>;
+
+  // bool member index (check guarantees exactly 1); empty-variant member order table (numbered in order of appearance, for index() reverse lookup)
+  static constexpr size_t bool_index = [] consteval noexcept {
+    size_t idx = 0;
+    template for (constexpr auto I : std::views::iota(0zu, member_count)) {
+      if constexpr (std::is_same_v<std::remove_cvref_t<member_type<I>>, bool>) { idx = I; }
+    }
+    return idx;
+  }();
+  static constexpr auto empty_members = [] consteval noexcept {
+    std::array<size_t, member_count> arr{};
+    size_t j = 0;
+    template for (constexpr auto I : std::views::iota(0zu, member_count)) {
+      if constexpr (!std::is_same_v<std::remove_cvref_t<member_type<I>>, bool>) { arr[j++] = I; }
+    }
+    return arr;
+  }();
+  static constexpr unsigned char disengaged = static_cast<unsigned char>(member_count + 1);
+
+  // Read/write unsigned char directly: when the bool member is engaged a bool object is created via construct_at (byte always 0/1, never violates bool value rules)
+  unsigned char slot = disengaged;
+
+#pragma region
+  constexpr std::size_t index() const noexcept {
+    // 0/1 -> bool variant; 2..k -> empty variants (the (s-2)-th); k+1 -> disengaged (== member_count)
+    if (slot <= 1) { return bool_index; }
+    if (slot <= member_count) { return empty_members[slot - 2]; }
+    return member_count;
+  }
+
+  constexpr bool has_value() const noexcept {
+    return slot != disengaged;
+  }
+
+  template <size_t I>
+  constexpr decltype(auto) get(this auto &&self) noexcept {
+    static_assert(I < member_count, "Index out of range");
+    assert(self.index() == I && "get: member is not the active one");
+    if constexpr (I == bool_index) {
+      // Bytes 0/1 are valid bool objects (created by construct_at), return a writable real reference; const does not propagate to the stored object
+      using self_t = std::remove_reference_t<decltype(self)>;
+      using bool_ptr_t = std::conditional_t<std::is_const_v<self_t>, const bool *, bool *>;
+      return std::forward_like<decltype(self)>(*reinterpret_cast<bool_ptr_t>(&self.slot));
+    } else {
+      // Empty members have no object to reference: return by value (stateless, reads/writes meaningless; like Rust unit variants)
+      return std::remove_cvref_t<member_type<I>>{};
+    }
+  }
+
+  template <size_t I, class... Args>
+  constexpr decltype(auto) construct(Args&&...args) noexcept {
+    static_assert(I < member_count, "Index out of range");
+    assert(!has_value() && "construct: storage already engaged");
+    if constexpr (I == bool_index) {
+      std::construct_at(reinterpret_cast<bool *>(&slot), std::forward<Args>(args)...);
+    } else {
+      // Empty variants (Rust unit semantics): no object, write the code byte directly
+      static_assert(sizeof...(Args) == 0,
+                    "construct for an empty member requires no arguments");
+      size_t j = 0;
+      while (empty_members[j] != I) { ++j; }
+      slot = static_cast<unsigned char>(2 + j);
+    }
+    return (*this).template get<I>();
+  }
+
+  template <size_t I>
+  constexpr void destroy() noexcept {
+    static_assert(I < member_count, "Index out of range");
+    assert(index() == I && "destroy: member is not the active one");
+    if constexpr (I == bool_index) {
+      std::destroy_at(reinterpret_cast<bool *>(&slot));       // bool is trivially destructible, only ends the lifetime
+    }
+    slot = disengaged;
   }
 #pragma endregion
 };
