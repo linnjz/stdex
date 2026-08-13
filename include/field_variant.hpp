@@ -165,14 +165,8 @@ struct storage_meta
   // bool niche: exactly 1 bool member + remaining empty classes; encoding space bool 2 states + 1 state per empty variant + disengaged 1 state <= 256
   static constexpr bool niche_bool_capable =
       metadata.bool_cnt == 1 && (2 + metadata.empty_cnt + 1 <= 256) && niche_opt_in;
-      
-  constexpr size_t size() const noexcept {
-    return member_count;
-  }
-
-  // Find the unique member index by type (for get<U>): compare [cvref]U against tuple members via remove_cvref;
-  // Return the member_count sentinel on no match or multiple matches. Standard metaprogramming: convert reflected member types into
-  // a std::tuple<...> type container (declared only to obtain types, no variable defined), decided by a fold expression.
+  
+  // Type mapping
   template <size_t... Is>
   static auto member_tuple_impl(std::index_sequence<Is...>) -> std::tuple<member_type<Is>...>;
   using member_types = decltype(member_tuple_impl(std::make_index_sequence<member_count>{}));
@@ -183,8 +177,7 @@ struct storage_meta
   template <class U, class... Ts>
   struct index_of_impl<U, std::tuple<Ts...>> {
     // Exact match: U must equal some member type exactly (including cvref), e.g. int& matches an int& member, int matches an int value member, const int& matches a const int& member
-    static constexpr size_t count =
-        (size_t{std::is_same_v<U, Ts>} + ...);
+    static constexpr size_t count = (size_t{std::is_same_v<U, Ts>} + ...);
     template <size_t... Is>
     static constexpr size_t get_index(std::index_sequence<Is...>) noexcept {
       size_t idx = member_count;
@@ -198,7 +191,25 @@ struct storage_meta
 
   template <class U>
   static constexpr size_t index_of = index_of_impl<U, member_types>::value;
+
+  // Whether the type list contains an exact match for U (including cvref); multiple matches (e.g. Amb{int a; int b;}) also return true
+  template <class U>
+  static constexpr bool has_member_type = index_of_impl<U, member_types>::count >= 1;
+
+#pragma region
+  constexpr size_t size() const noexcept {
+    return member_count;
+  }
+  
+  constexpr size_t npos() const noexcept {
+    return member_count;
+  }
+#pragma endregion
 };
+
+// Helper alias: get the I-th data member type of T (matching tuple_element_t style: index first, type second)
+template <size_t I, class T>
+using member_type_at = typename storage_meta<T>::template member_type<I>;
 
 // ============ Primary template only declared; constrained specializations are selected exclusively by niche_capable ============
 template <class T>
@@ -250,12 +261,30 @@ struct storage_base<T> : storage_meta<T>
     }
   }
 
-  // Get by type (like variant::get<T>, forwards to indexed get); U must uniquely match one member (compared via remove_cvref)
   template <class U>
   constexpr decltype(auto) get(this auto &&self) noexcept {
     static_assert(base::template index_of<U> != member_count,
                   "get<U>: U must match exactly one member type");
     return self.template get<base::template index_of<U>>();
+  }
+
+  // get_if<I>: when engaged and index==I return a pointer to the get<I>() result, otherwise nullptr;
+  // Return type propagates const from self (const object -> const M*); empty members have no storage to point to, rejected at compile time
+  template <size_t I>
+  constexpr auto get_if(this auto &&self) noexcept {
+    static_assert(I < member_count, "Index out of range");
+    static_assert(!std::is_empty_v<std::remove_reference_t<member_type<I>>>,
+                  "get_if: empty members have no addressable storage; use get<I>()");
+    using pointer = std::add_pointer_t<decltype(self.template get<I>())>;
+    if (self.index() != I) return pointer{nullptr};
+    return std::addressof(self.template get<I>());
+  }
+
+  template <class U>
+  constexpr auto get_if(this auto &&self) noexcept {
+    static_assert(base::template index_of<U> != member_count,
+                  "get_if<U>: U must match exactly one member type");
+    return self.template get_if<base::template index_of<U>>();
   }
 
   template <size_t I, class... Args>
@@ -331,12 +360,27 @@ struct storage_base<T> : storage_meta<T>
     return *static_cast<std::remove_reference_t<member_type<I>> *>(addr);
   }
 
-  // Get by type (like variant::get<T>, forwards to indexed get); U must uniquely match one member (compared via remove_cvref)
   template <class U>
   constexpr decltype(auto) get(this auto &&self) noexcept {
     static_assert(base::template index_of<U> != member_count,
                   "get<U>: U must match exactly one member type");
     return self.template get<base::template index_of<U>>();
+  }
+
+  // get_if<I>: when engaged and index==I return a pointer to the get<I>() result, otherwise nullptr
+  template <size_t I>
+  constexpr auto get_if(this auto &&self) noexcept {
+    static_assert(I < member_count, "Index out of range");
+    using pointer = std::add_pointer_t<decltype(self.template get<I>())>;
+    if (self.index() != I) return pointer{nullptr};
+    return std::addressof(self.template get<I>());
+  }
+
+  template <class U>
+  constexpr auto get_if(this auto &&self) noexcept {
+    static_assert(base::template index_of<U> != member_count,
+                  "get_if<U>: U must match exactly one member type");
+    return self.template get_if<base::template index_of<U>>();
   }
 
   template <size_t I, class... Args>
@@ -412,12 +456,30 @@ struct storage_base<T> : storage_meta<T>
     }
   }
 
-  // Get by type (like variant::get<T>, forwards to indexed get); U must uniquely match one member (compared via remove_cvref)
   template <class U>
   constexpr decltype(auto) get(this auto &&self) noexcept {
     static_assert(base::template index_of<U> != member_count,
                   "get<U>: U must match exactly one member type");
     return self.template get<base::template index_of<U>>();
+  }
+
+  // get_if<I>: when engaged and index==I return a pointer to the get<I>() result, otherwise nullptr;
+  // Empty members are returned by value with no storage to point to, rejected at compile time
+  template <size_t I>
+  constexpr auto get_if(this auto &&self) noexcept {
+    static_assert(I < member_count, "Index out of range");
+    static_assert(I == bool_index,
+                  "get_if: empty members have no addressable storage; use get<I>()");
+    using pointer = std::add_pointer_t<decltype(self.template get<I>())>;
+    if (self.index() != I) return pointer{nullptr};
+    return std::addressof(self.template get<I>());
+  }
+
+  template <class U>
+  constexpr auto get_if(this auto &&self) noexcept {
+    static_assert(base::template index_of<U> != member_count,
+                  "get_if<U>: U must match exactly one member type");
+    return self.template get_if<base::template index_of<U>>();
   }
 
   template <size_t I, class... Args>
