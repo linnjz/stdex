@@ -16,9 +16,11 @@
 
 #pragma once
 
+#include <bit>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <meta>
 #include <ranges>
@@ -33,16 +35,18 @@ consteval bool is_pod(std::meta::info type_info) noexcept {
          std::meta::is_trivially_default_constructible_type(type_info);
 }
 
+// ============ Shared metadata: run reflection once, share across both layouts ============
 template <class T>
-struct storage_base 
+struct storage_meta 
 {
   static constexpr auto nonstatic_data_members {
+    // unchecked() is the "no access checking" context, can access private/protected members;
+    // access_context::current() filters by the "point of evaluation", evaluating inside a class template would miss inaccessible members
     std::define_static_array(std::meta::nonstatic_data_members_of(^^T, std::meta::access_context::unchecked()))
   };
   template<size_t I>
   using member_type = typename [: std::meta::type_of(nonstatic_data_members[I]) :];
-  // using member_type = decltype(std::declval<T &>().[:nonstatic_data_members[I]:]) // Affected by access control
-  
+
   // Storage adaptation: a byte array cannot hold reference members directly; modeled on libc++ optional<T&>
   // (optional_storage_base<_Tp, is_reference_v<_Tp>> partial specialization: raw_type* value_)
   // Store M& as a "pointer to the referenced object".
@@ -119,22 +123,63 @@ struct storage_base
     return traits;
   }();
 
+  // ---- niche check: all reference members (adapted pointers are forced non-null, so null is freed) && enough alignment bits ----
+  // Encoding: stored value = real address | variant index I; disengaged = 0
+  // Borrowed bits = min_i(log2(alignof(T_i))), requiring 2^bits >= member count (bits=0 also works for a single member)
+  static constexpr size_t tag_bits = [] consteval noexcept {
+    size_t bits = std::numeric_limits<size_t>::digits;
+    template for (constexpr auto I : std::views::iota(0zu, member_count)) {
+      // An object address is always divisible by its alignof (alignof is a power of two), so the low log2(alignof) bits are always 0
+      bits = std::min<size_t>(bits, static_cast<size_t>(std::countr_zero(
+          alignof(std::remove_reference_t<member_type<I>>))));
+    }
+    return bits;
+  }();
+  static constexpr bool niche_capable = [] consteval noexcept {
+    bool all_ref = true;
+    template for (constexpr auto I : std::views::iota(0zu, member_count)) {
+      all_ref = all_ref && std::is_reference_v<member_type<I>>;
+    }
+    return all_ref && (member_count <= (1uz << tag_bits));
+  }();
+  static constexpr size_t tag_mask = tag_bits ? (1uz << tag_bits) - 1 : 0;
+};
+
+// ============ Primary template only declared; constrained specializations are selected exclusively by niche_capable ============
+template <class T>
+struct storage_base;
+
+// ---- General version: byte array + separate tag (fallback when members include value types/plain pointers/insufficient alignment bits) ----
+template <class T>
+  requires (!storage_meta<T>::niche_capable)
+struct storage_base<T> : storage_meta<T>
+{
+  using base = storage_meta<T>;
+  using tag_type = typename base::tag_type;
+  static constexpr size_t member_count = base::member_count;
+  static constexpr auto storage_traits = base::storage_traits;
+  template <size_t I>
+  using member_type = typename base::template member_type<I>;
+  template <size_t I>
+  using storage_type = typename base::template storage_type<I>;
+
   alignas(storage_traits.max_align) std::byte storage[storage_traits.max_size];
   tag_type tag { static_cast<tag_type>(member_count) };
 
-#pragma region 
+#pragma region
   constexpr std::size_t index() const noexcept {
     return static_cast<size_t>(tag);
   }
-  
+
   constexpr bool has_value() const noexcept {
     return static_cast<size_t>(tag) != member_count;
   }
-  
+
   template <size_t I>
   constexpr decltype(auto) get(this auto &&self) noexcept {
     static_assert(I < member_count, "Index out of range");
     assert(self.index() == I && "get: member is not the active one");
+    // Strip only the reference, keep cv: is_const must see the const of the object (remove_cvref would drop const)
     using self_t = std::remove_reference_t<decltype(self)>;
     using member_t = member_type<I>;
     using member_plain_t = std::remove_reference_t<member_t>; // preserve the member's own cv (e.g. const int)
@@ -149,7 +194,7 @@ struct storage_base
       return std::forward_like<decltype(self)>(*reinterpret_cast<member_ptr_t>(self.storage));
     }
   }
-  
+
   template <size_t I, class... Args>
   constexpr decltype(auto) construct(Args&&...args) noexcept(
       std::is_reference_v<member_type<I>> ||
@@ -172,7 +217,7 @@ struct storage_base
     tag = static_cast<tag_type>(I);
     return (*this).template get<I>();
   }
-  
+
   template <size_t I>
   constexpr void destroy() noexcept(std::is_nothrow_destructible_v<storage_type<I>>) {
     static_assert(I < member_count, "Index out of range");
@@ -184,7 +229,67 @@ struct storage_base
     }
     tag = static_cast<tag_type>(member_count);
   }
-#pragma endregion 
+#pragma endregion
+};
+
+// ---- niche version: all reference members, 8-byte uintptr_t slot, no tag field ----
+// Stored value = real address | I (low tag_bits bits always 0, guaranteed by alignment); disengaged = 0
+template <class T>
+  requires (storage_meta<T>::niche_capable)
+struct storage_base<T> : storage_meta<T>
+{
+  using base = storage_meta<T>;
+  static constexpr size_t member_count = base::member_count;
+  static constexpr size_t tag_mask = base::tag_mask;
+  template <size_t I>
+  using member_type = typename base::template member_type<I>;
+
+  // Read/write the uintptr_t object directly: no strict-aliasing issue (avoids the UB of reinterpret_cast<std::byte*->uintptr_t*>)
+  std::uintptr_t slot = 0;
+
+#pragma region
+  constexpr std::size_t index() const noexcept {
+    // For a single member tag_mask=0: engaged always returns 0; disengaged returns member_count
+    return slot == 0 ? member_count
+                       : static_cast<size_t>(slot & tag_mask);
+  }
+
+  constexpr bool has_value() const noexcept {
+    return slot != 0;
+  }
+
+  template <size_t I>
+  constexpr decltype(auto) get(this auto &&self) noexcept {
+    static_assert(I < member_count, "Index out of range");
+    assert(self.index() == I && "get: member is not the active one");
+    auto stored = self.slot;                                  // reading the slot value only, even for a const object
+    auto addr = reinterpret_cast<void *>(stored & ~tag_mask); // 1 AND to clear the bits and restore the address
+    // const does not propagate through reference members: return M& (like optional<T&>::get() const returning value_type&)
+    return *static_cast<std::remove_reference_t<member_type<I>> *>(addr);
+  }
+
+  template <size_t I, class... Args>
+  constexpr decltype(auto) construct(Args&&...args) noexcept {
+    static_assert(I < member_count, "Index out of range");
+    assert(!has_value() && "construct: storage already engaged");
+    // Reference members: like optional<T&>, store the address after binding the argument; accept only lvalues to avoid dangling
+    static_assert(sizeof...(Args) == 1 && (std::is_lvalue_reference_v<Args> && ...),
+                  "construct for a reference member requires exactly one lvalue argument");
+    static_assert(!(std::reference_constructs_from_temporary_v<member_type<I>, Args> && ...),
+                  "construct for a reference member would bind to a temporary");
+    auto addr = reinterpret_cast<std::uintptr_t>(std::addressof(std::forward<Args>(args)...));
+    assert((addr & tag_mask) == 0);                           // alignment guarantee, defensive check
+    slot = addr | I;                                          // 1 OR to write the variant index
+    return (*this).template get<I>();
+  }
+
+  template <size_t I>
+  constexpr void destroy() noexcept {
+    static_assert(I < member_count, "Index out of range");
+    assert(index() == I && "destroy: member is not the active one");
+    slot = 0;                                                 // reference members have no destructor, setting 0 means disengaged
+  }
+#pragma endregion
 };
 
 } // namespace stdex
