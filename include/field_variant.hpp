@@ -94,7 +94,8 @@ struct storage_meta
       size_t bool_cnt = 0;                                   // bool niche: bool member count
       size_t empty_cnt = 0;                                  // bool niche: empty member count
       size_t bool_index = 0;                                 // bool niche: bool member index
-      std::array<size_t, member_count> empty_members{};    // bool niche: empty-variant member order table
+      std::array<size_t, member_count> empty_members{};    // bool niche: empty-variant member order table (value-to-member reverse lookup)
+      std::array<unsigned char, member_count> empty_code{}; // bool niche: member-to-code forward table (construct O(1))
     } m;
     template for (constexpr auto I : std::views::iota(0zu, member_count)) {
       using storage_t = storage_type<I>;        // reference members adapt to pointers
@@ -121,7 +122,9 @@ struct storage_meta
         ++m.bool_cnt;
         m.bool_index = I;
       } else if constexpr (std::is_empty_v<member_plain_t>) {
-        m.empty_members[m.empty_cnt++] = I;
+        m.empty_members[m.empty_cnt] = I;
+        m.empty_code[I] = static_cast<unsigned char>(2 + m.empty_cnt); // current count is the ordinal
+        ++m.empty_cnt;
       }
     }
     // Empty classes: zero-length arrays are illegal, degrade to 1 byte
@@ -319,10 +322,11 @@ struct storage_base<T> : storage_meta<T>
   template <size_t I>
   using member_type = typename base::template member_type<I>;
 
-  // bool member index (check guarantees exactly 1) and empty-variant member order table (numbered in order of appearance, for index() reverse lookup)
+  // bool member index (check guarantees exactly 1) and empty-variant member order/forward code tables (for index() reverse lookup and construct O(1))
   // Both taken directly from the base class metadata computed in one template for, no longer expanding the loop repeatedly
   static constexpr size_t bool_index = base::metadata.bool_index;
   static constexpr auto empty_members = base::metadata.empty_members;
+  static constexpr auto empty_code = base::metadata.empty_code;
   static constexpr unsigned char disengaged = static_cast<unsigned char>(member_count + 1);
 
   // Read/write unsigned char directly: when the bool member is engaged a bool object is created via construct_at (byte always 0/1, never violates bool value rules)
@@ -362,12 +366,10 @@ struct storage_base<T> : storage_meta<T>
     if constexpr (I == bool_index) {
       std::construct_at(reinterpret_cast<bool *>(&slot), std::forward<Args>(args)...);
     } else {
-      // Empty variants (Rust unit semantics): no object, write the code byte directly
+      // Empty variants (Rust unit semantics): no object, write the code byte directly; I is a compile-time constant, so the forward-table index folds to a constant
       static_assert(sizeof...(Args) == 0,
                     "construct for an empty member requires no arguments");
-      size_t j = 0;
-      while (empty_members[j] != I) { ++j; }
-      slot = static_cast<unsigned char>(2 + j);
+      slot = empty_code[I];
     }
     return (*this).template get<I>();
   }
