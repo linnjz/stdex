@@ -25,6 +25,7 @@
 #include <memory>
 #include <meta>
 #include <ranges>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 
@@ -164,6 +165,39 @@ struct storage_meta
   // bool niche: exactly 1 bool member + remaining empty classes; encoding space bool 2 states + 1 state per empty variant + disengaged 1 state <= 256
   static constexpr bool niche_bool_capable =
       metadata.bool_cnt == 1 && (2 + metadata.empty_cnt + 1 <= 256) && niche_opt_in;
+      
+  constexpr size_t size() const noexcept {
+    return member_count;
+  }
+
+  // Find the unique member index by type (for get<U>): compare [cvref]U against tuple members via remove_cvref;
+  // Return the member_count sentinel on no match or multiple matches. Standard metaprogramming: convert reflected member types into
+  // a std::tuple<...> type container (declared only to obtain types, no variable defined), decided by a fold expression.
+  template <size_t... Is>
+  static auto member_tuple_impl(std::index_sequence<Is...>) -> std::tuple<member_type<Is>...>;
+  using member_types = decltype(member_tuple_impl(std::make_index_sequence<member_count>{}));
+
+  template <class U, class Tuple>
+  struct index_of_impl;
+
+  template <class U, class... Ts>
+  struct index_of_impl<U, std::tuple<Ts...>> {
+    // Exact match: U must equal some member type exactly (including cvref), e.g. int& matches an int& member, int matches an int value member, const int& matches a const int& member
+    static constexpr size_t count =
+        (size_t{std::is_same_v<U, Ts>} + ...);
+    template <size_t... Is>
+    static constexpr size_t get_index(std::index_sequence<Is...>) noexcept {
+      size_t idx = member_count;
+      ((std::is_same_v<U, Ts> ? (idx = Is) : 0), ...);
+      return idx;
+    }
+    static constexpr size_t value = count == 1
+        ? get_index(std::make_index_sequence<sizeof...(Ts)>{})
+        : member_count;
+  };
+
+  template <class U>
+  static constexpr size_t index_of = index_of_impl<U, member_types>::value;
 };
 
 // ============ Primary template only declared; constrained specializations are selected exclusively by niche_capable ============
@@ -214,6 +248,14 @@ struct storage_base<T> : storage_meta<T>
       using member_ptr_t = std::conditional_t<std::is_const_v<self_t>, member_plain_t const *, member_plain_t *>;
       return std::forward_like<decltype(self)>(*reinterpret_cast<member_ptr_t>(self.storage));
     }
+  }
+
+  // Get by type (like variant::get<T>, forwards to indexed get); U must uniquely match one member (compared via remove_cvref)
+  template <class U>
+  constexpr decltype(auto) get(this auto &&self) noexcept {
+    static_assert(base::template index_of<U> != member_count,
+                  "get<U>: U must match exactly one member type");
+    return self.template get<base::template index_of<U>>();
   }
 
   template <size_t I, class... Args>
@@ -289,6 +331,14 @@ struct storage_base<T> : storage_meta<T>
     return *static_cast<std::remove_reference_t<member_type<I>> *>(addr);
   }
 
+  // Get by type (like variant::get<T>, forwards to indexed get); U must uniquely match one member (compared via remove_cvref)
+  template <class U>
+  constexpr decltype(auto) get(this auto &&self) noexcept {
+    static_assert(base::template index_of<U> != member_count,
+                  "get<U>: U must match exactly one member type");
+    return self.template get<base::template index_of<U>>();
+  }
+
   template <size_t I, class... Args>
   constexpr decltype(auto) construct(Args&&...args) noexcept {
     static_assert(I < member_count, "Index out of range");
@@ -362,6 +412,14 @@ struct storage_base<T> : storage_meta<T>
     }
   }
 
+  // Get by type (like variant::get<T>, forwards to indexed get); U must uniquely match one member (compared via remove_cvref)
+  template <class U>
+  constexpr decltype(auto) get(this auto &&self) noexcept {
+    static_assert(base::template index_of<U> != member_count,
+                  "get<U>: U must match exactly one member type");
+    return self.template get<base::template index_of<U>>();
+  }
+
   template <size_t I, class... Args>
   constexpr decltype(auto) construct(Args&&...args) noexcept {
     static_assert(I < member_count, "Index out of range");
@@ -387,6 +445,7 @@ struct storage_base<T> : storage_meta<T>
     slot = disengaged;
   }
 #pragma endregion
+
 };
 
 } // namespace stdex
