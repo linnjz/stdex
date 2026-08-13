@@ -78,92 +78,86 @@ struct storage_meta
       >
   >;
 
-  static constexpr auto storage_traits = [] consteval noexcept {
-    struct storage_traits {
+  // ---- Compute all metadata in one template for: avoid expanding the loop multiple times, faster compilation ----
+  static constexpr auto metadata = [] consteval noexcept {
+    struct metadata {
       size_t max_size = 0;
       size_t max_align = 1;
-    } traits;
-    template for (constexpr auto I : std::views::iota(0zu, member_count)) {
-      if (traits.max_size < sizeof(storage_type<I>)) {
-        traits.max_size = sizeof(storage_type<I>);
-      }
-      if (traits.max_align < alignof(storage_type<I>)) { 
-        traits.max_align = alignof(storage_type<I>);
-      }
-    }
-    // Empty classes: zero-length arrays are illegal, degrade to 1 byte
-    return (traits.max_size = traits.max_size ? traits.max_size : 1, traits);
-  }();
-
-  static constexpr auto nothrow_traits = [] consteval noexcept {
-    struct nothrow_traits {
       bool are_all_mems_copy_assignment_nothrow = true;
       bool are_all_mems_copy_constructor_nothrow = true;
       bool are_all_mems_move_assignment_nothrow = true;
       bool are_all_mems_move_constructor_nothrow = true;
       bool are_all_mems_default_constructor_nothrow = true;
       bool are_all_mems_equality_comparison_nothrow = true;
-    } traits;
+      bool is_all_ref = true;                                // reference niche: all references
+      size_t tag_bits = std::numeric_limits<size_t>::digits; // borrowed bits for the reference niche
+      size_t bool_cnt = 0;                                   // bool niche: bool member count
+      size_t empty_cnt = 0;                                  // bool niche: empty member count
+      size_t bool_index = 0;                                 // bool niche: bool member index
+      std::array<size_t, member_count> empty_members{};    // bool niche: empty-variant member order table
+    } m;
     template for (constexpr auto I : std::views::iota(0zu, member_count)) {
-      using storage_t = storage_type<I>;            // operations on reference members are really pointer copies, never throw
-      using member_plain_t = std::remove_cvref_t<member_type<I>>; // comparison semantics apply to the referenced object
-      traits.are_all_mems_move_constructor_nothrow &= 
-          std::is_nothrow_move_constructible_v<storage_t>;
-      traits.are_all_mems_default_constructor_nothrow &= 
-          std::is_nothrow_default_constructible_v<storage_t>;
-      traits.are_all_mems_copy_constructor_nothrow &= 
-          std::is_nothrow_copy_constructible_v<storage_t>;
-      traits.are_all_mems_copy_assignment_nothrow &= 
-          std::is_nothrow_copy_assignable_v<storage_t>;
-      traits.are_all_mems_move_assignment_nothrow &= 
-          std::is_nothrow_move_assignable_v<storage_t>;
-      traits.are_all_mems_equality_comparison_nothrow &= 
-          std::equality_comparable<member_plain_t> && 
+      using storage_t = storage_type<I>;        // reference members adapt to pointers
+      using member_t = member_type<I>;
+      using member_plain_t = std::remove_cvref_t<member_t>;
+      // Storage size/alignment
+      if (m.max_size < sizeof(storage_t)) { m.max_size = sizeof(storage_t); }
+      if (m.max_align < alignof(storage_t)) { m.max_align = alignof(storage_t); }
+      // nothrow traits: operations on reference members are really pointer copies, never throw; comparison semantics apply to the referenced object
+      m.are_all_mems_move_constructor_nothrow &= std::is_nothrow_move_constructible_v<storage_t>;
+      m.are_all_mems_default_constructor_nothrow &= std::is_nothrow_default_constructible_v<storage_t>;
+      m.are_all_mems_copy_constructor_nothrow &= std::is_nothrow_copy_constructible_v<storage_t>;
+      m.are_all_mems_copy_assignment_nothrow &= std::is_nothrow_copy_assignable_v<storage_t>;
+      m.are_all_mems_move_assignment_nothrow &= std::is_nothrow_move_assignable_v<storage_t>;
+      m.are_all_mems_equality_comparison_nothrow &=
+          std::equality_comparable<member_plain_t> &&
           requires(const member_plain_t& lhs, const member_plain_t& rhs) { { lhs == rhs } noexcept; };
-    }
-    return traits;
-  }();
-
-  // ---- niche check: all reference members (adapted pointers are forced non-null, so null is freed) && enough alignment bits ----
-  // Encoding: stored value = real address | variant index I; disengaged = 0
-  // Borrowed bits = min_i(log2(alignof(T_i))), requiring 2^bits >= member count (bits=0 also works for a single member)
-  static constexpr size_t tag_bits = [] consteval noexcept {
-    size_t bits = std::numeric_limits<size_t>::digits;
-    template for (constexpr auto I : std::views::iota(0zu, member_count)) {
-      // An object address is always divisible by its alignof (alignof is a power of two), so the low log2(alignof) bits are always 0
-      bits = std::min<size_t>(bits, static_cast<size_t>(std::countr_zero(
-          alignof(std::remove_reference_t<member_type<I>>))));
-    }
-    return bits;
-  }();
-  static constexpr bool niche_capable = [] consteval noexcept {
-    bool all_ref = true;
-    template for (constexpr auto I : std::views::iota(0zu, member_count)) {
-      all_ref = all_ref && std::is_reference_v<member_type<I>>;
-    }
-    return all_ref && (member_count <= (1uz << tag_bits));
-  }();
-  static constexpr size_t tag_mask = tag_bits ? (1uz << tag_bits) - 1 : 0;
-
-  // ---- bool niche check (Rust semantics): exactly 1 bool member + all remaining members empty ----
-  // bool lends only its {0,1} intrinsic values (never shifted by variant index, overlapping ranges are indistinguishable):
-  //   bool member = 0/1 (valid bool representation, get can return a real bool&); j-th empty variant = 2+j; disengaged = member_count+1
-  // Two bool variants both occupy {0,1} -> overlap -> cannot niche, fall back to the tagged version
-  static constexpr bool niche_bool_capable = [] consteval noexcept {
-    size_t bool_cnt = 0, empty_cnt = 0;
-    template for (constexpr auto I : std::views::iota(0zu, member_count)) {
-      using member_plain_t = std::remove_cvref_t<member_type<I>>;
+      m.is_all_ref = m.is_all_ref && std::is_reference_v<member_t>;
+      // Reference niche: addresses are always divisible by alignof (alignof is a power of two), low log2(alignof) bits always 0
+      m.tag_bits = std::min<size_t>(m.tag_bits, static_cast<size_t>(std::countr_zero(
+          alignof(std::remove_reference_t<member_t>))));
+      // bool niche (Rust semantics): bool lends only its {0,1} intrinsic values, overlapping ranges are indistinguishable
       if constexpr (std::is_same_v<member_plain_t, bool>) {
-        ++bool_cnt;
+        ++m.bool_cnt;
+        m.bool_index = I;
       } else if constexpr (std::is_empty_v<member_plain_t>) {
-        ++empty_cnt;
-      } else {
-        return false;
+        m.empty_members[m.empty_cnt++] = I;
       }
     }
-    // Encoding space: bool 2 states + 1 state per empty variant + disengaged 1 state <= 256 -> member count <= 254
-    return bool_cnt == 1 && (2 + empty_cnt + 1 <= 256);
+    // Empty classes: zero-length arrays are illegal, degrade to 1 byte
+    m.max_size = m.max_size ? m.max_size : 1;
+    return m;
   }();
+
+  // ---- Derived metadata (no template for, taken directly from metadata) ----
+  static constexpr auto storage_traits = [] consteval noexcept {
+    struct storage_traits { size_t max_size; size_t max_align; };
+    return storage_traits{metadata.max_size, metadata.max_align};
+  }();
+  static constexpr auto nothrow_traits = [] consteval noexcept {
+    struct nothrow_traits {
+      bool are_all_mems_copy_assignment_nothrow;
+      bool are_all_mems_copy_constructor_nothrow;
+      bool are_all_mems_move_assignment_nothrow;
+      bool are_all_mems_move_constructor_nothrow;
+      bool are_all_mems_default_constructor_nothrow;
+      bool are_all_mems_equality_comparison_nothrow;
+    };
+    return nothrow_traits{metadata.are_all_mems_copy_assignment_nothrow,
+                          metadata.are_all_mems_copy_constructor_nothrow,
+                          metadata.are_all_mems_move_assignment_nothrow,
+                          metadata.are_all_mems_move_constructor_nothrow,
+                          metadata.are_all_mems_default_constructor_nothrow,
+                          metadata.are_all_mems_equality_comparison_nothrow};
+  }();
+  static constexpr size_t tag_bits = metadata.tag_bits;
+  static constexpr size_t tag_mask = tag_bits ? (1uz << tag_bits) - 1 : 0;
+  // Reference niche: all reference members (adapted pointers are forced non-null, so null is freed) && enough alignment bits (bits=0 also works for a single member)
+  static constexpr bool niche_capable =
+      metadata.is_all_ref && (member_count <= (1uz << tag_bits));
+  // bool niche: exactly 1 bool member + remaining empty classes; encoding space bool 2 states + 1 state per empty variant + disengaged 1 state <= 256
+  static constexpr bool niche_bool_capable =
+      metadata.bool_cnt == 1 && (2 + metadata.empty_cnt + 1 <= 256);
 };
 
 // ============ Primary template only declared; constrained specializations are selected exclusively by niche_capable ============
@@ -325,22 +319,10 @@ struct storage_base<T> : storage_meta<T>
   template <size_t I>
   using member_type = typename base::template member_type<I>;
 
-  // bool member index (check guarantees exactly 1); empty-variant member order table (numbered in order of appearance, for index() reverse lookup)
-  static constexpr size_t bool_index = [] consteval noexcept {
-    size_t idx = 0;
-    template for (constexpr auto I : std::views::iota(0zu, member_count)) {
-      if constexpr (std::is_same_v<std::remove_cvref_t<member_type<I>>, bool>) { idx = I; }
-    }
-    return idx;
-  }();
-  static constexpr auto empty_members = [] consteval noexcept {
-    std::array<size_t, member_count> arr{};
-    size_t j = 0;
-    template for (constexpr auto I : std::views::iota(0zu, member_count)) {
-      if constexpr (!std::is_same_v<std::remove_cvref_t<member_type<I>>, bool>) { arr[j++] = I; }
-    }
-    return arr;
-  }();
+  // bool member index (check guarantees exactly 1) and empty-variant member order table (numbered in order of appearance, for index() reverse lookup)
+  // Both taken directly from the base class metadata computed in one template for, no longer expanding the loop repeatedly
+  static constexpr size_t bool_index = base::metadata.bool_index;
+  static constexpr auto empty_members = base::metadata.empty_members;
   static constexpr unsigned char disengaged = static_cast<unsigned char>(member_count + 1);
 
   // Read/write unsigned char directly: when the bool member is engaged a bool object is created via construct_at (byte always 0/1, never violates bool value rules)
