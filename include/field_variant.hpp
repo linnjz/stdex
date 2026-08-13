@@ -16,7 +16,14 @@
 
 #pragma once
 
+#include <cassert>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
 #include <meta>
+#include <ranges>
+#include <type_traits>
+#include <utility>
 
 
 namespace stdex { 
@@ -25,35 +32,32 @@ consteval bool is_pod(std::meta::info type_info) noexcept {
   return std::meta::is_trivially_destructible_type(type_info) ||
          std::meta::is_trivially_default_constructible_type(type_info);
 }
-// Reflect members, take the largest type for alignment, and store uniformly in bytes without a union
-// Construct every member, POD or not, with construct_at placement new
-template <class T>
-struct box 
-{
-  [[nodiscard]] constexpr decltype(auto) value(this auto &&self) noexcept {
-    using Self = std::remove_reference_t<decltype(self)>;
-    using Ptr = std::conditional_t<std::is_const_v<Self>, T const *, T *>;
-    return std::forward_like<decltype(self)>(*reinterpret_cast<Ptr>(self.buffer));
-  }
-  
-  template <class... Args>
-  constexpr T &construct(Args&&...args) noexcept(std::is_nothrow_constructible_v<T, Args...>) {
-    return *std::construct_at(reinterpret_cast<T *>(buffer), std::forward<Args>(args)...);
-  }
-  
-  constexpr void destroy() noexcept {
-    std::destroy_at(reinterpret_cast<T *>(buffer));
-  }
-  
-  alignas(T) std::byte buffer[sizeof(T)];
-};
 
 template <class T>
-struct storage_base_impl
+struct storage_base 
 {
   static constexpr auto nonstatic_data_members {
-    std::define_static_array(std::meta::nonstatic_data_members_of(^^T, std::meta::access_context::current()))
+    std::define_static_array(std::meta::nonstatic_data_members_of(^^T, std::meta::access_context::unchecked()))
   };
+  template<size_t I>
+  using member_type = typename [: std::meta::type_of(nonstatic_data_members[I]) :];
+  // using member_type = decltype(std::declval<T &>().[:nonstatic_data_members[I]:]) // Affected by access control
+  
+  // Storage adaptation: a byte array cannot hold reference members directly; modeled on libc++ optional<T&>
+  // (optional_storage_base<_Tp, is_reference_v<_Tp>> partial specialization: raw_type* value_)
+  // Store M& as a "pointer to the referenced object".
+  // Value members are stored with cv stripped (matching libc++'s remove_cv_t<value_type> value_):
+  // construct_at does not support const T* (libstdc++ implementation does void* loc = location; dropping const),
+  // const semantics are preserved by member_type at the API layer (get returns const int&, object constructed as int).
+  template <class M>
+  struct storage_of { using type = std::remove_cv_t<M>; };
+  template <class M>
+  struct storage_of<M&>  { using type = std::remove_reference_t<M>*; };
+  template <class M>
+  struct storage_of<M&&> { using type = std::remove_reference_t<M>*; };
+  template <size_t I>
+  using storage_type = typename storage_of<member_type<I>>::type;
+
   static constexpr size_t member_count = nonstatic_data_members.size();
   using tag_type = std::conditional_t<
       (member_count <= 255), 
@@ -68,7 +72,24 @@ struct storage_base_impl
           >
       >
   >;
-  
+
+  static constexpr auto storage_traits = [] consteval noexcept {
+    struct storage_traits {
+      size_t max_size = 0;
+      size_t max_align = 1;
+    } traits;
+    template for (constexpr auto I : std::views::iota(0zu, member_count)) {
+      if (traits.max_size < sizeof(storage_type<I>)) {
+        traits.max_size = sizeof(storage_type<I>);
+      }
+      if (traits.max_align < alignof(storage_type<I>)) { 
+        traits.max_align = alignof(storage_type<I>);
+      }
+    }
+    // Empty classes: zero-length arrays are illegal, degrade to 1 byte
+    return (traits.max_size = traits.max_size ? traits.max_size : 1, traits);
+  }();
+
   static constexpr auto nothrow_traits = [] consteval noexcept {
     struct nothrow_traits {
       bool are_all_mems_copy_assignment_nothrow = true;
@@ -78,27 +99,30 @@ struct storage_base_impl
       bool are_all_mems_default_constructor_nothrow = true;
       bool are_all_mems_equality_comparison_nothrow = true;
     } traits;
-    for (auto i = 0uz; i < member_count; ++i) {
-        using member_type = decltype(std::declval<T &>().[:nonstatic_data_members[i]:]);
-        using member_remove_cvref_t = std::remove_cvref_t<member_type>;
-        traits.are_all_mems_move_constructor_nothrow &= 
-            std::is_nothrow_move_constructible_v<member_remove_cvref_t>;
-        traits.are_all_mems_default_constructor_nothrow &= 
-            std::is_nothrow_default_constructible_v<member_remove_cvref_t>;
-        traits.are_all_mems_copy_constructor_nothrow &= 
-            std::is_nothrow_copy_constructible_v<member_remove_cvref_t>;
-        traits.are_all_mems_copy_assignment_nothrow &= 
-            std::is_nothrow_copy_assignable_v<member_remove_cvref_t>;
-        traits.are_all_mems_move_assignment_nothrow &= 
-            std::is_nothrow_move_assignable_v<member_remove_cvref_t>;
-        traits.are_all_mems_equality_comparison_nothrow &= 
-            std::equality_comparable<member_remove_cvref_t> && 
-                noexcept(std::declval<const member_remove_cvref_t&>() == 
-                         std::declval<const member_remove_cvref_t&>());
+    template for (constexpr auto I : std::views::iota(0zu, member_count)) {
+      using storage_t = storage_type<I>;            // operations on reference members are really pointer copies, never throw
+      using member_plain_t = std::remove_cvref_t<member_type<I>>; // comparison semantics apply to the referenced object
+      traits.are_all_mems_move_constructor_nothrow &= 
+          std::is_nothrow_move_constructible_v<storage_t>;
+      traits.are_all_mems_default_constructor_nothrow &= 
+          std::is_nothrow_default_constructible_v<storage_t>;
+      traits.are_all_mems_copy_constructor_nothrow &= 
+          std::is_nothrow_copy_constructible_v<storage_t>;
+      traits.are_all_mems_copy_assignment_nothrow &= 
+          std::is_nothrow_copy_assignable_v<storage_t>;
+      traits.are_all_mems_move_assignment_nothrow &= 
+          std::is_nothrow_move_assignable_v<storage_t>;
+      traits.are_all_mems_equality_comparison_nothrow &= 
+          std::equality_comparable<member_plain_t> && 
+          requires(const member_plain_t& lhs, const member_plain_t& rhs) { { lhs == rhs } noexcept; };
     }
     return traits;
-  };
-  
+  }();
+
+  alignas(storage_traits.max_align) std::byte storage[storage_traits.max_size];
+  tag_type tag { static_cast<tag_type>(member_count) };
+
+#pragma region 
   constexpr std::size_t index() const noexcept {
     return static_cast<size_t>(tag);
   }
@@ -110,119 +134,57 @@ struct storage_base_impl
   template <size_t I>
   constexpr decltype(auto) get(this auto &&self) noexcept {
     static_assert(I < member_count, "Index out of range");
-    if constexpr (is_pod(std::meta::type_of(nonstatic_data_members[i]))) {
-      return std::forward_like<decltype(self)>(self.storage.[:nonstatic_data_members[I]:]);
+    assert(self.index() == I && "get: member is not the active one");
+    using self_t = std::remove_reference_t<decltype(self)>;
+    using member_t = member_type<I>;
+    using member_plain_t = std::remove_reference_t<member_t>; // preserve the member's own cv (e.g. const int)
+    if constexpr (std::is_reference_v<member_t>) {
+      // Reference members: storage holds a "pointer to the referenced object", requiring double dereference;
+      // Consistent with real member access, the object's const does not propagate through reference members (like optional<T&>::get() const returning value_type&)
+      // Add const to the target pointer type to avoid reinterpret_cast casting away constness from const std::byte*
+      using storage_ptr_t = std::add_const_t<storage_type<I>> *;
+      return **reinterpret_cast<storage_ptr_t>(self.storage);
     } else {
-      return std::forward_like<decltype(self)>(self.storage.[:nonstatic_data_members[I]:].value());
+      using member_ptr_t = std::conditional_t<std::is_const_v<self_t>, member_plain_t const *, member_plain_t *>;
+      return std::forward_like<decltype(self)>(*reinterpret_cast<member_ptr_t>(self.storage));
     }
   }
   
   template <size_t I, class... Args>
   constexpr decltype(auto) construct(Args&&...args) noexcept(
-      std::is_nothrow_constructible_v<
-          std::remove_cvref_t<
-              decltype(std::declval<std::meta::type_of([:nonstatic_data_members[I]:]) &>().[:nonstatic_data_members[I]:])
-          >,
-          Args...
-      >
+      std::is_reference_v<member_type<I>> ||
+      std::is_nothrow_constructible_v<storage_type<I>, Args...>
   ) {
     static_assert(I < member_count, "Index out of range");
-    tag = static_cast<tag_type>(I);
-    if constexpr (is_pod(std::meta::type_of(nonstatic_data_members[i]))) {
-      return std::construct_at(&(storage.[:nonstatic_data_members[I]:]), std::forward<Args>(args)...);
+    assert(!has_value() && "construct: storage already engaged");
+    if constexpr (std::is_reference_v<member_type<I>>) {
+      // Reference members: like optional<T&>, store the address after binding; accept only lvalues to avoid dangling
+      static_assert(sizeof...(Args) == 1 && (std::is_lvalue_reference_v<Args> && ...),
+                    "construct for a reference member requires exactly one lvalue argument");
+      static_assert(!(std::reference_constructs_from_temporary_v<member_type<I>, Args> && ...),
+                    "construct for a reference member would bind to a temporary");
+      std::construct_at(reinterpret_cast<storage_type<I> *>(storage), std::addressof(std::forward<Args>(args)...));
     } else {
-      return storage.[:nonstatic_data_members[I]:].construct(std::forward<Args>(args)...);
+      // Value members (including const/volatile qualifiers): construct directly via placement new,
+      // cv-qualified types are valid new targets (e.g. ::new (p) const int(42))
+      std::construct_at(reinterpret_cast<storage_type<I> *>(storage), std::forward<Args>(args)...);
     }
+    tag = static_cast<tag_type>(I);
+    return (*this).template get<I>();
   }
   
   template <size_t I>
-  constexpr void destroy() noexcept {
+  constexpr void destroy() noexcept(std::is_nothrow_destructible_v<storage_type<I>>) {
     static_assert(I < member_count, "Index out of range");
-    if constexpr (!is_pod(std::meta::type_of(nonstatic_data_members[i]))) {
-      storage.[:nonstatic_data_members[I]:].destroy();
+    assert(index() == I && "destroy: member is not the active one");
+    // The adapted type of reference members is a pointer (trivially destructible), never destroying the referenced object itself
+    if constexpr (!std::is_reference_v<member_type<I>> &&
+                  !std::is_trivially_destructible_v<storage_type<I>>) {
+      std::destroy_at(reinterpret_cast<storage_type<I> *>(storage));
     }
     tag = static_cast<tag_type>(member_count);
-  }  
-   
-  union storage_type;
-  consteval { 
-    std::meta::define_aggregate(^^storage_type, [] consteval noexcept {
-      std::array<std::meta::info, member_count> members;
-      for (auto i = 0uz, i < member_count; ++i) {
-        auto type_info = std::meta::type_of(nonstatic_data_members[i]);
-        auto member_wrap_info = is_pod(type_info)
-                                ? type_info
-                                : std::meta::substitute(^^box, { type_info });
-        // 1. struct Rect {...} rect;
-        // 2. struct {...} rect;
-        members[i] = std::meta::data_member_spec(member_wrap_info, {
-          .name = std::meta::identifier_of(std::meta::has_identifier(type_info)
-                    ? type_info
-                    : nonstatic_data_members[i]);
-        });
-      }
-      return members;
-    });
   }
-  storage_type storage;
-  tag_type tag { static_cast<tag_type>(member_count) };
+#pragma endregion 
 };
 
-
-
-template <class T>
-struct storage_base 
-     : storage_base_impl<T, storage_traits<T>::count, storage_traits<T>::is_niche>
-{
-};
-  
-template <class T>
-class field_variant : public storage_base<T>
-{
-  constexpr field_variant() noexcept {
-    
-  }
-  
-  constexpr field_variant(field_variant const &other) noexcept(?) {
-    
-  }
-  
-  constexpr field_variant(field_variant &&other) noexcept {
-    
-  }
-  
-  template <class T>
-  constexpr field_variant(T&& t) noexcept(?) {
-    
-  };
-  
-  template <class T, class... Args>
-  constexpr explicit field_variant(std::in_place_type_t<T>, Args&&... args) noexcept(?) {
-    
-  };
-  
-  template <class T>
-  constexpr field_variant(T&& t) noexcept(?) {
-    
-  };
-  
-  template <class T>
-  constexpr field_variant(T&& t) noexcept(?) {
-    
-  }; 
-      
-  constexpr field_variant& operator=(field_variant const &rhs) noexcept(?) {
-    
-  }
-  
-  constexpr field_variant& operator=(field_variant &&rhs) noexcept {
-    
-  }
-  
-  template <class T>
-  field_variant& operator=(T&& t) noexcept(?) {
-    
-  };  
-}
-  
 } // namespace stdex
