@@ -206,6 +206,7 @@ struct storage_meta
     return member_count;
   }
 #pragma endregion
+
 };
 
 template <size_t I, class T>
@@ -398,8 +399,10 @@ struct storage_base<T> : storage_meta<T>
     assert(self.index() == I && "get: member is not the active one");
     using self_t = decltype(self);
     using member_unref_t = std::remove_reference_t<member_type<I>>;
+    using member_ptr_t = std::conditional_t<std::is_const_v<std::remove_reference_t<self_t>>,
+          member_unref_t const *, member_unref_t *>;
     if constexpr (I == metadata.bool_type_index) {
-      return std::forward_like<self_t>(*reinterpret_cast<member_unref_t *>(&self.slot));
+      return std::forward_like<self_t>(*reinterpret_cast<member_ptr_t>(&self.slot));
     } else {
       return member_type<I>{};
     }
@@ -482,8 +485,8 @@ public:
   constexpr field_variant() = default;
 
   // ---- destructor ----
-  ~field_variant() requires (meta::metadata.are_all_mems_trivially_destructible) = default;
-  ~field_variant() requires (!meta::metadata.are_all_mems_trivially_destructible &&
+  constexpr ~field_variant() requires (meta::metadata.are_all_mems_trivially_destructible) = default;
+  constexpr ~field_variant() requires (!meta::metadata.are_all_mems_trivially_destructible &&
                                meta::metadata.are_all_mems_destructible) {
     if (s_.has_value()) {
       at_index(s_, [&]<size_t I>(std::integral_constant<size_t, I>) 
@@ -493,7 +496,7 @@ public:
       });
     }
   }
-  ~field_variant() requires (!meta::metadata.are_all_mems_destructible) = delete;
+  constexpr ~field_variant() requires (!meta::metadata.are_all_mems_destructible) = delete;
 
   // ---- copy constructor ----
   constexpr field_variant(const field_variant&) 
@@ -631,9 +634,13 @@ public:
   constexpr std::size_t index() const noexcept { return s_.index(); }
 
   template <size_t I>
-  constexpr decltype(auto) get(this auto&& self) noexcept { return self.s_.template get<I>(); }
+  constexpr decltype(auto) get(this auto&& self) noexcept {
+    return std::forward_like<decltype(self)>(self).s_.template get<I>();
+  }
   template <class U>
-  constexpr decltype(auto) get(this auto&& self) noexcept { return self.s_.template get<U>(); }
+  constexpr decltype(auto) get(this auto&& self) noexcept {
+    return std::forward_like<decltype(self)>(self).s_.template get<U>();
+  }
 
   template <size_t I, class... Args>
   constexpr decltype(auto) emplace(Args&&... args) noexcept(
