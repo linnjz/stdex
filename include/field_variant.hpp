@@ -30,7 +30,6 @@
 #include <type_traits>
 #include <utility>
 
-
 namespace stdex { 
 
 /// Reflection-driven metadata for T's non-static data members (P2996).
@@ -210,9 +209,6 @@ struct storage_meta
       (2 + metadata.empty_type_cnt + 1 <= 256) &&
       (metadata.bool_type_cnt + metadata.empty_type_cnt) == member_count;
 };
-
-template <size_t I, class T>
-using member_type_at = typename storage_meta<T>::template member_type<I>;
 
 template <class T>
 struct storage_base;
@@ -551,6 +547,12 @@ class field_variant {
       "requirements (N4950 [variant.variant.general]/2).");
   
 public:
+  using member_types = typename meta::member_types;
+  template <size_t I>
+  using member_type = typename meta::template member_type<I>;
+  template <size_t I>
+  using storage_type = typename meta::template storage_type<I>;
+
   constexpr field_variant() = default;
 
   /// ---- destructor ----
@@ -599,10 +601,10 @@ public:
       : s_() {
     if (other.s_.has_value()) {
       at_index(other.s_, [&]<size_t I>(std::integral_constant<size_t, I>) noexcept(
-          std::is_reference_v<typename meta::template member_type<I>> ||
-          std::is_nothrow_move_constructible_v<typename meta::template storage_type<I>>) 
+          std::is_reference_v<member_type<I>> ||
+          std::is_nothrow_move_constructible_v<storage_type<I>>) 
           -> void {
-        if constexpr (std::is_reference_v<typename meta::template member_type<I>>) {
+        if constexpr (std::is_reference_v<member_type<I>>) {
           s_.template construct<I>(other.s_.template get<I>());  ///< Reference members are always copied.
         } else {
           s_.template construct<I>(std::move(other.s_.template get<I>()));
@@ -680,10 +682,10 @@ public:
       }
       if (other.s_.has_value()) {
         at_index(other.s_, [&]<size_t I>(std::integral_constant<size_t, I>) noexcept(
-            std::is_reference_v<typename meta::template member_type<I>> ||
-            std::is_nothrow_move_constructible_v<typename meta::template storage_type<I>>) 
+            std::is_reference_v<member_type<I>> ||
+            std::is_nothrow_move_constructible_v<storage_type<I>>) 
             -> void {
-          if constexpr (std::is_reference_v<typename meta::template member_type<I>>) {
+          if constexpr (std::is_reference_v<member_type<I>>) {
             s_.template construct<I>(other.s_.template get<I>());
           } else {
             s_.template construct<I>(std::move(other.s_.template get<I>()));
@@ -698,9 +700,11 @@ public:
       = delete;
 
   constexpr std::size_t size() const noexcept { return meta::member_count; }
-  constexpr bool has_value() const noexcept { return s_.has_value(); }
   constexpr std::size_t index() const noexcept { return s_.index(); }
-
+  constexpr bool has_value() const noexcept { return s_.has_value(); }
+  template <class M>
+  constexpr bool has_type() const noexcept { return meta::template has_member_type<M>; }
+  
   template <size_t I>
   constexpr decltype(auto) get(this auto&& self) noexcept
       requires (I < meta::member_count) {
@@ -715,8 +719,8 @@ public:
   /// Destroys the active member, then constructs index I in place.
   template <size_t I, class... Args>
   constexpr decltype(auto) emplace(Args&&... args) noexcept(
-      std::is_reference_v<typename meta::template member_type<I>> ||
-      std::is_nothrow_constructible_v<typename meta::template storage_type<I>, Args...>)
+      std::is_reference_v<member_type<I>> ||
+      std::is_nothrow_constructible_v<storage_type<I>, Args...>)
       requires (I < meta::member_count) {
     if (s_.has_value()) {
       at_index(s_, [&]<size_t J>(std::integral_constant<size_t, J>) 
