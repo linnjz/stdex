@@ -33,6 +33,7 @@
 
 namespace stdex { 
 
+/// Reflection-driven metadata for T's non-static data members (P2996).
 template <class T>
 struct storage_meta 
 {
@@ -40,6 +41,7 @@ struct storage_meta
     std::define_static_array(std::meta::nonstatic_data_members_of(^^T, std::meta::access_context::unchecked()))
   };
   static constexpr size_t member_count = nonstatic_data_members.size();
+  /// Tag width sized to the member count.
   using tag_type = std::conditional_t<
       (member_count <= 255), 
       std::uint8_t,
@@ -75,16 +77,19 @@ struct storage_meta
         ? get_index(std::make_index_sequence<sizeof...(Ts)>{})
         : member_count;
   };
+  /// Index of the unique member of type U; member_count serves as the
+  /// sentinel when U is absent or matches more than one member.
   template <class U>
   static constexpr size_t index_of = index_of_impl<U, member_types>::value;
   template <class U>
   static constexpr bool has_member_type = index_of_impl<U, member_types>::count >= 1;
   
-  // 1. cannot directly store reference members in a byte array; 
-  //    store M& as a "pointer to the referenced object"; 
-  // 2. construct_at does not support const T*;
-  //    value members are stripped of cv before storage,
-  //    and const semantics are preserved member_type API layer
+  /// Storage type mapping for each member type:
+  /// - Reference members are stored as a pointer to the referenced object,
+  ///   since a reference member cannot be stored in a byte array.
+  /// - Value members are stored without cv-qualifiers, because
+  ///   std::construct_at does not accept const T*; const semantics are
+  ///   preserved at the member_type API layer.
   template <class M>
   struct storage_of { using type = std::remove_cv_t<M>; };
   template <class M>
@@ -122,8 +127,9 @@ struct storage_meta
       size_t bool_type_index = 0;
       size_t bool_type_cnt = 0;
       size_t empty_type_cnt = 0;
-      // 0/1 = bool(false/true), 2..N = empty member(by declaration order), N+1 = disengaged
-      // the valid codes are exactly 0..N+1, a total of N+2
+      /// Code table: 0/1 denote bool (false/true), 2..N denote empty members
+      /// in declaration order, and N+1 denotes the disengaged state;
+      /// the valid codes are exactly 0..N+1, N+2 in total.
       std::array<size_t, member_count + 2> index_of_code;
     } m;
     template for (constexpr auto I : std::views::iota(0zu, member_count)) {
@@ -150,11 +156,11 @@ struct storage_meta
       m.are_all_mems_ref_qualified &= std::is_reference_v<member_type<I>>;
       
       if constexpr (std::is_reference_v<member_type<I>> && requires { sizeof(storage_plain_t); }) { 
-        // the address must be divisible by alignof (alignof is a power of 2),
-        // with the lower log2(alignof) bits always being 0.
+        /// An aligned address is a multiple of alignof (a power of two),
+        /// so its low log2(alignof) bits are always zero.
         m.ref_tag_bits = std::min<size_t>(m.ref_tag_bits, std::countr_zero(alignof(storage_plain_t)));
       } else if constexpr (std::is_reference_v<member_type<I>>) {
-        m.are_all_mems_ref_qualified = false;  // points to an incomplete type, giving up the niche
+        m.are_all_mems_ref_qualified = false;  ///< Points to an incomplete type; the niche is abandoned.
       }
       
       if constexpr (std::is_reference_v<member_type<I>> && !requires { sizeof(member_plain_t); }) {
@@ -172,16 +178,18 @@ struct storage_meta
       } else if constexpr (std::is_empty_v<storage_t>) {
         m.are_all_empty_type_aggregated &= std::is_aggregate_v<storage_t> && std::is_trivially_destructible_v<storage_t>;
         ++m.empty_type_cnt;
-        // 2..N = empty member(by declaration order): bools scanned so far offsets the code
+        /// Empty members are coded 2..N in declaration order; each bool
+        /// member scanned before I shifts the code by one.
         m.index_of_code[2 + I - m.bool_type_cnt] = I;
       }
       
     }
-    // 0/1 = bool(false/true), N+1 = disengaged
+    /// Code 0/1 = bool (false/true); N+1 = disengaged.
     m.index_of_code[0] = m.index_of_code[1] = m.bool_type_index;
     m.index_of_code[member_count + 1] = member_count;
     
-    // empty class/zero-length arrays aren't allowed, so they end up as 1 byte
+    /// Empty members contribute zero size; clamp to 1 byte, since a
+    /// zero-length storage array is not permitted.
     m.max_size = m.max_size ? m.max_size : 1;
     m.ref_tag_mask = m.ref_tag_bits >= std::numeric_limits<size_t>::digits
         ? 0 : (1uz << m.ref_tag_bits) - 1;
@@ -189,13 +197,14 @@ struct storage_meta
   }();
 
   static constexpr bool niche_opt_in = requires { typename T::is_niche; };
-  // ref niche: all referenced members
+  /// Reference niche: every member is a reference.
   static constexpr bool niche_ref_capable =
       niche_opt_in && metadata.are_all_mems_ref_qualified &&
       (metadata.ref_tag_bits >= std::numeric_limits<size_t>::digits ||
       member_count <= (1uz << metadata.ref_tag_bits));
-  // bool niche: exactly one bool member, the rest are empty classes.
-  //             bool 2 states + each slot variant 1 state  + 1 disengaged state <= 256
+  /// Bool niche: exactly one bool member; all others are empty classes.
+  /// The bool's two states, one state per empty member, and the disengaged
+  /// state must fit into a single byte (N+2 <= 256).
   static constexpr bool niche_bool_capable = 
       niche_opt_in && metadata.are_all_empty_type_aggregated && metadata.bool_type_cnt == 1 &&
       (2 + metadata.empty_type_cnt + 1 <= 256) &&
@@ -208,6 +217,7 @@ using member_type_at = typename storage_meta<T>::template member_type<I>;
 template <class T>
 struct storage_base;
 
+/// Default storage: a byte array holding the active member, tagged by tag.
 template <class T>
 requires (!storage_meta<T>::niche_ref_capable && !storage_meta<T>::niche_bool_capable)
 struct storage_base<T> : storage_meta<T>
@@ -218,11 +228,38 @@ struct storage_base<T> : storage_meta<T>
   using member_type = typename base::template member_type<I>;
   template <size_t I>
   using storage_type = typename base::template storage_type<I>;
+  using base::nonstatic_data_members;
   using base::member_count;
   using base::metadata;
 
-  alignas(metadata.max_align) std::byte storage[metadata.max_size];
-  tag_type tag { static_cast<tag_type>(member_count) };
+
+/// GCC has not yet implemented the P2996R13 feature of injecting empty
+/// destructors, so a std::byte array with reinterpret_cast is used for now.
+/// Non-POD types are supported, though constant evaluation is limited.
+#ifndef P2996R13_meta_reflection_define_aggregate
+  alignas(metadata.max_align) std::byte storage[metadata.max_size]{};
+#else
+  /// The reflection-defined union path supports POD types only.
+  union field_union_type;
+  consteval {
+    std::meta::define_aggregate(^^field_union_type, [] consteval noexcept /* std::span */ {
+      std::array<std::meta::info, member_count> members;
+      template for (constexpr auto I : std::views::iota(0zu, member_count)) {
+        members[I] = std::meta::data_member_spec(^^storage_type<I>, { 
+          .name = std::meta::identifier_of(nonstatic_data_members[I]) 
+        });
+      }
+      return members;
+    }());
+  }
+  field_union_type u_{};
+
+  template <size_t I>
+  static consteval std::meta::info member_refl() noexcept {
+    return std::meta::nonstatic_data_members_of(^^field_union_type, std::meta::access_context::unchecked())[I];
+  }
+#endif
+  tag_type tag { static_cast<tag_type>(member_count) };  ///< Default: disengaged (tag = member_count).
 
 #pragma region
   constexpr std::size_t index() const noexcept {
@@ -240,12 +277,19 @@ struct storage_base<T> : storage_meta<T>
     using self_t = decltype(self);
     using member_unref_t = std::remove_reference_t<member_type<I>>;
     if constexpr (std::is_reference_v<member_type<I>>) {
+#ifdef P2996R13_meta_reflection_define_aggregate
+      return *(self.u_.[: member_refl<I>() :]);
+#else
       return **reinterpret_cast<std::add_const_t<storage_type<I>> *>(self.storage);
-
+#endif
     } else {
       using cv_member_t = std::conditional_t<std::is_const_v<std::remove_reference_t<self_t>>,
                                              std::add_const_t<member_unref_t>, member_unref_t>;
+#ifdef P2996R13_meta_reflection_define_aggregate
+      return std::forward_like<self_t>(*static_cast<cv_member_t *>(std::addressof(self.u_.[: member_refl<I>() :])));
+#else
       return std::forward_like<self_t>(*reinterpret_cast<cv_member_t *>(self.storage));
+#endif
     }
   }
 
@@ -272,16 +316,29 @@ struct storage_base<T> : storage_meta<T>
                     "construct for a reference member requires exactly one lvalue argument");
       static_assert(!(std::reference_constructs_from_temporary_v<member_type<I>, Args> && ...),
                     "construct for a reference member would bind to a temporary");
+#ifdef P2996R13_meta_reflection_define_aggregate
+      std::construct_at(std::addressof(u_.[: member_refl<I>() :]),
+                        std::addressof(std::forward<Args>(args)...));
+#else
       std::construct_at(reinterpret_cast<storage_t *>(storage), std::addressof(std::forward<Args>(args)...));
+#endif
     } else if constexpr (std::is_array_v<storage_t>) {
-    // C++23 N5032 [specialized.construct]/2 forbids construct_at with arguments for array
-    // types, so arrays go through a braced placement new instead: each argument
-    // value-initializes one element in place (also works for class element types).
+    /// [specialized.construct]/2 (N5032) forbids construct_at with arguments
+    /// for array types, so arrays are initialized via braced placement new:
+    /// each argument value-initializes one element in place.
     static_assert(sizeof...(Args) == 0 || sizeof...(Args) == std::extent_v<storage_t>,
                   "array member: pass exactly one initializer per element, or none for value-initialization");
+#ifdef P2996R13_meta_reflection_define_aggregate
+    ::new (static_cast<void *>(std::addressof(u_.[: member_refl<I>() :]))) storage_t{std::forward<Args>(args)...};
+#else
     ::new (static_cast<void *>(storage)) storage_t{std::forward<Args>(args)...};
+#endif
     } else {
+#ifdef P2996R13_meta_reflection_define_aggregate
+      std::construct_at(std::addressof(u_.[: member_refl<I>() :]), std::forward<Args>(args)...);
+#else
       std::construct_at(reinterpret_cast<storage_t *>(storage), std::forward<Args>(args)...);
+#endif
     }
     tag = static_cast<tag_type>(I);
     return (*this).template get<I>();
@@ -293,7 +350,11 @@ struct storage_base<T> : storage_meta<T>
     assert(index() == I && "destroy: member is not the active one");
     if constexpr (!std::is_reference_v<member_type<I>> &&
                   !std::is_trivially_destructible_v<storage_type<I>>) {
+#ifdef P2996R13_meta_reflection_define_aggregate
+      std::destroy_at(std::addressof(u_.[: member_refl<I>() :]));
+#else
       std::destroy_at(reinterpret_cast<storage_type<I> *>(storage));
+#endif
     }
     tag = static_cast<tag_type>(member_count);
   }
@@ -301,7 +362,9 @@ struct storage_base<T> : storage_meta<T>
 #pragma endregion
 };
 
-/// niche version: all members are reference, and member_cnt <= min(std::countr_zero(alignof(M))...)
+/// Reference-niche specialization: every member is a reference, and the
+/// member count fits within the alignment-guaranteed zero bits of an
+/// address (member_cnt <= 2^ref_tag_bits).
 template <class T>
 requires (storage_meta<T>::niche_ref_capable)
 struct storage_base<T> : storage_meta<T>
@@ -314,14 +377,15 @@ struct storage_base<T> : storage_meta<T>
   using base::member_count;
   using base::metadata;
   
-  // directly reading and writing uintptr_t objects: no strict aliasing issues
-  // avoids UB from reinterpret_cast<std::byte* to uintptr_t*>
+  /// The pointer and tag are stored in a single uintptr_t slot, read and
+  /// written as a real object; this avoids the strict-aliasing UB that a
+  /// reinterpret_cast from std::byte* to uintptr_t* would entail.
   std::uintptr_t slot = 0;
 
 #pragma region
   constexpr std::size_t index() const noexcept {
-    // when there's only one member, ref_tag_mask=0: engaged always returns 0;
-    // disengaged returns member_count
+    /// With a single member, ref_tag_mask == 0: an engaged slot always
+    /// yields index 0, while a disengaged slot yields member_count.
     return slot == 0 ? member_count
                        : static_cast<size_t>(slot & metadata.ref_tag_mask);
   }
@@ -334,6 +398,7 @@ struct storage_base<T> : storage_meta<T>
   decltype(auto) get(this auto &&self) noexcept {
     static_assert(I < member_count, "Index out of range");
     assert(self.index() == I && "get: member is not the active one");
+    /// Clears the tag bits and dereferences the stored pointer.
     return *reinterpret_cast<storage_type<I>>(self.slot & ~metadata.ref_tag_mask);
   }
 
@@ -348,12 +413,15 @@ struct storage_base<T> : storage_meta<T>
   decltype(auto) construct(Args&&...args) noexcept {
     static_assert(I < member_count, "Index out of range");
     assert(!has_value() && "construct: storage already engaged");
+    static_assert((std::is_same_v<std::remove_cvref_t<Args>,
+                              std::remove_cvref_t<member_type<I>>> && ...),
+                  "argument type must match the reference member type");
     static_assert(sizeof...(Args) == 1 && (std::is_lvalue_reference_v<Args> && ...),
                   "construct for a reference member requires exactly one lvalue argument");
     static_assert(!(std::reference_constructs_from_temporary_v<member_type<I>, Args> && ...),
                   "construct for a reference member would bind to a temporary");
     auto addr = reinterpret_cast<std::uintptr_t>(std::addressof(std::forward<Args>(args)...));
-    assert((addr & metadata.ref_tag_mask) == 0);  // alignment guarantee, defensive checks
+    assert((addr & metadata.ref_tag_mask) == 0);  ///< Alignment guarantee (defensive check).
     slot = addr | I;
     return (*this).template get<I>();
   }
@@ -362,13 +430,13 @@ struct storage_base<T> : storage_meta<T>
   constexpr void destroy() noexcept {
     static_assert(I < member_count, "Index out of range");
     assert(index() == I && "destroy: member is not the active one");
-    slot = 0; // disengaged
+    slot = 0;  ///< Disengaged.
   }
 
 #pragma endregion
 };
 
-/// bool niche version: exactly 1 bool member, the rest are empty classes/structs
+/// Bool-niche specialization: exactly one bool member; all others are empty classes.
 template <class T>
 requires (storage_meta<T>::niche_bool_capable)
 struct storage_base<T> : storage_meta<T>
@@ -376,11 +444,15 @@ struct storage_base<T> : storage_meta<T>
   using base = storage_meta<T>;
   template <size_t I>
   using member_type = typename base::template member_type<I>;
-  using base::member_count; // 1byte 0...255, member_cnt[1...256 - 1(disengaged) - 1(true/false)] 
+  using base::member_count;  ///< Fits one byte (codes 0..255): at most 254
+                                 ///< members, leaving codes for the bool states
+                                 ///< and the disengaged state.
   using base::metadata;
   
   static constexpr unsigned char disengaged = static_cast<unsigned char>(member_count + 1);
 
+  /// Code 0/1 are reserved for bool; empty members start at 2, skipping
+  /// the bool slot.
   static constexpr unsigned char code_of_member(size_t I) noexcept {
     return static_cast<unsigned char>(2 + I - (I > metadata.bool_type_index));
   }
@@ -391,6 +463,7 @@ struct storage_base<T> : storage_meta<T>
   } u_;
 
 #pragma region
+  /// O(1) lookup of the member index via the state-code table.
   std::size_t index() const noexcept {
     return metadata.index_of_code[std::bit_cast<unsigned char>(u_)];
   }
@@ -445,22 +518,8 @@ struct storage_base<T> : storage_meta<T>
 
 };
 
-// ============================================================================
-// field_variant single-class definition: C++23 P0848 "conditional trivial special members"
-//   libc++'s five-layer inheritance skeleton exists to express the "three states" (trivial/available/unavailable) in C++17;
-//   P0848 allows member functions of class templates to carry a requires-clause ([dcl.decl.general]/4 +
-//   [temp.pre]/1), [special]/6 eligibility, [class.prop] triviality,
-//   [dcl.fct.def.default]/4 (non-eligible defaulted special members are defined as deleted)
-//   together cover exactly the same three states, so they collapse into one class:
-//     trivially available -> = default (compiler bitwise copy, preserves triviality)
-//     available     -> hand-written member-wise operations (same-index assignment / destroy-then-construct)
-//     unavailable   -> = delete (propagation from const members / deleted members)
-//   Note: a declared constrained copy constructor still suppresses the implicit move constructor; all five dimensions must be declared explicitly;
-//   the three overloads' requires-clauses must be mutually exclusive.
-// ============================================================================
-
-// Dispatch index from runtime to compile-time I: the visitor receives std::integral_constant<size_t, I>.
-// The visitor must return the same type for all I (currently void within this skeleton).
+/// Dispatches f over the active member index; used by field_variant's
+/// special members.
 template <class Self, class F>
 constexpr decltype(auto) at_index(Self&& self, F&& f) {
   constexpr size_t N = std::remove_cvref_t<Self>::member_count;
@@ -468,7 +527,7 @@ constexpr decltype(auto) at_index(Self&& self, F&& f) {
     using R = std::common_reference_t<decltype(f(std::integral_constant<size_t, Is>{}))...>;
     auto dispatch = [&]<size_t I>(this auto&& d) -> R {
       if constexpr (I == N) {
-        std::unreachable();  // disengaged
+        std::unreachable();  ///< Disengaged.
       } else if (self.index() == I) {
         return f(std::integral_constant<size_t, I>{});
       } else {
@@ -479,6 +538,8 @@ constexpr decltype(auto) at_index(Self&& self, F&& f) {
   }(std::make_index_sequence<N>{});
 }
 
+/// Variant-like wrapper holding exactly one non-static data member of T;
+/// special members follow std::variant's P0848 conditional-trivial rules.
 template <class T>
 class field_variant {
   using meta = storage_meta<T>;
@@ -492,7 +553,7 @@ class field_variant {
 public:
   constexpr field_variant() = default;
 
-  // ---- destructor ----
+  /// ---- destructor ----
   constexpr ~field_variant() requires (meta::metadata.are_all_mems_trivially_destructible) = default;
   constexpr ~field_variant() requires (!meta::metadata.are_all_mems_trivially_destructible &&
                                meta::metadata.are_all_mems_destructible) {
@@ -506,7 +567,7 @@ public:
   }
   constexpr ~field_variant() requires (!meta::metadata.are_all_mems_destructible) = delete;
 
-  // ---- copy constructor ----
+  /// ---- copy constructor ----
   constexpr field_variant(const field_variant&) 
       requires (meta::metadata.are_all_mems_trivially_copy_constructible)
       = default;
@@ -527,7 +588,7 @@ public:
       requires (!meta::metadata.are_all_mems_copy_constructible)
       = delete;
 
-  // ---- move constructor ----
+  /// ---- move constructor ----
   constexpr field_variant(field_variant&&) 
       requires (meta::metadata.are_all_mems_trivially_move_constructible) 
       = default;
@@ -542,7 +603,7 @@ public:
           std::is_nothrow_move_constructible_v<typename meta::template storage_type<I>>) 
           -> void {
         if constexpr (std::is_reference_v<typename meta::template member_type<I>>) {
-          s_.template construct<I>(other.s_.template get<I>());  // reference members are always copied
+          s_.template construct<I>(other.s_.template get<I>());  ///< Reference members are always copied.
         } else {
           s_.template construct<I>(std::move(other.s_.template get<I>()));
         }
@@ -553,7 +614,7 @@ public:
       requires (!meta::metadata.are_all_mems_move_constructible) 
       = delete;
 
-  // ---- copy assignment ----
+  /// ---- copy assignment ----
   constexpr field_variant& operator=(const field_variant&) 
       requires (meta::metadata.are_all_mems_trivially_copy_assignable) 
       = default;
@@ -592,7 +653,7 @@ public:
       requires (!meta::metadata.are_all_mems_copy_assignable) 
       = delete;
 
-  // ---- move assignment ----
+  /// ---- move assignment ----
   constexpr field_variant& operator=(field_variant&&) 
       requires (meta::metadata.are_all_mems_trivially_move_assignable) 
       = default;
@@ -641,18 +702,22 @@ public:
   constexpr std::size_t index() const noexcept { return s_.index(); }
 
   template <size_t I>
-  constexpr decltype(auto) get(this auto&& self) noexcept {
+  constexpr decltype(auto) get(this auto&& self) noexcept
+      requires (I < meta::member_count) {
     return std::forward_like<decltype(self)>(self).s_.template get<I>();
   }
   template <class U>
-  constexpr decltype(auto) get(this auto&& self) noexcept {
+  constexpr decltype(auto) get(this auto&& self) noexcept
+      requires (meta::template index_of<U> != meta::member_count) {
     return std::forward_like<decltype(self)>(self).s_.template get<U>();
   }
 
+  /// Destroys the active member, then constructs index I in place.
   template <size_t I, class... Args>
   constexpr decltype(auto) emplace(Args&&... args) noexcept(
       std::is_reference_v<typename meta::template member_type<I>> ||
-      std::is_nothrow_constructible_v<typename meta::template storage_type<I>, Args...>) {
+      std::is_nothrow_constructible_v<typename meta::template storage_type<I>, Args...>)
+      requires (I < meta::member_count) {
     if (s_.has_value()) {
       at_index(s_, [&]<size_t J>(std::integral_constant<size_t, J>) 
         noexcept(noexcept(s_.template destroy<J>())) 
@@ -663,7 +728,8 @@ public:
     return s_.template construct<I>(std::forward<Args>(args)...);
   }
 
-  // ---- The following three are declared only; bodies implemented later ----
+  /// ---- The following three members are declared only; their bodies
+  /// ---- are implemented elsewhere. ----
   constexpr auto operator<=>(const field_variant& other) const
       noexcept(meta::metadata.are_all_mems_compare_nothrow)
       requires (meta::metadata.are_all_mems_three_way_comparable);
