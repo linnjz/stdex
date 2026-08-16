@@ -30,8 +30,12 @@
 #include <type_traits>
 #include <utility>
 
+#include "fixed_string.hpp"
+
 namespace stdex { 
 
+namespace field_variant_detail {
+  
 /// Reflection-driven metadata for T's non-static data members (P2996).
 template <class T>
 struct storage_meta 
@@ -55,11 +59,13 @@ struct storage_meta
       >
   >;
 
+  
   template<size_t I>
   using member_type = typename [: std::meta::type_of(nonstatic_data_members[I]) :];
   template <size_t... Is>
   static auto member_tuple_impl(std::index_sequence<Is...>) -> std::tuple<member_type<Is>...>;
   using member_types = decltype(member_tuple_impl(std::make_index_sequence<member_count>{}));
+  
   
   template <class U, class Tuple>
   struct index_of_impl;
@@ -83,6 +89,27 @@ struct storage_meta
   template <class U>
   static constexpr bool has_member_type = index_of_impl<U, member_types>::count >= 1;
   
+  /// Index of the member whose name equals Fs; member_count serves as the
+  /// sentinel when no member matches. A length prefilter restricts the
+  /// per-iteration comparison to an O(1) size check in the common case.
+  ///
+  /// P1306R5 permits `break` in expansion statements (jumping past the last
+  /// expansion), but GCC's constant evaluator currently rejects it with a
+  /// bogus "flows off the end of the function" error; see PR c++/124924.
+  /// Once fixed, the scan may terminate early via `break` instead of
+  /// carrying the sentinel to the end.
+  template <fixed_string Fs>
+  static consteval size_t index_of_name() noexcept {
+    constexpr std::string_view target = Fs.view();
+    size_t found = member_count;
+    template for (constexpr auto I : std::views::iota(0zu, member_count)) {
+      constexpr std::string_view id = std::meta::identifier_of(nonstatic_data_members[I]);
+      if (id.size() == target.size() && id == target) { found = I; /* break; */ }
+    }
+    return found;
+  }
+  
+  
   /// Storage type mapping for each member type:
   /// - Reference members are stored as a pointer to the referenced object,
   ///   since a reference member cannot be stored in a byte array.
@@ -98,6 +125,7 @@ struct storage_meta
   template <size_t I>
   using storage_type = typename storage_of<member_type<I>>::type;
 
+  
   static constexpr auto metadata = [] consteval noexcept {
     struct metadata {
       size_t max_size = 0;
@@ -195,6 +223,7 @@ struct storage_meta
     return m;
   }();
 
+  
   static constexpr bool niche_opt_in = requires { typename T::is_niche; };
   /// Reference niche: every member is a reference.
   static constexpr bool niche_ref_capable =
@@ -287,13 +316,6 @@ struct storage_base<T> : storage_meta<T>
       return std::forward_like<self_t>(*reinterpret_cast<cv_member_t *>(self.storage));
 #endif
     }
-  }
-
-  template <class U>
-  constexpr decltype(auto) get(this auto &&self) noexcept {
-    static_assert(base::template index_of<U> != member_count,
-                  "get<U>: U must match exactly one member type");
-    return self.template get<base::template index_of<U>>();
   }
 
   template <size_t I, class... Args>
@@ -398,13 +420,6 @@ struct storage_base<T> : storage_meta<T>
     return *reinterpret_cast<storage_type<I>>(self.slot & ~metadata.ref_tag_mask);
   }
 
-  template <class U>
-  decltype(auto) get(this auto &&self) noexcept {
-    static_assert(base::template index_of<U> != member_count,
-                  "get<U>: U must match exactly one member type");
-    return self.template get<base::template index_of<U>>();
-  }
-
   template <size_t I, class... Args>
   decltype(auto) construct(Args&&...args) noexcept {
     static_assert(I < member_count, "Index out of range");
@@ -479,13 +494,6 @@ struct storage_base<T> : storage_meta<T>
       }
   }
 
-  template <class U>
-  constexpr decltype(auto) get(this auto &&self) noexcept {
-    static_assert(base::template index_of<U> != member_count,
-                  "get<U>: U must match exactly one member type");
-    return self.template get<base::template index_of<U>>();
-  }
-  
   template <size_t I, class... Args>
   constexpr decltype(auto) construct(Args&&...args) noexcept {
     static_assert(I < member_count, "Index out of range");
@@ -534,10 +542,16 @@ constexpr decltype(auto) at_index(Self&& self, F&& f) {
   }(std::make_index_sequence<N>{});
 }
 
+} // namespace field_variant_detail
+
 /// Variant-like wrapper holding exactly one non-static data member of T;
 /// special members follow std::variant's P0848 conditional-trivial rules.
 template <class T>
 class field_variant {
+  using field_variant_detail::storage_meta;
+  using field_variant_detail::storage_base;
+  using field_variant_detail::at_index;
+  
   using meta = storage_meta<T>;
   static_assert(meta::member_count > 0 && 
       []<std::size_t... Is>(std::index_sequence<Is...>) constexpr noexcept -> bool {
@@ -699,23 +713,31 @@ public:
       requires (!meta::metadata.are_all_mems_move_assignable) 
       = delete;
 
-  constexpr std::size_t size() const noexcept { return meta::member_count; }
+  consteval std::size_t size() const noexcept { return meta::member_count; }
   constexpr std::size_t index() const noexcept { return s_.index(); }
   constexpr bool has_value() const noexcept { return s_.has_value(); }
   template <class M>
-  constexpr bool has_type() const noexcept { return meta::template has_member_type<M>; }
-  
+  consteval bool has_type() const noexcept { return meta::template has_member_type<M>; }
+  template <fixed_string Fs>
+  consteval bool has_name() const noexcept { return meta::template index_of_name<Fs>() != meta::member_count; }
+    
   template <size_t I>
-  constexpr decltype(auto) get(this auto&& self) noexcept
-      requires (I < meta::member_count) {
+  constexpr decltype(auto) get(this auto&& self) noexcept {
     return std::forward_like<decltype(self)>(self).s_.template get<I>();
   }
   template <class U>
-  constexpr decltype(auto) get(this auto&& self) noexcept
-      requires (meta::template index_of<U> != meta::member_count) {
-    return std::forward_like<decltype(self)>(self).s_.template get<U>();
+  constexpr decltype(auto) get(this auto &&self) noexcept {
+    constexpr size_t I = meta::template index_of<U>;
+    static_assert(I != member_count, "get<U>: U must match exactly one member type");
+    return self.template get<I>();
   }
-
+  template <fixed_string Fs>
+  constexpr decltype(auto) get(this auto &&self) noexcept {
+    constexpr size_t I = meta::template index_of_name<Fs>();
+    static_assert(I != meta::member_count, "get<Fs>: no member with this name");
+    return self.template get<I>();
+  }
+  
   /// Destroys the active member, then constructs index I in place.
   template <size_t I, class... Args>
   constexpr decltype(auto) emplace(Args&&... args) noexcept(
@@ -748,5 +770,5 @@ public:
 private:
   storage_base<T> s_;
 };
-
+// TODO swap, hash, visit Cartesian product
 } // namespace stdex
