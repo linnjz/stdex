@@ -22,6 +22,7 @@
 #include <compare>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <meta>
@@ -149,6 +150,7 @@ struct storage_meta
       bool are_all_mems_trivially_move_constructible = true;
       bool are_all_mems_move_assignable = true;
       bool are_all_mems_trivially_move_assignable = true;
+      bool are_all_mems_hashable = true;
       size_t ref_tag_bits = std::numeric_limits<size_t>::digits;
       size_t ref_tag_mask = 0;
       size_t bool_type_index = 0;
@@ -181,6 +183,16 @@ struct storage_meta
       m.are_all_mems_move_assignable &= std::is_move_constructible_v<member_type<I>> && std::is_move_assignable_v<member_type<I>>;
       m.are_all_mems_trivially_move_assignable &= std::is_trivially_move_constructible_v<member_type<I>> && std::is_trivially_move_assignable_v<member_type<I>>;
       m.are_all_mems_ref_qualified &= std::is_reference_v<member_type<I>>;
+      
+      /// std::hash availability: reference members hash the referred object,
+      /// value members hash the stored value, and empty members hash by index
+      /// alone. The requires-expression models the exact call the hash
+      /// operator performs, so cv-qualified and array members are handled.
+      if constexpr (std::is_reference_v<member_type<I>>) {
+        m.are_all_mems_hashable &= requires { std::hash<std::remove_cv_t<std::remove_reference_t<member_type<I>>>>{}(std::declval<member_type<I> const&>()); };
+      } else if constexpr (!std::is_empty_v<member_plain_t>) {
+        m.are_all_mems_hashable &= !std::is_array_v<member_plain_t> && requires { std::hash<std::remove_cv_t<member_plain_t>>{}(std::declval<member_type<I> const&>()); };
+      }
       
       if constexpr (std::is_reference_v<member_type<I>> && requires { sizeof(storage_plain_t); }) { 
         /// An aligned address is a multiple of alignof (a power of two),
@@ -524,9 +536,8 @@ struct storage_base<T> : storage_meta<T>
 
 /// Dispatches f over the active member index; used by field_variant's
 /// special members.
-template <class Self, class F>
+template <size_t N, class Self, class F>
 constexpr decltype(auto) at_index(Self&& self, F&& f) {
-  constexpr size_t N = std::remove_cvref_t<Self>::member_count;
   return [&]<size_t... Is>(std::index_sequence<Is...>) -> decltype(auto) {
     using R = std::common_reference_t<decltype(f(std::integral_constant<size_t, Is>{}))...>;
     auto dispatch = [&]<size_t I>(this auto&& d) -> R {
@@ -542,15 +553,49 @@ constexpr decltype(auto) at_index(Self&& self, F&& f) {
   }(std::make_index_sequence<N>{});
 }
 
+/// Boost-style hash combination; used by std::hash<field_variant<T>>.
+constexpr std::size_t hash_combine(std::size_t seed, std::size_t value) noexcept {
+  return seed ^ (value + 0x9e3779b9 + (seed << 6) + (seed >> 2));
+}
+
+/// Per-member <=> result type: an empty member (value or referenced) compares
+/// as strong_ordering::equal by definition, since empty types carry no state;
+/// all other members contribute their own comparison category. The decltype is
+/// confined to the non-empty partial specialization so that an empty member is
+/// never required to provide operator<=>.
+template <class M, bool = std::is_empty_v<std::remove_cvref_t<M>>>
+struct member_cmp_impl {
+  using type = std::strong_ordering;
+};
+
+template <class M>
+struct member_cmp_impl<M, false> {
+  using type = decltype(std::declval<M const&>() <=> std::declval<M const&>());
+};
+
+template <class M>
+using member_cmp_t = typename member_cmp_impl<M>::type;
+
+/// Common comparison category of all members plus strong_ordering (which the
+/// index/disengaged ordering returns).
+template <class Tuple>
+struct compare_cat_of;
+
+template <class... Ms>
+struct compare_cat_of<std::tuple<Ms...>> {
+  using type = std::common_comparison_category_t<member_cmp_t<Ms>..., std::strong_ordering>;
+};
+
 } // namespace field_variant_detail
 
 /// Variant-like wrapper holding exactly one non-static data member of T;
 /// special members follow std::variant's P0848 conditional-trivial rules.
 template <class T>
 class field_variant {
-  using field_variant_detail::storage_meta;
-  using field_variant_detail::storage_base;
-  using field_variant_detail::at_index;
+  template <class U>
+  using storage_meta = field_variant_detail::storage_meta<U>;
+  template <class U>
+  using storage_base = field_variant_detail::storage_base<U>;
   
   using meta = storage_meta<T>;
   static_assert(meta::member_count > 0 && 
@@ -574,7 +619,7 @@ public:
   constexpr ~field_variant() requires (!meta::metadata.are_all_mems_trivially_destructible &&
                                meta::metadata.are_all_mems_destructible) {
     if (s_.has_value()) {
-      at_index(s_, [&]<size_t I>(std::integral_constant<size_t, I>) 
+      field_variant_detail::at_index<size()>(s_, [&]<size_t I>(std::integral_constant<size_t, I>) 
           noexcept(noexcept(s_.template destroy<I>())) 
           -> void {
         s_.template destroy<I>();
@@ -593,7 +638,7 @@ public:
                 meta::metadata.are_all_mems_copy_constructible)
       : s_() {
     if (other.s_.has_value()) {
-      at_index(other.s_, [&]<size_t I>(std::integral_constant<size_t, I>) 
+      field_variant_detail::at_index<size()>(other.s_, [&]<size_t I>(std::integral_constant<size_t, I>) 
           noexcept(noexcept(s_.template construct<I>(other.s_.template get<I>()))) 
           -> void {
         s_.template construct<I>(other.s_.template get<I>());
@@ -614,7 +659,7 @@ public:
                 meta::metadata.are_all_mems_move_constructible)
       : s_() {
     if (other.s_.has_value()) {
-      at_index(other.s_, [&]<size_t I>(std::integral_constant<size_t, I>) noexcept(
+      field_variant_detail::at_index<size()>(other.s_, [&]<size_t I>(std::integral_constant<size_t, I>) noexcept(
           std::is_reference_v<member_type<I>> ||
           std::is_nothrow_move_constructible_v<storage_type<I>>) 
           -> void {
@@ -641,7 +686,7 @@ public:
                 meta::metadata.are_all_mems_copy_assignable) {
     if (s_.index() == other.s_.index()) {
       if (s_.has_value()) {
-        at_index(s_, [&]<size_t I>(std::integral_constant<size_t, I>) 
+        field_variant_detail::at_index<size()>(s_, [&]<size_t I>(std::integral_constant<size_t, I>) 
           noexcept(noexcept(s_.template get<I>() = other.s_.template get<I>())) 
           -> void {
           s_.template get<I>() = other.s_.template get<I>();
@@ -649,14 +694,14 @@ public:
       }
     } else {
       if (s_.has_value()) {
-        at_index(s_, [&]<size_t I>(std::integral_constant<size_t, I>) 
+        field_variant_detail::at_index<size()>(s_, [&]<size_t I>(std::integral_constant<size_t, I>) 
           noexcept(noexcept(s_.template destroy<I>())) 
           -> void {
           s_.template destroy<I>();
         });
       }
       if (other.s_.has_value()) {
-        at_index(other.s_, [&]<size_t I>(std::integral_constant<size_t, I>) 
+        field_variant_detail::at_index<size()>(other.s_, [&]<size_t I>(std::integral_constant<size_t, I>) 
           noexcept(noexcept(s_.template construct<I>(other.s_.template get<I>()))) 
           -> void {
           s_.template construct<I>(other.s_.template get<I>());
@@ -680,7 +725,7 @@ public:
                 meta::metadata.are_all_mems_move_assignable) {
     if (s_.index() == other.s_.index()) {
       if (s_.has_value()) {
-        at_index(s_, [&]<size_t I>(std::integral_constant<size_t, I>) 
+        field_variant_detail::at_index<size()>(s_, [&]<size_t I>(std::integral_constant<size_t, I>) 
           noexcept(noexcept(s_.template get<I>() = std::move(other.s_.template get<I>()))) 
           -> void {
           s_.template get<I>() = std::move(other.s_.template get<I>());
@@ -688,14 +733,14 @@ public:
       }
     } else {
       if (s_.has_value()) {
-        at_index(s_, [&]<size_t I>(std::integral_constant<size_t, I>) 
+        field_variant_detail::at_index<size()>(s_, [&]<size_t I>(std::integral_constant<size_t, I>) 
           noexcept(noexcept(s_.template destroy<I>())) 
           -> void {
           s_.template destroy<I>();
         });
       }
       if (other.s_.has_value()) {
-        at_index(other.s_, [&]<size_t I>(std::integral_constant<size_t, I>) noexcept(
+        field_variant_detail::at_index<size()>(other.s_, [&]<size_t I>(std::integral_constant<size_t, I>) noexcept(
             std::is_reference_v<member_type<I>> ||
             std::is_nothrow_move_constructible_v<storage_type<I>>) 
             -> void {
@@ -713,13 +758,13 @@ public:
       requires (!meta::metadata.are_all_mems_move_assignable) 
       = delete;
 
-  consteval std::size_t size() const noexcept { return meta::member_count; }
+  static consteval std::size_t size() noexcept { return meta::member_count; }
   constexpr std::size_t index() const noexcept { return s_.index(); }
   constexpr bool has_value() const noexcept { return s_.has_value(); }
   template <class M>
-  consteval bool has_type() const noexcept { return meta::template has_member_type<M>; }
+  static consteval bool has_type() noexcept { return meta::template has_member_type<M>; }
   template <fixed_string Fs>
-  consteval bool has_name() const noexcept { return meta::template index_of_name<Fs>() != meta::member_count; }
+  static consteval bool has_name() noexcept { return meta::template index_of_name<Fs>() != meta::member_count; }
     
   template <size_t I>
   constexpr decltype(auto) get(this auto&& self) noexcept {
@@ -728,7 +773,7 @@ public:
   template <class U>
   constexpr decltype(auto) get(this auto &&self) noexcept {
     constexpr size_t I = meta::template index_of<U>;
-    static_assert(I != member_count, "get<U>: U must match exactly one member type");
+    static_assert(I != meta::member_count, "get<U>: U must match exactly one member type");
     return self.template get<I>();
   }
   template <fixed_string Fs>
@@ -745,7 +790,7 @@ public:
       std::is_nothrow_constructible_v<storage_type<I>, Args...>)
       requires (I < meta::member_count) {
     if (s_.has_value()) {
-      at_index(s_, [&]<size_t J>(std::integral_constant<size_t, J>) 
+      field_variant_detail::at_index<size()>(s_, [&]<size_t J>(std::integral_constant<size_t, J>) 
         noexcept(noexcept(s_.template destroy<J>())) 
         -> void {
         s_.template destroy<J>();
@@ -754,21 +799,104 @@ public:
     return s_.template construct<I>(std::forward<Args>(args)...);
   }
 
-  /// ---- The following three members are declared only; their bodies
-  /// ---- are implemented elsewhere. ----
+  /// ---- operator<=> ----
+  /// std::variant comparison semantics: engaged members compare by value when
+  /// the index matches, otherwise indices compare first; the disengaged state
+  /// behaves like valueless_by_exception (less than any engaged value).
   constexpr auto operator<=>(const field_variant& other) const
       noexcept(meta::metadata.are_all_mems_compare_nothrow)
-      requires (meta::metadata.are_all_mems_three_way_comparable);
+      requires (meta::metadata.are_all_mems_three_way_comparable) {
+    using cmp_t = typename field_variant_detail::compare_cat_of<typename meta::member_types>::type;
+    if (s_.has_value() && other.s_.has_value() && s_.index() == other.s_.index()) {
+      return field_variant_detail::at_index<size()>(s_, [&]<size_t I>(std::integral_constant<size_t, I>) -> cmp_t {
+        if constexpr (std::is_empty_v<std::remove_cvref_t<member_type<I>>>) {
+          return cmp_t(std::strong_ordering::equal);  ///< Empty member (value or reference): trivially equal.
+        } else {
+          return static_cast<cmp_t>(s_.template get<I>() <=> other.s_.template get<I>());
+        }
+      });
+    }
+    if (!s_.has_value()) {
+      return cmp_t(other.s_.has_value() ? std::strong_ordering::less : std::strong_ordering::equal);
+    }
+    if (!other.s_.has_value()) {
+      return cmp_t(std::strong_ordering::greater);
+    }
+    return static_cast<cmp_t>(s_.index() <=> other.s_.index());
+  }
+
+  /// ---- operator== ----
+  /// Per P1185R2, == is NOT rewritten from <=>: equality operators only use
+  /// operator== candidates (and != is rewritten from ==). std::variant's
+  /// equality is therefore provided explicitly, defined in terms of the
+  /// same ordering semantics as operator<=>.
+  constexpr bool operator==(const field_variant& other) const
+      noexcept(meta::metadata.are_all_mems_compare_nothrow)
+      requires (meta::metadata.are_all_mems_three_way_comparable) {
+    return (*this <=> other) == 0;
+  }
 
   template <class F>
   constexpr decltype(auto) visit(this auto&& self, F&& f);
 
-  constexpr void swap(field_variant& other) noexcept(
-      meta::metadata.are_all_mems_move_constructor_nothrow &&
-      meta::metadata.are_all_mems_move_assignment_nothrow);
+  constexpr void swap(field_variant& other)
+      noexcept(meta::metadata.are_all_mems_move_constructor_nothrow &&
+               meta::metadata.are_all_mems_move_assignment_nothrow)
+      requires (meta::metadata.are_all_mems_move_constructible &&
+                meta::metadata.are_all_mems_move_assignable) {
+    if (s_.index() == other.s_.index()) {
+      if (s_.has_value()) {
+        field_variant_detail::at_index<size()>(s_, [&]<size_t I>(std::integral_constant<size_t, I>) -> void {
+          if constexpr (std::is_reference_v<member_type<I>> ||
+                        !std::is_empty_v<std::remove_cvref_t<member_type<I>>>) {
+            using std::swap;
+            swap(s_.template get<I>(), other.s_.template get<I>());
+          }  ///< Empty member: no state to exchange.
+        });
+      }
+    } else {
+      field_variant tmp(std::move(*this));
+      *this = std::move(other);
+      other = std::move(tmp);
+    }
+  }
       
 private:
   storage_base<T> s_;
 };
-// TODO swap, hash, visit Cartesian product
+
+template <class T>
+constexpr void swap(field_variant<T>& a, field_variant<T>& b)
+    noexcept(field_variant_detail::storage_meta<T>::metadata.are_all_mems_move_constructor_nothrow &&
+             field_variant_detail::storage_meta<T>::metadata.are_all_mems_move_assignment_nothrow)
+    requires (field_variant_detail::storage_meta<T>::metadata.are_all_mems_move_constructible &&
+              field_variant_detail::storage_meta<T>::metadata.are_all_mems_move_assignable) {
+  a.swap(b);
+}
+
+/// Hash support: combines the active member index with the member's own hash;
+/// the disengaged state hashes via its sentinel index. Requires every member
+/// to be std::hash-able (reference members hash the referred object, empty
+/// members hash by index only).
+template <class T>
+struct hash<field_variant<T>> {
+  constexpr std::size_t operator()(const field_variant<T>& v) const
+      requires (field_variant_detail::storage_meta<T>::metadata.are_all_mems_hashable) {
+    if (!v.has_value()) {
+      return field_variant_detail::hash_combine(v.index(), 0);
+    }
+    return field_variant_detail::at_index<std::remove_cvref_t<decltype(v)>::size()>(v, [&]<size_t I>(std::integral_constant<size_t, I>) -> std::size_t {
+      using M = typename field_variant<T>::template member_type<I>;
+      if constexpr (std::is_reference_v<M> ||
+                    !std::is_empty_v<std::remove_cvref_t<M>>) {
+        return field_variant_detail::hash_combine(
+            I, std::hash<std::remove_cv_t<std::remove_reference_t<M>>>{}(v.template get<I>()));
+      } else {
+        return field_variant_detail::hash_combine(I, 0);
+      }
+    });
+  }
+};
+
+// TODO visit Cartesian product
 } // namespace stdex
