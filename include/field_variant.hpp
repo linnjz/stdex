@@ -535,21 +535,99 @@ struct storage_base<T> : storage_meta<T>
 };
 
 /// Dispatches f over the active member index; used by field_variant's
-/// special members.
+/// special members. Two paths (mirroring MSVC STL's _Visit_strategy):
+/// a macro-stamped switch of 4..256 cases for N <= 256, and a
+/// function-pointer table (with a disengaged slot) for larger N. Both are
+/// usable in constant evaluation, since calling a constexpr function
+/// through a function pointer is a constant expression.
+#define MV_CASE(n)                                                          \
+  case (n):                                                                   \
+    if constexpr ((n) < N) {                                                  \
+      return static_cast<R>(f(std::integral_constant<size_t, (n)>{}));        \
+    }                                                                         \
+    std::unreachable();
+
+#define MV_CASE2(n) MV_CASE(n) MV_CASE(n + 1)
+#define MV_CASE4(n) MV_CASE2(n) MV_CASE2(n + 2)
+#define MV_CASE8(n) MV_CASE4(n) MV_CASE4(n + 4)
+#define MV_CASE16(n) MV_CASE8(n) MV_CASE8(n + 8)
+#define MV_CASE32(n) MV_CASE16(n) MV_CASE16(n + 16)
+#define MV_CASE64(n) MV_CASE32(n) MV_CASE32(n + 32)
+#define MV_CASE128(n) MV_CASE64(n) MV_CASE64(n + 64)
+#define MV_CASE256(n) MV_CASE128(n) MV_CASE128(n + 128)
+
+template <size_t Stamped, size_t N, class R, class Self, class F>
+constexpr R at_index_switch(Self&& self, F&& f) {
+  if constexpr (Stamped == 4) {
+    switch (self.index()) { MV_CASE4(0) default: std::unreachable(); }
+  } else if constexpr (Stamped == 8) {
+    switch (self.index()) { MV_CASE8(0) default: std::unreachable(); }
+  } else if constexpr (Stamped == 16) {
+    switch (self.index()) { MV_CASE16(0) default: std::unreachable(); }
+  } else if constexpr (Stamped == 32) {
+    switch (self.index()) { MV_CASE32(0) default: std::unreachable(); }
+  } else if constexpr (Stamped == 64) {
+    switch (self.index()) { MV_CASE64(0) default: std::unreachable(); }
+  } else if constexpr (Stamped == 128) {
+    switch (self.index()) { MV_CASE128(0) default: std::unreachable(); }
+  } else {
+    switch (self.index()) { MV_CASE256(0) default: std::unreachable(); }
+  }
+}
+
+#undef MV_CASE
+#undef MV_CASE2
+#undef MV_CASE4
+#undef MV_CASE8
+#undef MV_CASE16
+#undef MV_CASE32
+#undef MV_CASE64
+#undef MV_CASE128
+#undef MV_CASE256
+
+/// Calls f with the compile-time index I; the uniform table entry signature.
+template <size_t I, class R, class Self, class F>
+constexpr R at_dispatch(Self&& self, F&& f) {
+  return static_cast<R>(f(std::integral_constant<size_t, I>{}));
+}
+
+/// Last table slot, never selected by valid callers (all reach at_index
+/// only when has_value()); mirrors the I == N sentinel of the old recursion.
+template <class R, class Self, class F>
+[[noreturn]] constexpr R at_dispatch_disengaged(Self&&, F&&) {
+  std::unreachable();
+}
+
+template <size_t N, class R, class Self, class F>
+constexpr R at_index_table(Self&& self, F&& f) {
+  return [&]<size_t... Is>(std::index_sequence<Is...>) {
+    using dispatch_fn = R (*)(Self&&, F&&);
+    constexpr dispatch_fn table[N + 1] = { &at_dispatch<Is, R, Self, F>..., &at_dispatch_disengaged<R, Self, F>};
+    return table[self.index()](static_cast<Self&&>(self), static_cast<F&&>(f));
+  }(std::make_index_sequence<N>{});
+}
+
 template <size_t N, class Self, class F>
 constexpr decltype(auto) at_index(Self&& self, F&& f) {
   return [&]<size_t... Is>(std::index_sequence<Is...>) -> decltype(auto) {
     using R = std::common_reference_t<decltype(f(std::integral_constant<size_t, Is>{}))...>;
-    auto dispatch = [&]<size_t I>(this auto&& d) -> R {
-      if constexpr (I == N) {
-        std::unreachable();  ///< Disengaged.
-      } else if (self.index() == I) {
-        return f(std::integral_constant<size_t, I>{});
-      } else {
-        return d.template operator()<I + 1>();
-      }
-    };
-    return dispatch.template operator()<0>();
+    if constexpr (N <= 4) {
+      return at_index_switch<4, N, R>(self, f);
+    } else if constexpr (N <= 8) {
+      return at_index_switch<8, N, R>(self, f);
+    } else if constexpr (N <= 16) {
+      return at_index_switch<16, N, R>(self, f);
+    } else if constexpr (N <= 32) {
+      return at_index_switch<32, N, R>(self, f);
+    } else if constexpr (N <= 64) {
+      return at_index_switch<64, N, R>(self, f);
+    } else if constexpr (N <= 128) {
+      return at_index_switch<128, N, R>(self, f);
+    } else if constexpr (N <= 256) {
+      return at_index_switch<256, N, R>(self, f);
+    } else {
+      return at_index_table<N, R>(self, f);
+    }
   }(std::make_index_sequence<N>{});
 }
 
