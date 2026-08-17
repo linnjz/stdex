@@ -631,6 +631,71 @@ constexpr decltype(auto) at_index(Self&& self, F&& f) {
   }(std::make_index_sequence<N>{});
 }
 
+/// Cartesian visit (std::visit alignment). A single variant dispatches through
+/// at_index<size()>. For two variants the N×M product is flattened: when
+/// K = N·M <= MV_FLAT_LIMIT a single stamped switch over flat = I*M + J is
+/// used (fastest per the r04 probe); when K > MV_FLAT_LIMIT two at_index
+/// dispatches are nested (faster than any function-pointer table at that size).
+/// Three or more variants dispatch the leading variant, wrap the visitor to
+/// record its value, and recurse over the remaining variants.
+inline constexpr std::size_t MV_FLAT_LIMIT = 256;
+
+/// Proxy whose index() returns the flattened pair index I*M + J.
+struct flat_self {
+  std::size_t flat;
+  constexpr std::size_t index() const noexcept { return flat; }
+};
+
+/// Cartesian dispatch over exactly two variants.
+template <class A, class B, class Visitor>
+constexpr decltype(auto) visit_2(Visitor&& vis, A&& a, B&& b) {
+  constexpr std::size_t NA = std::remove_cvref_t<A>::size();
+  constexpr std::size_t NB = std::remove_cvref_t<B>::size();
+  constexpr std::size_t K  = NA * NB;
+  if constexpr (K <= MV_FLAT_LIMIT) {
+    return at_index<K>(flat_self{a.index() * NB + b.index()},
+                         [&]<size_t n>(std::integral_constant<size_t, n>) -> decltype(auto) {
+                           return vis(std::forward_like<A>(a).template get<n / NB>(),
+                                      std::forward_like<B>(b).template get<n % NB>());
+                         });
+  } else {
+    return at_index<NA>(a, [&]<size_t I>(std::integral_constant<size_t, I>) -> decltype(auto) {
+      return at_index<NB>(b, [&]<size_t J>(std::integral_constant<size_t, J>) -> decltype(auto) {
+        return vis(std::forward_like<A>(a).template get<I>(),
+                   std::forward_like<B>(b).template get<J>());
+      });
+    });
+  }
+}
+
+/// Base case: a single variant.
+template <class V, class Visitor>
+constexpr decltype(auto) visit_impl(Visitor&& vis, V&& v) {
+  using VV = std::remove_cvref_t<V>;
+  return at_index<VV::size()>(v, [&]<size_t I>(std::integral_constant<size_t, I>) -> decltype(auto) {
+    return vis(std::forward_like<V>(v).template get<I>());
+  });
+}
+
+/// Two or more variants: two use the Cartesian fast path; three or more
+/// dispatch the leading variant and recurse with a wrapped visitor.
+template <class V, class W, class... Rest, class Visitor>
+constexpr decltype(auto) visit_impl(Visitor&& vis, V&& v, W&& w, Rest&&... rest) {
+  if constexpr (sizeof...(Rest) == 0) {
+    return visit_2(vis, v, w);
+  } else {
+    using VV = std::remove_cvref_t<V>;
+    return at_index<VV::size()>(v, [&]<size_t I>(std::integral_constant<size_t, I>) -> decltype(auto) {
+      return visit_impl(
+          [&](auto&&... vals) -> decltype(auto) {
+            return vis(std::forward_like<V>(v).template get<I>(),
+                       std::forward<decltype(vals)>(vals)...);
+          },
+          w, rest...);
+    });
+  }
+}
+
 /// Boost-style hash combination; used by std::hash<field_variant<T>>.
 constexpr std::size_t hash_combine(std::size_t seed, std::size_t value) noexcept {
   return seed ^ (value + 0x9e3779b9 + (seed << 6) + (seed >> 2));
@@ -915,7 +980,18 @@ public:
   }
 
   template <class F>
-  constexpr decltype(auto) visit(this auto&& self, F&& f);
+  constexpr decltype(auto) visit(this auto&& self, F&& f) {
+    return field_variant_detail::visit_impl(std::forward<F>(f), std::forward<decltype(self)>(self));
+  }
+
+  template <class R, class F>
+  constexpr R visit(this auto&& self, F&& f) {
+    if constexpr (std::is_void_v<R>) {
+      field_variant_detail::visit_impl(std::forward<F>(f), std::forward<decltype(self)>(self));
+    } else {
+      return static_cast<R>(field_variant_detail::visit_impl(std::forward<F>(f), std::forward<decltype(self)>(self)));
+    }
+  }
 
   constexpr void swap(field_variant& other)
       noexcept(meta::metadata.are_all_mems_move_constructor_nothrow &&
@@ -976,5 +1052,34 @@ struct hash<field_variant<T>> {
   }
 };
 
-// TODO visit Cartesian product
+namespace field_variant_detail {
+
+template <class T>
+struct is_field_variant : std::false_type {};
+template <class T>
+struct is_field_variant<field_variant<T>> : std::true_type {};
+
+} // namespace field_variant_detail
+
+/// Dispatches the visitor over the active members of every variant
+/// (Cartesian product). Constrained to field_variant so that a user who also
+/// includes <variant> still gets an unambiguous overload; our constrained
+/// candidate is preferred over std::variant's unconstrained one.
+template <class Visitor, class... Variants>
+requires (sizeof...(Variants) > 0 &&
+          (field_variant_detail::is_field_variant<std::remove_cvref_t<Variants>>::value && ...))
+constexpr decltype(auto) visit(Visitor&& vis, Variants&&... values) {
+  return field_variant_detail::visit_impl(std::forward<Visitor>(vis), std::forward<Variants>(values)...);
+}
+
+template <class R, class Visitor, class... Variants>
+requires (sizeof...(Variants) > 0 &&
+          (field_variant_detail::is_field_variant<std::remove_cvref_t<Variants>>::value && ...))
+constexpr R visit(Visitor&& vis, Variants&&... values) {
+  if constexpr (std::is_void_v<R>) {
+    field_variant_detail::visit_impl(std::forward<Visitor>(vis), std::forward<Variants>(values)...);
+  } else {
+    return static_cast<R>(field_variant_detail::visit_impl(std::forward<Visitor>(vis), std::forward<Variants>(values)...));
+  }
+}
 } // namespace stdex
