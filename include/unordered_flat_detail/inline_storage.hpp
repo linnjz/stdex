@@ -67,7 +67,7 @@ struct inline_storage
       : us_ { std::move(other.us_) }
       , group_index_shift_ { other.group_index_shift_ }
       , group_count_mask_ { other.group_count_mask_ }
-      , alloc_ { std::move(other.alloc_) }
+      , alloc_ { other.alloc_ }
   {
     other.dissociate();
   }
@@ -83,7 +83,7 @@ struct inline_storage
       us_                = std::move(other.us_);
       group_index_shift_ = other.group_index_shift_;
       group_count_mask_  = other.group_count_mask_;
-      alloc_             = std::move(other.alloc_);
+      alloc_             = other.alloc_;
       other.dissociate();
     }
     return *this;
@@ -313,6 +313,12 @@ struct inline_storage
   /// deallocate with the same allocator state that allocated (the empty,
   /// never-created state never deallocates, so a default-constructed storage is
   /// still fine as long as the allocator is default-constructible).
+  ///
+  /// Moves copy it rather than move it: allocators are CopyConstructible, and a
+  /// steal happens only when the container's allocator is already equal (so the
+  /// copy is the same value), which keeps this storage's allocator interchangeable
+  /// with hash_table::alloc_ without depending on a moved-from allocator -- the
+  /// container must not propagate its allocator when propagation is off.
   [[no_unique_address]] allocator_type alloc_;
 };
 } // namespace stdex::unordered_flat_detail
