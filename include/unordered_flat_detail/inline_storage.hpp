@@ -58,6 +58,18 @@ struct inline_storage
     group_type::make_dummy_group(), group_type::make_dummy_group()
   };
 
+  /// An inline_storage is always probe-able: a default-constructed one stands
+  /// for an empty table (capacity 0) by pointing at the static dummy group,
+  /// so callers never need to remember to call create(alloc, 0).
+  constexpr inline_storage() noexcept
+      : group_index_shift_ { group_index_shift(0) }
+      , group_count_mask_ { min_group_count - 1 }
+  {
+    if constexpr (std::is_same_v<std::add_pointer_t<group_type>, group_pointer>) {
+      us_.heap_.groups_ptr_ = const_cast<group_pointer>(dummy_groups);
+    }
+  }
+
   constexpr value_type *elements_address() const noexcept { return std::to_address(us_.heap_.elements_ptr_); }
 
   constexpr group_type *groups_address() const noexcept { return std::to_address(us_.heap_.groups_ptr_); }
@@ -108,8 +120,7 @@ struct inline_storage
 
     if constexpr (std::is_same_v<std::add_pointer_t<group_type>, group_pointer>) {
       if (capacity == 0) [[unlikely]] {
-        s.us_.heap_.groups_ptr_ = const_cast<group_pointer>(dummy_groups);
-        return s;
+        return s; // default-constructed storage already points at dummy_groups
       }
     }
 
