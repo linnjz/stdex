@@ -141,6 +141,19 @@ protected:
     }
   }
 
+  /// Steals other's storage and counters and leaves other a valid empty table.
+  /// Valid only where the allocators permit sharing the arrays (equal or
+  /// propagating); moving a storage disposes whatever it replaced, so *this is
+  /// released here as well.
+  constexpr void adopt_moved_(hash_table &other) noexcept
+  {
+    is_             = std::move(other.is_);
+    size_           = other.size_;
+    max_load_       = other.max_load_;
+    other.size_     = 0;
+    other.max_load_ = floor_max_load_(0);
+  }
+
   ///< Given the capacity, figure out how much it can hold.
   static constexpr size_type floor_max_load_(size_type capacity) noexcept
   {
@@ -228,8 +241,8 @@ protected:
 
   /// Only occupied slots hold live objects; a bulk copy would read the
   /// uninitialized slots, which is UB at runtime and impossible in consteval.
-  /// Each slot is marked occupied as soon as its object exists, so an
-  /// element_guard can undo a partial copy from the storage itself.  The mark is
+  /// Each slot is marked occupied as soon as its object exists, so the storage's
+  /// own destructor can undo a partial copy from its occupancy bits.  The mark is
   /// transient: copy_from_ replaces the whole group array from other right after
   /// this returns, before the storage is ever read, so no made-up fingerprint
   /// survives into the committed table.
@@ -248,44 +261,39 @@ protected:
   {
     auto storage_alloc = static_cast<typename inline_storage_type::allocator_type>(alloc_);
     auto storage       = inline_storage_type::create(storage_alloc, ceil_capacity_for_load_(other.size_));
-    typename inline_storage_type::allocation_guard g { &storage, storage_alloc };
-    typename inline_storage_type::element_guard b { &storage, storage_alloc };
-    {
-      bool const is_group_count_equal = storage.group_count_mask_ == other.is_.group_count_mask_;
-      if (is_group_count_equal) {
-        if constexpr (std::is_trivially_copyable_v<value_type> && std::is_standard_layout_v<value_type>) {
-          if consteval {
-            copy_occupied_into_(other, storage);
-          } else {
-            std::memcpy(
-                reinterpret_cast<unsigned char *>(storage.elements_address()),
-                reinterpret_cast<unsigned char *>(other.is_.elements_address()),
-                other.capacity() * sizeof(value_type));
-          }
-        } else {
+
+    bool const is_group_count_equal = storage.group_count_mask_ == other.is_.group_count_mask_;
+    if (is_group_count_equal) {
+      if constexpr (std::is_trivially_copyable_v<value_type> && std::is_standard_layout_v<value_type>) {
+        if consteval {
           copy_occupied_into_(other, storage);
+        } else {
+          std::memcpy(
+              reinterpret_cast<unsigned char *>(storage.elements_address()),
+              reinterpret_cast<unsigned char *>(other.is_.elements_address()),
+              other.capacity() * sizeof(value_type));
         }
-        std::copy_n(other.is_.groups_address(), other.is_.group_count(), storage.groups_address());
-#ifndef NDEBUG
-        /// The group copy must have replaced every transient occupancy mark with
-        /// real data; a divergence here means a slot kept a made-up fingerprint
-        /// and would silently make that element unfindable.
-        for (size_t i = 0; i < storage.group_count(); ++i)
-          assert(group_type::attorney::equals(storage.groups_address()[i], other.is_.groups_address()[i]));
-#endif
       } else {
-        inline_storage_type::for_each_occupied(other.is_, [&](raw_pointer occupied_ptr, raw_group_pointer, unsigned) {
-          auto hash = hasher_(Traits::key_fn(*occupied_ptr));
-          emplace_at_available_slot_(storage, hash, storage.group_index(hash), *occupied_ptr);
-          return true;
-        });
+        copy_occupied_into_(other, storage);
       }
-      is_       = std::move(storage);
-      size_     = other.size_;
-      max_load_ = is_group_count_equal ? other.max_load_ : floor_max_load_(capacity()); ///< is_ -> is_.group_count_mask_ -> capacity -> max_load_
-      b.release();
+      std::copy_n(other.is_.groups_address(), other.is_.group_count(), storage.groups_address());
+#ifndef NDEBUG
+      /// The group copy must have replaced every transient occupancy mark with
+      /// real data; a divergence here means a slot kept a made-up fingerprint
+      /// and would silently make that element unfindable.
+      for (size_t i = 0; i < storage.group_count(); ++i)
+        assert(group_type::attorney::equals(storage.groups_address()[i], other.is_.groups_address()[i]));
+#endif
+    } else {
+      transfer_occupied_<false>(other.is_, storage);
     }
-    g.release();
+
+    /// If anything above threw, storage's own destructor has already destroyed
+    /// the partial elements and freed its memory, and is_ is untouched.  Only
+    /// now is the result committed.
+    is_       = std::move(storage);
+    size_     = other.size_;
+    max_load_ = is_group_count_equal ? other.max_load_ : floor_max_load_(capacity()); ///< is_ -> is_.group_count_mask_ -> capacity -> max_load_
   }
 
 public:
@@ -303,53 +311,43 @@ public:
     copy_from_(other);
   }
 
+  constexpr hash_table(hash_table const &other)
+      : hash_table(other, allocator_traits::select_on_container_copy_construction(other.alloc_))
+  {
+  }
+
   constexpr hash_table &operator= (hash_table const &other)
   {
     if (this == std::addressof(other)) [[unlikely]]
       return *this;
 
+    /// Copy the policies first; if that throws, *this is untouched.
     auto hasher = other.hasher_;
     auto key_eq = other.key_eq_;
-    //clear();
+
+    if constexpr (allocator_traits::propagate_on_container_copy_assignment::value) {
+      if (!(alloc_ == other.alloc_)) {
+        /// The current arrays belong to the old allocator, so they must be
+        /// released before the new allocator is adopted.
+        is_.dispose();
+        size_     = 0;
+        max_load_ = floor_max_load_(0);
+      }
+      alloc_ = other.alloc_;
+    }
+
     using std::swap;
     swap(hasher, hasher_);
     swap(key_eq, key_eq_);
 
-    if (other.empty()) [[unlikely]]
-      return;
-
-    // size_type cap = capacity();
-    // if (cap == 0) {
-    //   copy_from_(other);
-    // } else if (cap == min_group_count * group_size - 1) {
-    //   if (other.size_ <= cap) {
-    //     // copy elements?
-    //   } else {
-    //     // grow and copy?
-    //   }
-    // } else {
-    //   if (other.size_ <= cap * max_load_factor()) {
-    //     // copy elements?
-    //   } else {
-    //     // grow and copy?
-    //   }
-    // }
-    // if (other.size_ > capacity() * max_load_factor()) {
-    // }
-
-    // if (alloc_ != other.alloc_) {
-    //   pocca_();
-    //   auto storage_alloc = static_cast<typename inline_storage_type::allocator_type>(alloc_);
-    //   auto storage       = inline_storage_type::create(storage_alloc, cap);
-    //   typename inline_storage_type::guard g { &storage, storage_alloc };
-    //   {
-    //     inline_storage_type::destroy(storage_alloc, is_);
-    //     is_ = std::move(storage);
-    //   }
-    //   g.release();
-    // }
-    // // capacity needs adjusting: with equal allocators, a smaller current capacity and more elements in other, the copy will grow; reserve enough room if possible
-    // copy_from_(other); // memory is allocated again here and needs adjusting
+    if (other.empty()) {
+      clear();
+    } else {
+      /// copy_from_ commits through is_ = std::move(storage); if it throws, is_
+      /// still holds the old elements (strong guarantee).
+      copy_from_(other);
+    }
+    return *this;
   }
 
   constexpr hash_table(hash_table &&other, allocator_type const &alloc)
@@ -360,42 +358,67 @@ public:
       , key_eq_ { std::move(other.key_eq_) }
       , alloc_ { alloc }
   {
-    if (other.empty()) [[unlikely]]
-      return;
+    if (allocators_equal_(alloc_, other.alloc_)) {
+      adopt_moved_(other);
+    } else if (!other.empty()) {
+      /// Different allocators cannot share the arrays, so the elements are moved
+      /// across one by one and the source is emptied.
+      other.is_.for_each_occupied(other.is_, [&](raw_pointer element_ptr, raw_group_pointer, unsigned) {
+        emplace(std::move(*element_ptr));
+        return true;
+      });
+      other.clear();
+    }
   }
 
   constexpr hash_table(hash_table &&other) noexcept(
-      std::is_nothrow_move_constructible_v<value_type> &&
       std::is_nothrow_move_constructible_v<hasher> &&
       std::is_nothrow_move_constructible_v<key_equal> &&
       std::is_nothrow_move_constructible_v<allocator_type>)
-      : is_ {}
-      , size_ {}
-      , max_load_ {}
+      : is_ { std::move(other.is_) }
+      , size_ { other.size_ }
+      , max_load_ { other.max_load_ }
       , hasher_ { std::move(other.hasher_) }
       , key_eq_ { std::move(other.key_eq_) }
       , alloc_ { std::move(other.alloc_) }
   {
-    if (other.empty()) [[unlikely]]
-      return;
+    other.size_     = 0;
+    other.max_load_ = floor_max_load_(0);
   }
 
-  constexpr hash_table &operator= (hash_table &&other)
+  constexpr hash_table &operator= (hash_table &&other) noexcept(
+      allocator_traits::propagate_on_container_move_assignment::value ||
+      allocator_traits::is_always_equal::value)
   {
-    if (this == &other) [[unlikely]]
+    if (this == std::addressof(other)) [[unlikely]]
       return *this;
+
+    using std::swap;
+    swap(hasher_, other.hasher_);
+    swap(key_eq_, other.key_eq_);
+
+    if constexpr (allocator_traits::propagate_on_container_move_assignment::value) {
+      alloc_ = std::move(other.alloc_);
+      adopt_moved_(other);
+    } else if (allocators_equal_(alloc_, other.alloc_)) {
+      adopt_moved_(other);
+    } else if (!other.empty()) {
+      is_.clear();
+      size_     = 0;
+      max_load_ = floor_max_load_(capacity());
+      other.is_.for_each_occupied(other.is_, [&](raw_pointer element_ptr, raw_group_pointer, unsigned) {
+        emplace(std::move(*element_ptr));
+        return true;
+      });
+      other.clear();
+    }
+    return *this;
   }
 
   constexpr void swap(hash_table &other) noexcept;
 
-
-protected:
-  constexpr void destroy_storage_() noexcept
-  {
-  }
-
 public:
-  constexpr ~hash_table() { destroy_storage_(); };
+  constexpr ~hash_table() noexcept {}
 
 public:
   // clang-format off
@@ -412,6 +435,15 @@ public:
   [[nodiscard]] constexpr size_type capacity() const noexcept
   {
     return is_.elements_address() ? (is_.group_count()) * group_size - 1 : 0;
+  }
+
+  /// Drops every element but keeps the allocation, so the table can be refilled
+  /// without going back to the allocator (mirrors boost's clear()).
+  constexpr void clear() noexcept
+  {
+    is_.clear();
+    size_     = 0;
+    max_load_ = floor_max_load_(capacity());
   }
 
   [[nodiscard]] constexpr iterator begin() noexcept
@@ -515,49 +547,48 @@ protected:
     return (n * max_load_factor_ratio_numerator + 6) / max_load_factor_ratio_denominator;
   }
 
-  /// Rehashes every live element of is_ into the freshly allocated storage that
-  /// already holds the inserted element, then adopts storage.  The destination
-  /// groups are laid out differently, so old fingerprints cannot be reused and
-  /// every hash is recomputed.
+  /// Rehashes every live element of src into dst, recomputing each hash because
+  /// dst lays its groups out differently.  This is the single "source to target
+  /// rehash" primitive shared by growth (force_rehash_), the unequal-group copy
+  /// path and future rehash/reserve.
   ///
-  /// Following boost (unchecked_rehash, core.hpp:2287), an element is moved and
-  /// its source destroyed slot by slot when a move cannot lose data, and copied
-  /// -- sources untouched until the whole transfer succeeds -- otherwise.  The
-  /// move branch clears each source slot as it consumes it, so is_ stays a
-  /// faithful record of the live elements: if a later hash or move throws, size_
-  /// has already been decremented for the consumed slots, leaving is_ valid with
-  /// exactly the untransferred elements (boost's recover_slot state, without a
-  /// separate counter).  This project tracks no per-slot overflow-driven load
-  /// drift, so the ml adjustment recover_slot also performs has no equivalent.
+  /// Following boost (unchecked_rehash, core.hpp:2287), a Move transfer destroys
+  /// each source element and clears its slot as soon as it has been moved, so
+  /// src stays a faithful record of what remains: if a later hash or move throws,
+  /// size_ has already been decremented for the consumed slots, leaving exactly
+  /// the untransferred elements (boost's recover_slot state, without a separate
+  /// counter).  A copy transfer leaves src untouched until the caller commits,
+  /// giving the strong guarantee.
+  ///
+  /// Precondition for Move: &src == &is_.  size_ counts this table's elements and
+  /// only describes src when src is this table's own storage.
+  template <bool Move>
+  constexpr void transfer_occupied_(inline_storage_type const &src, inline_storage_type &dst)
+  {
+    auto const old_size = size_;
+    inline_storage_type::for_each_occupied(src, [&](raw_pointer element_ptr, raw_group_pointer group, unsigned slot) {
+      auto hash = hasher_(Traits::key_fn(*element_ptr));
+      if constexpr (Move) {
+        emplace_at_available_slot_(dst, hash, dst.group_index(hash), std::move(*element_ptr));
+        inline_storage_type::destroy_element(alloc_, element_ptr);
+        group->reset(slot);
+        --size_;
+      } else {
+        emplace_at_available_slot_(dst, hash, dst.group_index(hash), static_cast<value_type const &>(*element_ptr));
+      }
+      return true;
+    });
+    if constexpr (Move) size_ = old_size; ///< every source was consumed
+  }
+
+  /// Rehashes is_ into the freshly allocated storage that already holds the
+  /// inserted element, then adopts storage.  The source-side backout is
+  /// transfer_occupied_'s; the destination storage owns its own rollback, and
+  /// moving it into is_ (which disposes the old arrays) is the commit.
   constexpr void force_rehash_(inline_storage_type &storage)
   {
     assert(&storage != &is_ && "force_rehash_ needs a distinct destination storage");
-    auto storage_alloc = static_cast<typename inline_storage_type::allocator_type>(alloc_);
-
-    if constexpr (transfer_by_move) {
-      auto const old_size = size_;
-      inline_storage_type::for_each_occupied(is_, [&](raw_pointer element_ptr, raw_group_pointer group, unsigned slot) {
-        auto hash = hasher_(Traits::key_fn(*element_ptr));
-        emplace_at_available_slot_(storage, hash, storage.group_index(hash), std::move(*element_ptr));
-        inline_storage_type::destroy_element(storage_alloc, element_ptr);
-        group->reset(slot);
-        --size_;
-        return true;
-      });
-      size_ = old_size; ///< every source was consumed; the adopted storage holds old_size elements
-    } else {
-      inline_storage_type::for_each_occupied(is_, [&](raw_pointer element_ptr, raw_group_pointer, unsigned) {
-        auto hash = hasher_(Traits::key_fn(*element_ptr));
-        emplace_at_available_slot_(storage, hash, storage.group_index(hash), static_cast<value_type const &>(*element_ptr));
-        return true;
-      });
-      inline_storage_type::destroy_elements(storage_alloc, is_);
-    }
-
-    /// Nothing below throws (destroy and union_storage's move are noexcept), so
-    /// is_ is torn down and replaced without a window in which it could be
-    /// observed inconsistent.
-    inline_storage_type::destroy(storage_alloc, is_);
+    transfer_occupied_<transfer_by_move>(is_, storage);
     is_       = std::move(storage);
     max_load_ = floor_max_load_(capacity());
   }
@@ -567,12 +598,8 @@ protected:
   {
     auto storage_alloc = static_cast<typename inline_storage_type::allocator_type>(alloc_);
     auto storage       = inline_storage_type::create(storage_alloc, calculate_growth_());
-    typename inline_storage_type::allocation_guard g { &storage, storage_alloc };
-    typename inline_storage_type::element_guard b { &storage, storage_alloc };
-    auto it = emplace_at_available_slot_(storage, hash, storage.group_index(hash), std::forward<Args>(args)...);
+    auto it            = emplace_at_available_slot_(storage, hash, storage.group_index(hash), std::forward<Args>(args)...);
     force_rehash_(storage);
-    b.release();
-    g.release();
     ++size_;
     return it;
   }
@@ -660,7 +687,6 @@ public:
   // constexpr float load_factor() const noexcept;
   // constexpr void rehash(size_type bucket_count);
   // constexpr void reserve(size_type bucket_count);
-  // constexpr void clear() noexcept;
   // constexpr void reset() noexcept;
 
   // consteval auto freeze();
