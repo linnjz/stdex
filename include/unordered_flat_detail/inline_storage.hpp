@@ -54,9 +54,9 @@ struct inline_storage
   static constexpr auto group_size      = group_type::capacity();
   static constexpr auto min_group_count = 2;
 
-  static constexpr group_type dummy_groups[min_group_count] = {
-    group_type::make_dummy_group(), group_type::make_dummy_group()
-  };
+  // static constexpr group_type dummy_groups[min_group_count] = {
+  //   group_type::make_dummy_group(), group_type::make_dummy_group()
+  // };
 
   constexpr value_type *elements_address() const noexcept { return std::to_address(us_.heap_.elements_ptr_); }
 
@@ -108,7 +108,7 @@ struct inline_storage
 
     if constexpr (std::is_same_v<std::add_pointer_t<group_type>, group_pointer>) {
       if (capacity == 0) [[unlikely]] {
-        return (s.us_.heap_.groups_ptr_ = const_cast<group_pointer>(dummy_groups), s);
+        return (/*s.us_.heap_.groups_ptr_ = const_cast<group_pointer>(dummy_groups),*/ s);
       }
     }
 
@@ -186,8 +186,8 @@ struct inline_storage
       // stack: if it holds a non-trivial type (e.g. std::string), it needs destruction
     }
 
-    union_storage(union_storage const &)                  = delete;
-    union_storage &operator= (union_storage const &)      = delete;
+    union_storage(union_storage const &)                  = default;
+    union_storage &operator= (union_storage const &)      = default;
     constexpr union_storage(union_storage &&)             = default;
     constexpr union_storage &operator= (union_storage &&) = default;
   } us_;
