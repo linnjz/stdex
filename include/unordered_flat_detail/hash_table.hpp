@@ -80,6 +80,9 @@ public:
   using const_iterator = iterator;
   using lazy_iterator  = hash_table_lazy_iterator<iterator>;
 
+  template <class, bool>
+  friend class hash_table_iterator;
+
 protected:
   using group_type          = group15;
   using raw_group_pointer   = group_type *;

@@ -24,6 +24,10 @@
 
 namespace stdex::unordered_flat_detail
 {
+struct const_iterator_cast_tag
+{
+};
+
 template <class HashTable, bool IsConstant>
 class hash_table_iterator
 {
