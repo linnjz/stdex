@@ -107,8 +107,8 @@ struct inline_storage
     s.group_count_mask_  = group_count - 1;
 
     if constexpr (std::is_same_v<std::add_pointer_t<group_type>, group_pointer>) {
-      if (n == 0) [[unlikely]] {
-        return (s.us_.heap_.groups_ptr = const_cast<group_pointer>(dummy_groups), s);
+      if (capacity == 0) [[unlikely]] {
+        return (s.us_.heap_.groups_ptr_ = const_cast<group_pointer>(dummy_groups), s);
       }
     }
 
@@ -119,7 +119,7 @@ struct inline_storage
       auto groups_alloc = group_allocator_type { alloc };
 
       auto elements_ptr = allocator_traits::allocate(alloc, actual_capacity);
-      auto groups_ptr   = allocator_traits::allocate(groups_alloc, group_count);
+      auto groups_ptr   = group_allocator_traits::allocate(groups_alloc, group_count);
 
       for (size_t i = 0; i < group_count; ++i) std::construct_at(groups_ptr + i);
       groups_ptr[group_count - 1].set_sentinel_mark();
@@ -148,8 +148,9 @@ struct inline_storage
   {
     if (s.elements_address() != nullptr) {
       if consteval {
+        auto groups_alloc = group_allocator_type { alloc };
         allocator_traits::deallocate(alloc, s.us_.heap_.elements_ptr_, s.group_count() * group_size - 1);
-        allocator_traits::deallocate(alloc, s.us_.heap_.groups_ptr_, s.group_count());
+        group_allocator_traits::deallocate(groups_alloc, s.us_.heap_.groups_ptr_, s.group_count());
       } else {
         allocator_traits::deallocate(alloc, s.us_.heap_.elements_ptr_, calculate_storage_size(s.group_count()));
       }
@@ -158,15 +159,15 @@ struct inline_storage
 
   struct guard
   {
-    inline_storage *guard_stroage_;
+    inline_storage *guard_storage_;
     allocator_type guard_alloc_;
 
     constexpr ~guard()
     {
-      if (guard_stroage_) destroy(guard_alloc_, guard_stroage_);
+      if (guard_storage_) destroy(guard_alloc_, guard_storage_);
     }
 
-    constexpr void release() noexcept { storage = nullptr; }
+    constexpr void release() noexcept { guard_storage_ = nullptr; }
   };
 
   union union_storage
