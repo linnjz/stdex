@@ -16,13 +16,15 @@
 
 #pragma once
 
+#include <algorithm>   // std::copy_n
 #include <bit>         // std::countr_zero
 #include <cassert>     // assert
 #include <concepts>    // std::convertible_to, std::constructible_from
 #include <cstddef>     // std::size_t, size_t
+#include <cstring>     // std::memcpy
 #include <iterator>    // std::next
 #include <limits>      // std::numeric_limits
-#include <memory>      // std::allocator_traits, std::addressof, std::uninitialized_copy_n, std::construct_at
+#include <memory>      // std::addressof
 #include <ranges>      // std::ranges::input_range, std::ranges::range_reference_t, std::ranges::begin, std::ranges::end
 #include <type_traits> // std::conditional_t, std::is_same_v,
                        // std::is_convertible_v,
@@ -217,29 +219,44 @@ protected:
     return true;
   }
 
+  /// Only occupied slots hold live objects; a bulk copy would read the
+  /// uninitialized slots, which is UB at runtime and impossible in consteval.
+  constexpr void copy_occupied_into_(hash_table const &other, inline_storage_type &storage)
+  {
+    other.for_each_occupied_(other.is_, [&](raw_pointer occupied_ptr, raw_group_pointer, unsigned)
+    {
+      construct_element_(storage.elements_address() + (occupied_ptr - other.is_.elements_address()), *occupied_ptr);
+      return true;
+    });
+  }
+
   constexpr void copy_from_(hash_table const &other)
   {
     auto storage_alloc = static_cast<typename inline_storage_type::allocator_type>(alloc_);
     auto storage       = inline_storage_type::create(storage_alloc, ceil_capacity_for_load_(other.size_));
     typename inline_storage_type::guard g { &storage, storage_alloc };
     {
-      bool const is_group_count_equal = is_.group_count_mask_ == other.is_.group_count_mask_;
+      bool const is_group_count_equal = storage.group_count_mask_ == other.is_.group_count_mask_;
       if (is_group_count_equal) {
         if constexpr (std::is_trivially_copyable_v<value_type> && std::is_standard_layout_v<value_type>) {
-          std::uninitialized_copy_n(other.is_.elements_address(), other.size_, is_.elements_address());
+          if consteval {
+            copy_occupied_into_(other, storage);
+          } else {
+            std::memcpy(reinterpret_cast<unsigned char *>(storage.elements_address()),
+                        reinterpret_cast<unsigned char *>(other.is_.elements_address()),
+                        other.capacity() * sizeof(value_type));
+          }
         } else {
-          other.for_each_occupied_(other.is_, [&](raw_pointer occupied_ptr, raw_group_pointer, unsigned)
-          {
-            construct_element_(other.is_.elements_address() + (occupied_ptr - other.is_.elements_address()), *occupied_ptr);
-          });
+          copy_occupied_into_(other, storage);
         }
-        std::uninitialized_copy_n(other.is_.groups_address(), other.is_.group_count(), is_.groups_address());
+        std::copy_n(other.is_.groups_address(), other.is_.group_count(), storage.groups_address());
 
       } else {
         other.for_each_occupied_(other.is_, [&](raw_pointer occupied_ptr, raw_group_pointer, unsigned)
         {
           auto hash = hasher_(Traits::key_fn(*occupied_ptr));
-          emplace_at_available_slot_(is_, hash, is_.group_index(hash), *occupied_ptr);
+          emplace_at_available_slot_(storage, hash, storage.group_index(hash), *occupied_ptr);
+          return true;
         });
       }
       is_       = std::move(storage);
