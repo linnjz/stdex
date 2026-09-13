@@ -39,6 +39,13 @@ struct group15
 {
   static constexpr unsigned char slot_available_mark = 0;
   static constexpr unsigned char slot_sentinel_mark  = 1;
+  /// Transient occupancy mark for slots whose fingerprint is not yet known.
+  /// It exists only while a table is built into a temporary storage, so an
+  /// element_guard can tell which slots hold live objects; it must be non-zero
+  /// and differ from the sentinel mark.  It is never a valid table state: the
+  /// caller must overwrite the whole group with real data (copying the source
+  /// groups does exactly that) before the storage is read.
+  static constexpr unsigned char slot_occupied_mark  = 2;
 #if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (_M_IX86_FP >= 2) || \
     ((defined(__ARM_NEON__) || defined(__ARM_NEON)) && !defined(__ARM_BIG_ENDIAN))
   static constexpr bool is_simd_enabled = true;
@@ -261,6 +268,22 @@ public:
 #endif
   }
 
+  /// Marks a slot occupied without knowing its hash.  Used while a table is
+  /// built into a temporary storage so an element_guard's backout can find the
+  /// live slots.  This is occupancy only, not a fingerprint: the caller must
+  /// overwrite the whole group with real data (copying the source groups does
+  /// that) before the storage is read, otherwise find would miss the element.
+  constexpr void set_occupied_mask(size_t slot_index) noexcept
+  {
+    assert(slot_index < capacity() && "slot index out of range");
+#if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (_M_IX86_FP >= 2) || \
+    ((defined(__ARM_NEON__) || defined(__ARM_NEON)) && !defined(__ARM_BIG_ENDIAN))
+    slot_fp_bytes_[slot_index] = slot_occupied_mark;
+#else
+    set_fingerprint_hash_impl(slot_index, slot_occupied_mark);
+#endif
+  }
+
   constexpr void set_overflow_mark(size_t hash) noexcept
   {
     if constexpr (is_simd_enabled) {
@@ -401,6 +424,20 @@ public:
       uint32_t y = static_cast<uint32_t>(x | (x >> 32));
       y |= y >> 16;
       return y & 0x7F'FF;
+    }
+  }
+
+  /// Byte-wise equality, used by debug assertions to prove a group was fully
+  /// overwritten with real data instead of keeping transient occupancy marks.
+  constexpr bool equals(group15 const &other) const noexcept
+  {
+    if constexpr (is_simd_enabled) {
+      for (size_t i = 0; i < sizeof(slot_fp_bytes_) / sizeof(slot_fp_bytes_[0]); ++i) {
+        if (slot_fp_bytes_[i] != other.slot_fp_bytes_[i]) return false;
+      }
+      return true;
+    } else {
+      return slot_fp_words_[0] == other.slot_fp_words_[0] && slot_fp_words_[1] == other.slot_fp_words_[1];
     }
   }
 
