@@ -61,13 +61,75 @@ struct inline_storage
   /// An inline_storage is always probe-able: a default-constructed one stands
   /// for an empty table (capacity 0) by pointing at the static dummy group,
   /// so callers never need to remember to call create(alloc, 0).
-  constexpr inline_storage() noexcept
-      : group_index_shift_ { group_index_shift(0) }
-      , group_count_mask_ { min_group_count - 1 }
+  constexpr inline_storage() noexcept { dissociate(); }
+
+  constexpr inline_storage(inline_storage &&other) noexcept
+      : us_ { std::move(other.us_) }
+      , group_index_shift_ { other.group_index_shift_ }
+      , group_count_mask_ { other.group_count_mask_ }
+      , alloc_ { std::move(other.alloc_) }
   {
+    other.dissociate();
+  }
+
+  /// Move assignment disposes the current contents first -- with the allocator
+  /// that actually created them -- then adopts the source and empties it.  This
+  /// is what makes `is_ = std::move(storage)` safe without a companion release():
+  /// ownership, not discipline, decides who frees.
+  constexpr inline_storage &operator= (inline_storage &&other) noexcept
+  {
+    if (this != std::addressof(other)) {
+      dispose();
+      us_                = std::move(other.us_);
+      group_index_shift_ = other.group_index_shift_;
+      group_count_mask_  = other.group_count_mask_;
+      alloc_             = std::move(other.alloc_);
+      other.dissociate();
+    }
+    return *this;
+  }
+
+  inline_storage(inline_storage const &)             = delete;
+  inline_storage &operator= (inline_storage const &) = delete;
+
+  /// The storage is the sole owner of its elements and memory, so its
+  /// destructor is the backout: a storage that never gets adopted (because a
+  /// caller threw while filling it) still tears down what it holds.
+  constexpr ~inline_storage() noexcept { dispose(); }
+
+  /// Leaves the storage representing an empty table.  Only the low-level
+  /// elements/groups pointers are reset here; the caller decides whether the
+  /// memory is freed (dispose) or kept (clear).
+  constexpr void dissociate() noexcept
+  {
+    us_.heap_.elements_ptr_ = pointer {};
     if constexpr (std::is_same_v<std::add_pointer_t<group_type>, group_pointer>) {
       us_.heap_.groups_ptr_ = const_cast<group_pointer>(dummy_groups);
     }
+    group_index_shift_ = group_index_shift(0);
+    group_count_mask_  = min_group_count - 1;
+  }
+
+  /// Frees every element and the memory behind them, then becomes empty.
+  constexpr void dispose() noexcept
+  {
+    destroy_elements(alloc_, *this);
+    destroy(alloc_, *this);
+    dissociate();
+  }
+
+  /// Drops every element but keeps the allocation, so a cleared table can be
+  /// refilled without a round trip to the allocator (mirrors boost's clear()).
+  constexpr void clear() noexcept
+  {
+    if (elements_address() == nullptr) return;
+
+    destroy_elements(alloc_, *this);
+
+    auto *groups_ptr = groups_address();
+    auto const count = group_count();
+    for (size_t i = 0; i < count; ++i) groups_ptr[i].reset();
+    groups_ptr[count - 1].set_sentinel_mark();
   }
 
   constexpr value_type *elements_address() const noexcept { return std::to_address(us_.heap_.elements_ptr_); }
@@ -89,13 +151,16 @@ struct inline_storage
 
     group_type *groups_ptr     = s.groups_address();
     group_type *sentinel_group = groups_ptr + s.group_count_mask_;
-    group_type *sentinel_next  = sentinel_group + 1;
 
-    for (; groups_ptr != sentinel_next; ++groups_ptr, elements_ptr += group_size) {
-      auto occupied_mask = group_type::occupied_mask_excluding_sentinel(groups_ptr, sentinel_group);
+    /// Indexed rather than pointer-walked: the last group is the sentinel, so
+    /// advancing a group-sized stride after it would form an out-of-range
+    /// pointer (valid as runtime UB, but rejected in constant evaluation).
+    for (size_t i = 0, gc = s.group_count(); i < gc; ++i) {
+      value_type *group_elements = elements_ptr + i * group_size;
+      auto occupied_mask         = group_type::occupied_mask_excluding_sentinel(groups_ptr + i, sentinel_group);
       while (occupied_mask) {
         unsigned slot_index = std::countr_zero(static_cast<unsigned>(occupied_mask));
-        if (!func(elements_ptr + slot_index, groups_ptr, slot_index)) return false;
+        if (!func(group_elements + slot_index, groups_ptr + i, slot_index)) return false;
         occupied_mask &= occupied_mask - 1;
       }
     }
@@ -108,8 +173,7 @@ struct inline_storage
   }
 
   /// Destroys every live element; releasing the memory itself stays destroy()'s
-  /// job.  This is the undo primitive for a build that fails part-way, and the
-  /// natural body of a future clear().
+  /// job.  This is the undo primitive shared by dispose() and clear().
   static constexpr void destroy_elements(allocator_type alloc, inline_storage &s) noexcept
   {
     for_each_occupied(s, [&](value_type *element_ptr, group_type *, unsigned) {
@@ -157,6 +221,7 @@ struct inline_storage
     inline_storage s {};
     s.group_index_shift_ = shift;
     s.group_count_mask_  = group_count - 1;
+    s.alloc_             = alloc; ///< remembered so the destructor can deallocate
 
     if constexpr (std::is_same_v<std::add_pointer_t<group_type>, group_pointer>) {
       if (capacity == 0) [[unlikely]] {
@@ -173,7 +238,13 @@ struct inline_storage
       auto elements_ptr = allocator_traits::allocate(alloc, actual_capacity);
       auto groups_ptr   = group_allocator_traits::allocate(groups_alloc, group_count);
 
-      for (size_t i = 0; i < group_count; ++i) std::construct_at(groups_ptr + i);
+      /// reset() after construct_at zeroes every byte through a member write;
+      /// MSVC's constant evaluator needs that write (not just value-init) to
+      /// consider the union member live before available_mask reads it.
+      for (size_t i = 0; i < group_count; ++i) {
+        std::construct_at(groups_ptr + i);
+        groups_ptr[i].reset();
+      }
       groups_ptr[group_count - 1].set_sentinel_mark();
 
       s.us_.heap_ = { elements_ptr, groups_ptr };
@@ -211,47 +282,6 @@ struct inline_storage
     }
   }
 
-  struct allocation_guard
-  {
-    inline_storage *guard_storage_;
-    allocator_type guard_alloc_;
-
-    constexpr ~allocation_guard()
-    {
-      if (guard_storage_) destroy(guard_alloc_, *guard_storage_);
-    }
-
-    constexpr void release() noexcept { guard_storage_ = nullptr; }
-  };
-
-  /// RAII undo for elements built into a storage: on unwind it destroys whatever
-  /// the storage's occupancy bits mark as live, so the storage's own metadata is
-  /// the single source of truth (no separate count or source replay).  Pair it
-  /// with allocation_guard, declared first, so unwinding destroys elements
-  /// before releasing their memory.
-  struct element_guard
-  {
-    inline_storage *storage_;
-    allocator_type alloc_;
-    bool active_ = true;
-
-    constexpr element_guard(inline_storage *storage, allocator_type alloc) noexcept
-        : storage_ { storage }
-        , alloc_ { alloc }
-    {
-    }
-
-    element_guard(element_guard const &)             = delete;
-    element_guard &operator= (element_guard const &) = delete;
-
-    constexpr ~element_guard() noexcept
-    {
-      if (active_) destroy_elements(alloc_, *storage_);
-    }
-
-    constexpr void release() noexcept { active_ = false; }
-  };
-
   union union_storage
   {
     heap_block<pointer, group_pointer> heap_;
@@ -278,5 +308,11 @@ struct inline_storage
 
   size_t group_index_shift_;
   size_t group_count_mask_;
+
+  /// The rebind that actually owns the element memory; kept so dispose() can
+  /// deallocate with the same allocator state that allocated (the empty,
+  /// never-created state never deallocates, so a default-constructed storage is
+  /// still fine as long as the allocator is default-constructible).
+  [[no_unique_address]] allocator_type alloc_;
 };
 } // namespace stdex::unordered_flat_detail
