@@ -18,7 +18,7 @@
 
 #include <cassert> // assert
 #include <cstdint> // size_t
-#include <bit>     // std::bit_cast
+#include <memory>  // std::construct_at
 
 #if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (_M_IX86_FP >= 2)
 #  include <emmintrin.h>
@@ -46,21 +46,22 @@ struct group15
   static constexpr bool is_simd_enabled = false;
 #endif
 
-  static constexpr unsigned char slot_fp_dummy_bytes[16] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0 };
-  static constexpr uint64_t slot_fp_dummy_words[2]       = { 0x00'00'00'00'00'00'40'00ull, 0x00'00'00'00'00'00'00'00ull };
-
   static constexpr group15 make_dummy_group() noexcept
   {
-    if consteval {
-      return std::bit_cast<group15>(slot_fp_dummy_bytes);
+    group15 g {};
+
+    if constexpr (is_simd_enabled) {
+      std::construct_at(&g.slot_fp_bytes_);
+      g.slot_fp_bytes_[capacity() - 1] = slot_sentinel_mark;
     } else {
-#if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (_M_IX86_FP >= 2) || \
-    ((defined(__ARM_NEON__) || defined(__ARM_NEON)) && !defined(__ARM_BIG_ENDIAN))
-      return std::bit_cast<group15>(slot_fp_dummy_bytes);
-#else
-      return std::bit_cast<group15>(slot_fp_dummy_words);
-#endif
+      std::construct_at(&g.slot_fp_words_);
+      // The scalar layout interleaves slot bits across 16-bit lanes, so the
+      // sentinel mark at slot N-1 lands on bit N-1 of the first word.
+      g.slot_fp_words_[0] = uint64_t(slot_sentinel_mark) << (capacity() - 1);
+      g.slot_fp_words_[1] = 0;
     }
+
+    return g;
   }
 
 private:
