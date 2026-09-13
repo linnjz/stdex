@@ -186,46 +186,31 @@ protected:
       auto pos        = prober.position();
       auto curr_group = storage.groups_address() + pos;
       if (auto avail_mask = curr_group->available_mask()) [[likely]] {
-        unsigned slot_index  = std::countr_zero(static_cast<unsigned>(avail_mask));
-        auto element_ptr = storage.elements_address() + pos * group_size + slot_index;
+        unsigned slot_index = std::countr_zero(static_cast<unsigned>(avail_mask));
+        auto element_ptr    = storage.elements_address() + pos * group_size + slot_index;
         construct_element_(element_ptr, std::forward<Args>(args)...);
         curr_group->set_fingerprint_hash(slot_index, hash);
-        return (++size_, iterator { element_ptr, curr_group, slot_index });
+        return iterator { element_ptr, curr_group, slot_index };
       } else {
         curr_group->set_overflow_mark(hash);
       }
     }
   }
 
-  template <typename F>
-  static constexpr bool for_each_occupied_(inline_storage_type const &storage, F func)
-  {
-    raw_pointer elements_ptr = storage.elements_address();
-    if (!elements_ptr) return true;
-
-    raw_group_pointer groups_ptr     = storage.groups_address();
-    raw_group_pointer sentinel_group = groups_ptr + storage.group_count_mask_;
-    raw_group_pointer sentinel_next  = sentinel_group + 1;
-
-    for (; groups_ptr != sentinel_next; ++groups_ptr, elements_ptr += group_size) {
-      auto occupied_mask = group_type::occupied_mask_excluding_sentinel(groups_ptr, sentinel_group);
-      while (occupied_mask) {
-        unsigned slot_index = std::countr_zero(static_cast<unsigned>(occupied_mask));
-        if (!func(elements_ptr + slot_index, groups_ptr, slot_index))
-          return false;
-        occupied_mask &= occupied_mask - 1;
-      }
-    }
-    return true;
-  }
-
   /// Only occupied slots hold live objects; a bulk copy would read the
   /// uninitialized slots, which is UB at runtime and impossible in consteval.
+  /// Each slot is marked occupied as soon as its object exists, so an
+  /// element_guard can undo a partial copy from the storage itself.  The mark is
+  /// transient: copy_from_ replaces the whole group array from other right after
+  /// this returns, before the storage is ever read, so no made-up fingerprint
+  /// survives into the committed table.
   constexpr void copy_occupied_into_(hash_table const &other, inline_storage_type &storage)
   {
-    other.for_each_occupied_(other.is_, [&](raw_pointer occupied_ptr, raw_group_pointer, unsigned)
-    {
+    inline_storage_type::for_each_occupied(other.is_, [&](raw_pointer occupied_ptr, raw_group_pointer src_group, unsigned slot_index) {
       construct_element_(storage.elements_address() + (occupied_ptr - other.is_.elements_address()), *occupied_ptr);
+      /// set_occupied_mask is occupancy only; the following std::copy_n of other's
+      /// groups in copy_from_ overwrites this slot with the real fingerprint.
+      (storage.groups_address() + (src_group - other.is_.groups_address()))->set_occupied_mask(slot_index);
       return true;
     });
   }
@@ -234,7 +219,8 @@ protected:
   {
     auto storage_alloc = static_cast<typename inline_storage_type::allocator_type>(alloc_);
     auto storage       = inline_storage_type::create(storage_alloc, ceil_capacity_for_load_(other.size_));
-    typename inline_storage_type::guard g { &storage, storage_alloc };
+    typename inline_storage_type::allocation_guard g { &storage, storage_alloc };
+    typename inline_storage_type::element_guard b { &storage, storage_alloc };
     {
       bool const is_group_count_equal = storage.group_count_mask_ == other.is_.group_count_mask_;
       if (is_group_count_equal) {
@@ -242,18 +228,24 @@ protected:
           if consteval {
             copy_occupied_into_(other, storage);
           } else {
-            std::memcpy(reinterpret_cast<unsigned char *>(storage.elements_address()),
-                        reinterpret_cast<unsigned char *>(other.is_.elements_address()),
-                        other.capacity() * sizeof(value_type));
+            std::memcpy(
+                reinterpret_cast<unsigned char *>(storage.elements_address()),
+                reinterpret_cast<unsigned char *>(other.is_.elements_address()),
+                other.capacity() * sizeof(value_type));
           }
         } else {
           copy_occupied_into_(other, storage);
         }
         std::copy_n(other.is_.groups_address(), other.is_.group_count(), storage.groups_address());
-
+#ifndef NDEBUG
+        /// The group copy must have replaced every transient occupancy mark with
+        /// real data; a divergence here means a slot kept a made-up fingerprint
+        /// and would silently make that element unfindable.
+        for (size_t i = 0; i < storage.group_count(); ++i)
+          assert(storage.groups_address()[i].equals(other.is_.groups_address()[i]));
+#endif
       } else {
-        other.for_each_occupied_(other.is_, [&](raw_pointer occupied_ptr, raw_group_pointer, unsigned)
-        {
+        inline_storage_type::for_each_occupied(other.is_, [&](raw_pointer occupied_ptr, raw_group_pointer, unsigned) {
           auto hash = hasher_(Traits::key_fn(*occupied_ptr));
           emplace_at_available_slot_(storage, hash, storage.group_index(hash), *occupied_ptr);
           return true;
@@ -262,6 +254,7 @@ protected:
       is_       = std::move(storage);
       size_     = other.size_;
       max_load_ = is_group_count_equal ? other.max_load_ : floor_max_load_(capacity()); ///< is_ -> is_.group_count_mask_ -> capacity -> max_load_
+      b.release();
     }
     g.release();
   }
@@ -288,7 +281,7 @@ public:
 
     auto hasher = other.hasher_;
     auto key_eq = other.key_eq_;
-    clear();
+    //clear();
     using std::swap;
     swap(hasher, hasher_);
     swap(key_eq, key_eq_);
@@ -296,38 +289,38 @@ public:
     if (other.empty()) [[unlikely]]
       return;
 
-    size_type cap = capacity();
-    if (cap == 0) {
-      copy_from_(other);
-    } else if (cap == min_group_count * group_size - 1) {
-      if (other.size_ <= cap) {
-        // copy elements?
-      } else {
-        // grow and copy?
-      }
-    } else {
-      if (other.size_ <= cap * max_load_factor()) {
-        // copy elements?
-      } else {
-        // grow and copy?
-      }
-    }
-    if (other.size_ > capacity() * max_load_factor()) {
-    }
+    // size_type cap = capacity();
+    // if (cap == 0) {
+    //   copy_from_(other);
+    // } else if (cap == min_group_count * group_size - 1) {
+    //   if (other.size_ <= cap) {
+    //     // copy elements?
+    //   } else {
+    //     // grow and copy?
+    //   }
+    // } else {
+    //   if (other.size_ <= cap * max_load_factor()) {
+    //     // copy elements?
+    //   } else {
+    //     // grow and copy?
+    //   }
+    // }
+    // if (other.size_ > capacity() * max_load_factor()) {
+    // }
 
-    if (alloc_ != other.alloc_) {
-      pocca_();
-      auto storage_alloc = static_cast<typename inline_storage_type::allocator_type>(alloc_);
-      auto storage       = inline_storage_type::create(storage_alloc, cap);
-      typename inline_storage_type::guard g { &storage, storage_alloc };
-      {
-        inline_storage_type::destroy(storage_alloc, is_);
-        is_ = std::move(storage);
-      }
-      g.release();
-    }
-    // capacity needs adjusting: with equal allocators, a smaller current capacity and more elements in other, the copy will grow; reserve enough room if possible
-    copy_from_(other); // memory is allocated again here and needs adjusting
+    // if (alloc_ != other.alloc_) {
+    //   pocca_();
+    //   auto storage_alloc = static_cast<typename inline_storage_type::allocator_type>(alloc_);
+    //   auto storage       = inline_storage_type::create(storage_alloc, cap);
+    //   typename inline_storage_type::guard g { &storage, storage_alloc };
+    //   {
+    //     inline_storage_type::destroy(storage_alloc, is_);
+    //     is_ = std::move(storage);
+    //   }
+    //   g.release();
+    // }
+    // // capacity needs adjusting: with equal allocators, a smaller current capacity and more elements in other, the copy will grow; reserve enough room if possible
+    // copy_from_(other); // memory is allocated again here and needs adjusting
   }
 
   constexpr hash_table(hash_table &&other, allocator_type const &alloc)
@@ -368,26 +361,26 @@ public:
 
 
 protected:
-    template <class AnyAllocator, class T>
-    static constexpr void destroy_n_(AnyAllocator &alloc, T *p, size_type n) noexcept
-    {
-      for (size_type i = 0; i < n; ++i) {
-        std::allocator_traits<AnyAllocator>::destroy(alloc, p + i);
-      }
+  template <class AnyAllocator, class T>
+  static constexpr void destroy_n_(AnyAllocator &alloc, T *p, size_type n) noexcept
+  {
+    for (size_type i = 0; i < n; ++i) {
+      std::allocator_traits<AnyAllocator>::destroy(alloc, p + i);
     }
+  }
 
-    template <class AnyAllocator, class T>
-    static constexpr void destroy_element_(AnyAllocator &alloc, T *p) noexcept
-    {
-      std::allocator_traits<AnyAllocator>::destroy(alloc, p);
-    }
+  template <class AnyAllocator, class T>
+  static constexpr void destroy_element_(AnyAllocator &alloc, T *p) noexcept
+  {
+    std::allocator_traits<AnyAllocator>::destroy(alloc, p);
+  }
 
-    constexpr void destroy_storage_() noexcept
-    {
-    }
+  constexpr void destroy_storage_() noexcept
+  {
+  }
 
-  public:
-    constexpr ~hash_table() { destroy_storage_(); };
+public:
+  constexpr ~hash_table() { destroy_storage_(); };
 
 public:
   // clang-format off
@@ -533,10 +526,14 @@ protected:
   {
     auto storage_alloc = static_cast<typename inline_storage_type::allocator_type>(alloc_);
     auto storage       = inline_storage_type::create(storage_alloc, calculate_growth_());
-    typename inline_storage_type::guard g { &storage, storage_alloc };
+    typename inline_storage_type::allocation_guard g { &storage, storage_alloc };
+    typename inline_storage_type::element_guard b { &storage, storage_alloc };
     auto it = emplace_at_available_slot_(storage, hash, storage.group_index(hash), std::forward<Args>(args)...);
     force_rehash_(storage);
-    return (g.release(), ++size_, it);
+    b.release();
+    g.release();
+    ++size_;
+    return it;
   }
 
   template <class... Args>
@@ -548,10 +545,12 @@ protected:
     if (auto it = find_impl_(key, hash, index); it != end()) {
       return { iterator { const_iterator_cast_tag{}, it }, false };
     }
-    auto it = size_ < max_load_
-      ? emplace_at_available_slot_(is_, hash, index, std::forward<Args>(args)...)
-      : emplace_with_growth_(hash, std::forward<Args>(args)...);
-    return { it, true };
+    if (size_ < max_load_) {
+      auto it = emplace_at_available_slot_(is_, hash, index, std::forward<Args>(args)...);
+      ++size_;
+      return { it, true };
+    }
+    return { emplace_with_growth_(hash, std::forward<Args>(args)...), true };
   }
 
   template <class... Args>

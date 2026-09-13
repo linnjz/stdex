@@ -78,6 +78,41 @@ struct inline_storage
 
   constexpr size_t group_index(size_t hash) const noexcept { return hash >> group_index_shift_; }
 
+  /// Visits the occupied slots in layout order; func(element, group, slot) may
+  /// return false to stop early.  This is the single traversal shared by
+  /// copying, rehashing and element destruction.
+  template <class F>
+  static constexpr bool for_each_occupied(inline_storage const &s, F func)
+  {
+    value_type *elements_ptr = s.elements_address();
+    if (!elements_ptr) return true;
+
+    group_type *groups_ptr     = s.groups_address();
+    group_type *sentinel_group = groups_ptr + s.group_count_mask_;
+    group_type *sentinel_next  = sentinel_group + 1;
+
+    for (; groups_ptr != sentinel_next; ++groups_ptr, elements_ptr += group_size) {
+      auto occupied_mask = group_type::occupied_mask_excluding_sentinel(groups_ptr, sentinel_group);
+      while (occupied_mask) {
+        unsigned slot_index = std::countr_zero(static_cast<unsigned>(occupied_mask));
+        if (!func(elements_ptr + slot_index, groups_ptr, slot_index)) return false;
+        occupied_mask &= occupied_mask - 1;
+      }
+    }
+    return true;
+  }
+
+  /// Destroys every live element; releasing the memory itself stays destroy()'s
+  /// job.  This is the undo primitive for a build that fails part-way, and the
+  /// natural body of a future clear().
+  static constexpr void destroy_elements(allocator_type alloc, inline_storage &s) noexcept
+  {
+    for_each_occupied(s, [&](value_type *element_ptr, group_type *, unsigned) {
+      allocator_traits::destroy(alloc, element_ptr);
+      return true;
+    });
+  }
+
   static constexpr size_t group_index_shift(size_t elem_count) noexcept
   {
     size_t const group_count = elem_count / group_size + 1; ///< extra +1 for the sentinel
@@ -171,17 +206,45 @@ struct inline_storage
     }
   }
 
-  struct guard
+  struct allocation_guard
   {
     inline_storage *guard_storage_;
     allocator_type guard_alloc_;
 
-    constexpr ~guard()
+    constexpr ~allocation_guard()
     {
       if (guard_storage_) destroy(guard_alloc_, *guard_storage_);
     }
 
     constexpr void release() noexcept { guard_storage_ = nullptr; }
+  };
+
+  /// RAII undo for elements built into a storage: on unwind it destroys whatever
+  /// the storage's occupancy bits mark as live, so the storage's own metadata is
+  /// the single source of truth (no separate count or source replay).  Pair it
+  /// with allocation_guard, declared first, so unwinding destroys elements
+  /// before releasing their memory.
+  struct element_guard
+  {
+    inline_storage *storage_;
+    allocator_type alloc_;
+    bool active_ = true;
+
+    constexpr element_guard(inline_storage *storage, allocator_type alloc) noexcept
+        : storage_ { storage }
+        , alloc_ { alloc }
+    {
+    }
+
+    element_guard(element_guard const &)             = delete;
+    element_guard &operator= (element_guard const &) = delete;
+
+    constexpr ~element_guard() noexcept
+    {
+      if (active_) destroy_elements(alloc_, *storage_);
+    }
+
+    constexpr void release() noexcept { active_ = false; }
   };
 
   union union_storage
