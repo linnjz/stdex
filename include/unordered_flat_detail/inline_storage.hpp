@@ -167,7 +167,7 @@ struct inline_storage
 
     constexpr ~guard()
     {
-      if (guard_storage_) destroy(guard_alloc_, guard_storage_);
+      if (guard_storage_) destroy(guard_alloc_, *guard_storage_);
     }
 
     constexpr void release() noexcept { guard_storage_ = nullptr; }

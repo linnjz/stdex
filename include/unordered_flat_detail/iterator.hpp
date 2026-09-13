@@ -33,7 +33,7 @@ class hash_table_iterator
 {
   using inline_storage_type = typename HashTable::inline_storage_type;
   using group_type          = typename inline_storage_type::group_type;
-  using pointer             = typename inline_storage_type::pointer;
+  using value_pointer       = typename inline_storage_type::pointer;
   using group_pointer       = typename inline_storage_type::group_pointer;
 
   static constexpr auto group_size = group_type::capacity();
@@ -43,8 +43,8 @@ public:
   using iterator_concept  = std::forward_iterator_tag;
   using value_type        = typename HashTable::value_type;
   using difference_type   = typename HashTable::difference_type;
-  using pointer           = std::conditional_t<IsConstant, typename HashTable::const_pointer, typename HashTable::pointer>;
-  using reference         = std::conditional_t<IsConstant, typename HashTable::const_reference, typename HashTable::reference>;
+  using pointer           = std::conditional_t<IsConstant, value_type const *, value_type *>;
+  using reference         = std::conditional_t<IsConstant, value_type const &, value_type &>;
 
   constexpr hash_table_iterator() noexcept
       : element_ptr_ { nullptr }
@@ -97,7 +97,7 @@ public:
   }
 
 private:
-  constexpr explicit hash_table_iterator(pointer element_ptr, group_pointer group_ptr, size_t slot_index) noexcept
+  constexpr explicit hash_table_iterator(value_pointer element_ptr, group_pointer group_ptr, size_t slot_index) noexcept
       : element_ptr_ { element_ptr }
       , group_ptr_ { group_ptr }
       , slot_index_ { slot_index }
@@ -151,7 +151,7 @@ private:
   template <class>
   friend class hash_table;
 
-  pointer element_ptr_;
+  value_pointer element_ptr_;
   group_pointer group_ptr_;
   size_t slot_index_;
 };

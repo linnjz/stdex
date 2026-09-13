@@ -89,9 +89,11 @@ protected:
   using inline_storage_type = inline_storage<value_type, group_type, Traits::inline_size(), allocator_type>;
   // clang-format off
   static constexpr size_type group_size = group_type::capacity();
+  static constexpr size_type min_group_count = inline_storage_type::min_group_count;
   static constexpr size_t max_load_factor_ratio_numerator   = 8;
   static constexpr size_t max_load_factor_ratio_denominator = 7;
-  static constexpr float max_load_factor_ratio = max_load_factor_ratio_denominator / max_load_factor_ratio_numerator;
+  static constexpr float max_load_factor_ratio = static_cast<float>(max_load_factor_ratio_denominator) /
+                                                 static_cast<float>(max_load_factor_ratio_numerator);
   // clang-format on
 
   static constexpr void pocca_(allocator_type &left, allocator_type const &right) noexcept
@@ -127,12 +129,12 @@ protected:
   }
 
   ///< Given the capacity, figure out how much it can hold.
-  static constexpr size_type floor_max_load_(size_type capacity) const noexcept
+  static constexpr size_type floor_max_load_(size_type capacity) noexcept
   {
-    if (auto cap = capacity * group_size - 1; cap <= 2 * group_size - 1) {
-      return cap; // <= 29, 100%
+    if (capacity <= 2 * group_size - 1) {
+      return capacity; // <= 29, 100%
     } else {
-      return static_cast<size_type>(max_load_factor_ratio * cap); // > 29, 87.5%
+      return static_cast<size_type>(max_load_factor_ratio * static_cast<float>(capacity)); // > 29, 87.5%
     }
   }
 
@@ -180,10 +182,10 @@ protected:
   {
     for (prober_type prober(group_index);; prober.next(storage.group_count_mask_)) {
       auto pos        = prober.position();
-      auto curr_group = is_.groups_address() + pos;
-      if (auto avail_mask = curr_group->available_mask(hash)) [[likely]] {
-        auto slot_index  = std::countr_zero(avail_mask);
-        auto element_ptr = is_.elements_address() + pos * group_size + slot_index;
+      auto curr_group = storage.groups_address() + pos;
+      if (auto avail_mask = curr_group->available_mask()) [[likely]] {
+        unsigned slot_index  = std::countr_zero(static_cast<unsigned>(avail_mask));
+        auto element_ptr = storage.elements_address() + pos * group_size + slot_index;
         construct_element_(element_ptr, std::forward<Args>(args)...);
         curr_group->set_fingerprint_hash(slot_index, hash);
         return (++size_, iterator { element_ptr, curr_group, slot_index });
@@ -242,7 +244,7 @@ protected:
       }
       is_       = std::move(storage);
       size_     = other.size_;
-      max_load_ = is_gc_equal ? other.max_load_ : floor_max_load_(capacity()); ///< is_ -> is_.group_count_mask_ -> capacity -> max_load_
+      max_load_ = is_group_count_equal ? other.max_load_ : floor_max_load_(capacity()); ///< is_ -> is_.group_count_mask_ -> capacity -> max_load_
     }
     g.release();
   }
@@ -314,7 +316,7 @@ public:
   constexpr hash_table(hash_table &&other, allocator_type const &alloc)
       : is_ {}
       , size_ {}
-      , max_load_ { initial_max_load_() }
+      , max_load_ {}
       , hasher_ { std::move(other.hasher_) }
       , key_eq_ { std::move(other.key_eq_) }
       , alloc_ { alloc }
@@ -330,7 +332,7 @@ public:
       std::is_nothrow_move_constructible_v<allocator_type>)
       : is_ {}
       , size_ {}
-      , max_load_ { initial_max_load_() }
+      , max_load_ {}
       , hasher_ { std::move(other.hasher_) }
       , key_eq_ { std::move(other.key_eq_) }
       , alloc_ { std::move(other.alloc_) }
@@ -349,30 +351,30 @@ public:
 
 
 protected:
-  template <class AnyAllocator, class T>
-  static constexpr void destroy_n_(AnyAllocator &alloc, T *p, size_type n) noexcept
-  {
-    for (size_type i = 0; i < n; ++i) {
-      std::allocator_traits<AnyAllocator>::destroy(alloc, p + i);
+    template <class AnyAllocator, class T>
+    static constexpr void destroy_n_(AnyAllocator &alloc, T *p, size_type n) noexcept
+    {
+      for (size_type i = 0; i < n; ++i) {
+        std::allocator_traits<AnyAllocator>::destroy(alloc, p + i);
+      }
     }
-  }
 
-  template <class AnyAllocator, class T>
-  static constexpr void destroy_element_(AnyAllocator &alloc, T *p) noexcept
-  {
-    std::allocator_traits<AnyAllocator>::destroy(alloc, p);
-  }
+    template <class AnyAllocator, class T>
+    static constexpr void destroy_element_(AnyAllocator &alloc, T *p) noexcept
+    {
+      std::allocator_traits<AnyAllocator>::destroy(alloc, p);
+    }
 
-  constexpr void destroy_storage_() noexcept
-  {
-  }
+    constexpr void destroy_storage_() noexcept
+    {
+    }
 
-public:
-  constexpr ~hash_table() { destroy_storage_(); };
+  public:
+    constexpr ~hash_table() { destroy_storage_(); };
 
 public:
   // clang-format off
-  
+
   [[nodiscard]] constexpr allocator_type get_allocator() const noexcept { return alloc_; }
   [[nodiscard]] constexpr hasher hash_function() const noexcept { return hasher_; }
   [[nodiscard]] constexpr key_equal key_eq() const noexcept { return key_eq_; }
@@ -383,24 +385,24 @@ public:
   [[nodiscard]] constexpr size_type size() const noexcept { return size_; }
   [[nodiscard]] constexpr bool empty() const noexcept { return size_ == 0; }
   [[nodiscard]] constexpr size_type capacity() const noexcept
-  {      
-    return is_.us_.heap_.elements_ptr_ ? (is_.group_count()) * group_size - 1 : 0;
+  {
+    return is_.elements_address() ? (is_.group_count()) * group_size - 1 : 0;
   }
 
-  [[nodiscard]] constexpr iterator begin() noexcept 
-  { 
+  [[nodiscard]] constexpr iterator begin() noexcept
+  {
     auto elems_raw_ptr = is_.elements_address();
     auto groups_raw_ptr = is_.groups_address();
     iterator it{ elems_raw_ptr, groups_raw_ptr, 0 };
     if (elems_raw_ptr && !(groups_raw_ptr[0].occupied_mask() & 0x1)) ++it;
-    return it; 
+    return it;
   }
   [[nodiscard]] constexpr iterator end() noexcept { return {}; }
   [[nodiscard]] constexpr const_iterator begin() const noexcept { return const_cast<hash_table*>(this)->begin(); }
   [[nodiscard]] constexpr const_iterator end() const noexcept { return {}; }
   [[nodiscard]] constexpr const_iterator cbegin() const noexcept { return begin(); }
   [[nodiscard]] constexpr const_iterator cend() const noexcept { return {}; }
-  
+
 protected:
   struct triangular_probing
   {
@@ -419,7 +421,6 @@ protected:
   using prober_type = triangular_probing;
 
   template <class K>
-  requires heterogeneous_key<K const &, hasher, key_equal, iterator, const_iterator>
   constexpr const_iterator find_impl_(K const &key_val, size_type hash, size_type group_index) const
   {
     prober_type prober(group_index);
@@ -431,9 +432,9 @@ protected:
         [[assume(elements_ptr != nullptr)]];
         auto group_element_ptr = elements_ptr + pos * group_size;
         do {
-          auto slot_index = std::countr_zero(fp_mask);
+          unsigned slot_index = std::countr_zero(static_cast<unsigned>(fp_mask));
           if (key_eq_(key_val, Traits::key_fn(group_element_ptr[slot_index]))) [[likely]] {
-            return { group_element_ptr + slot_index, curr_group, slot_index };
+            return const_iterator { group_element_ptr + slot_index, curr_group, slot_index };
           }
           fp_mask &= fp_mask - 1;
         } while (fp_mask);
@@ -442,19 +443,19 @@ protected:
         return {};
       }
     } while (prober.next(is_.group_count_mask_));
-    
+
     return {};
   }
 
 public:
-  constexpr iterator find(key_type const& key_val) 
+  constexpr iterator find(key_type const& key_val)
   {
     auto hash = hasher_(key_val);
     auto index = is_.group_index(hash);
     return iterator { const_iterator_cast_tag {}, find_impl_(key_val, hash, index) };
   }
 
-  constexpr const_iterator find(key_type const& key_val) const 
+  constexpr const_iterator find(key_type const& key_val) const
   {
     auto hash  = hasher_(key_val);
     auto index = is_.group_index(hash);
@@ -486,7 +487,7 @@ public:
     auto it = self.find(key_val);
     return std::pair { it, it != self.end() ? std::next(it) : it };
   }
-  
+
   template <class K> requires heterogeneous_key<K const &, hasher, key_equal, iterator, const_iterator>
   [[nodiscard]] constexpr size_type count(K const &key_val) const { return find(key_val) != end() ? 1 : 0; }
   template <class K> requires heterogeneous_key<K const &, hasher, key_equal, iterator, const_iterator>
@@ -512,11 +513,11 @@ protected:
 
   template <class... Args>
   constexpr iterator emplace_with_growth_(size_type hash, Args &&...args)
-  {    
+  {
     auto storage_alloc = static_cast<typename inline_storage_type::allocator_type>(alloc_);
     auto storage       = inline_storage_type::create(storage_alloc, calculate_growth_());
     typename inline_storage_type::guard g { &storage, storage_alloc };
-    auto it = emplace_at_available_slot_(storage, hash, storage.group_index(), std::forward<Args>(args)...);
+    auto it = emplace_at_available_slot_(storage, hash, storage.group_index(hash), std::forward<Args>(args)...);
     force_rehash_(storage);
     return (g.release(), ++size_, it);
   }
@@ -527,10 +528,10 @@ protected:
     auto hash = hasher_(key);
     auto index = is_.group_index(hash);
 
-    if (auto it = find_impl_(key, hash, index); it == end()) {
-      return { iterator{}, false };
+    if (auto it = find_impl_(key, hash, index); it != end()) {
+      return { iterator { const_iterator_cast_tag{}, it }, false };
     }
-    auto it = size_ < max_load_ 
+    auto it = size_ < max_load_
       ? emplace_at_available_slot_(is_, hash, index, std::forward<Args>(args)...)
       : emplace_with_growth_(hash, std::forward<Args>(args)...);
     return { it, true };
@@ -540,7 +541,7 @@ protected:
   constexpr std::pair<iterator, bool> emplace_impl_(Args &&...args)
   {
     value_type tmp(std::forward<Args>(args)...);
-    return emplace_with_key_(Traits::key_fn(tmp), tmp);
+    return emplace_with_key_(Traits::key_fn(tmp), std::move(tmp));
   }
 
 public:
@@ -558,11 +559,11 @@ public:
 
   template <class... Args>
   constexpr iterator emplace_hint(const_iterator, Args &&...args) { return emplace(std::forward<Args>(args)...).first; }
-  
+
   constexpr std::pair<iterator, bool> insert(value_type &&obj) { return emplace(std::move(obj)); }
   template <std::convertible_to<value_type> U>
   constexpr std::pair<iterator, bool> insert(U &&obj) { return emplace(std::forward<U>(obj)); }
-  
+
   constexpr iterator insert(const_iterator, value_type &&obj) { return emplace(std::move(obj)).first; }
   template <std::convertible_to<value_type> U>
   constexpr iterator insert(const_iterator, U &&obj) { return emplace(std::forward<U>(obj)).first; }
@@ -571,7 +572,7 @@ public:
   constexpr void insert(InputIter first, InputIter last) { for (auto pos = first; pos != last; ++pos) emplace(*pos); }
   template <container_compatible_range<value_type> R>
   constexpr void insert_range(R &&range) { insert(std::ranges::begin(range), std::ranges::end(range)); }
-  
+
   //clang-format on
 
   // constexpr insert_return_type insert(node_type &&mode);
