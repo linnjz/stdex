@@ -98,6 +98,17 @@ protected:
                                                  static_cast<float>(max_load_factor_ratio_numerator);
   // clang-format on
 
+  /// Boost's transfer choice (unchecked_rehash, core.hpp:2336): move when the
+  /// movable form is nothrow-movable, or when it differs from the stored value
+  /// (a map moves pair<const K, T>, i.e. copies the const key and moves the
+  /// mapped value), or when the value cannot be copied at all; otherwise copy,
+  /// so a throwing copy leaves the sources intact and yields the strong
+  /// guarantee.
+  static constexpr bool transfer_by_move =
+      std::is_nothrow_move_constructible_v<mutable_value_type> ||
+      !std::is_same_v<mutable_value_type, value_type> ||
+      !std::is_copy_constructible_v<value_type>;
+
   static constexpr void pocca_(allocator_type &left, allocator_type const &right) noexcept
   {
     if constexpr (allocator_traits::propagate_on_container_copy_assignment::value) {
@@ -168,6 +179,24 @@ public:
   }
 
 protected:
+  // clang-format off
+  struct triangular_probing
+  {
+    constexpr triangular_probing(size_t pos) : pos_ { pos } , step_ { } {}
+    constexpr size_t position() const { return pos_; }
+    constexpr bool next(size_t group_count_mask)
+    {
+      ++step_;
+      pos_ = (pos_ + step_) & group_count_mask;
+      return step_ <= group_count_mask;
+    }
+
+  private:
+    size_t pos_, step_;
+  };
+  using prober_type = triangular_probing;
+  // clang-format on
+
   template <typename... Args>
   requires std::constructible_from<value_type, Args...> &&
            requires (allocator_type &a, raw_pointer p, Args &&...args) {
@@ -210,7 +239,7 @@ protected:
       construct_element_(storage.elements_address() + (occupied_ptr - other.is_.elements_address()), *occupied_ptr);
       /// set_occupied_mask is occupancy only; the following std::copy_n of other's
       /// groups in copy_from_ overwrites this slot with the real fingerprint.
-      (storage.groups_address() + (src_group - other.is_.groups_address()))->set_occupied_mask(slot_index);
+      group_type::attorney::set_occupied_mask(*(storage.groups_address() + (src_group - other.is_.groups_address())), slot_index);
       return true;
     });
   }
@@ -242,7 +271,7 @@ protected:
         /// real data; a divergence here means a slot kept a made-up fingerprint
         /// and would silently make that element unfindable.
         for (size_t i = 0; i < storage.group_count(); ++i)
-          assert(storage.groups_address()[i].equals(other.is_.groups_address()[i]));
+          assert(group_type::attorney::equals(storage.groups_address()[i], other.is_.groups_address()[i]));
 #endif
       } else {
         inline_storage_type::for_each_occupied(other.is_, [&](raw_pointer occupied_ptr, raw_group_pointer, unsigned) {
@@ -361,20 +390,6 @@ public:
 
 
 protected:
-  template <class AnyAllocator, class T>
-  static constexpr void destroy_n_(AnyAllocator &alloc, T *p, size_type n) noexcept
-  {
-    for (size_type i = 0; i < n; ++i) {
-      std::allocator_traits<AnyAllocator>::destroy(alloc, p + i);
-    }
-  }
-
-  template <class AnyAllocator, class T>
-  static constexpr void destroy_element_(AnyAllocator &alloc, T *p) noexcept
-  {
-    std::allocator_traits<AnyAllocator>::destroy(alloc, p);
-  }
-
   constexpr void destroy_storage_() noexcept
   {
   }
@@ -414,22 +429,6 @@ public:
   [[nodiscard]] constexpr const_iterator cend() const noexcept { return {}; }
 
 protected:
-  struct triangular_probing
-  {
-    constexpr triangular_probing(size_t pos) : pos_ { pos } , step_ { } {}
-    constexpr size_t position() const { return pos_; }
-    constexpr bool next(size_t group_count_mask)
-    {
-      ++step_;
-      pos_ = (pos_ + step_) & group_count_mask;
-      return step_ <= group_count_mask;
-    }
-
-  private:
-    size_t pos_, step_;
-  };
-  using prober_type = triangular_probing;
-
   template <class K>
   constexpr const_iterator find_impl_(K const &key_val, size_type hash, size_type group_index) const
   {
@@ -516,9 +515,51 @@ protected:
     return (n * max_load_factor_ratio_numerator + 6) / max_load_factor_ratio_denominator;
   }
 
+  /// Rehashes every live element of is_ into the freshly allocated storage that
+  /// already holds the inserted element, then adopts storage.  The destination
+  /// groups are laid out differently, so old fingerprints cannot be reused and
+  /// every hash is recomputed.
+  ///
+  /// Following boost (unchecked_rehash, core.hpp:2287), an element is moved and
+  /// its source destroyed slot by slot when a move cannot lose data, and copied
+  /// -- sources untouched until the whole transfer succeeds -- otherwise.  The
+  /// move branch clears each source slot as it consumes it, so is_ stays a
+  /// faithful record of the live elements: if a later hash or move throws, size_
+  /// has already been decremented for the consumed slots, leaving is_ valid with
+  /// exactly the untransferred elements (boost's recover_slot state, without a
+  /// separate counter).  This project tracks no per-slot overflow-driven load
+  /// drift, so the ml adjustment recover_slot also performs has no equivalent.
   constexpr void force_rehash_(inline_storage_type &storage)
   {
+    assert(&storage != &is_ && "force_rehash_ needs a distinct destination storage");
+    auto storage_alloc = static_cast<typename inline_storage_type::allocator_type>(alloc_);
 
+    if constexpr (transfer_by_move) {
+      auto const old_size = size_;
+      inline_storage_type::for_each_occupied(is_, [&](raw_pointer element_ptr, raw_group_pointer group, unsigned slot) {
+        auto hash = hasher_(Traits::key_fn(*element_ptr));
+        emplace_at_available_slot_(storage, hash, storage.group_index(hash), std::move(*element_ptr));
+        inline_storage_type::destroy_element(storage_alloc, element_ptr);
+        group->reset(slot);
+        --size_;
+        return true;
+      });
+      size_ = old_size; ///< every source was consumed; the adopted storage holds old_size elements
+    } else {
+      inline_storage_type::for_each_occupied(is_, [&](raw_pointer element_ptr, raw_group_pointer, unsigned) {
+        auto hash = hasher_(Traits::key_fn(*element_ptr));
+        emplace_at_available_slot_(storage, hash, storage.group_index(hash), static_cast<value_type const &>(*element_ptr));
+        return true;
+      });
+      inline_storage_type::destroy_elements(storage_alloc, is_);
+    }
+
+    /// Nothing below throws (destroy and union_storage's move are noexcept), so
+    /// is_ is torn down and replaced without a window in which it could be
+    /// observed inconsistent.
+    inline_storage_type::destroy(storage_alloc, is_);
+    is_       = std::move(storage);
+    max_load_ = floor_max_load_(capacity());
   }
 
   template <class... Args>

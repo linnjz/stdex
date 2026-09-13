@@ -102,13 +102,18 @@ struct inline_storage
     return true;
   }
 
+  static constexpr void destroy_element(allocator_type alloc, value_type *element_ptr) noexcept
+  {
+    allocator_traits::destroy(alloc, element_ptr);
+  }
+
   /// Destroys every live element; releasing the memory itself stays destroy()'s
   /// job.  This is the undo primitive for a build that fails part-way, and the
   /// natural body of a future clear().
   static constexpr void destroy_elements(allocator_type alloc, inline_storage &s) noexcept
   {
     for_each_occupied(s, [&](value_type *element_ptr, group_type *, unsigned) {
-      allocator_traits::destroy(alloc, element_ptr);
+      destroy_element(alloc, element_ptr);
       return true;
     });
   }
