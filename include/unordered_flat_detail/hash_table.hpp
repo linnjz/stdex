@@ -340,13 +340,37 @@ public:
     swap(hasher, hasher_);
     swap(key_eq, key_eq_);
 
-    if (other.empty()) {
-      clear();
+    /// Destroy this's elements but keep the arrays, then grow only when they
+    /// cannot hold other (boost's clear + noshrink_reserve).  Copying in place
+    /// favors allocator reuse over the old strong guarantee, matching boost: a
+    /// throwing copy leaves a valid, partially filled table.
+    is_.clear();
+    size_     = 0;
+    max_load_ = floor_max_load_(capacity());
+
+    if (other.empty()) return *this;
+
+    noshrink_reserve_(other.size_);
+
+    if (is_.group_count_mask_ == other.is_.group_count_mask_) {
+      if constexpr (std::is_trivially_copyable_v<value_type> && std::is_standard_layout_v<value_type>) {
+        if consteval {
+          copy_insert_occupied_(other); ///< memcpy is not a constant expression
+        } else {
+          std::memcpy(
+              reinterpret_cast<unsigned char *>(is_.elements_address()),
+              reinterpret_cast<unsigned char *>(other.is_.elements_address()),
+              other.capacity() * sizeof(value_type));
+          std::copy_n(other.is_.groups_address(), other.is_.group_count(), is_.groups_address());
+          size_ = other.size_;
+        }
+      } else {
+        copy_insert_occupied_(other);
+      }
     } else {
-      /// copy_from_ commits through is_ = std::move(storage); if it throws, is_
-      /// still holds the old elements (strong guarantee).
-      copy_from_(other);
+      copy_insert_occupied_(other);
     }
+    max_load_ = floor_max_load_(capacity());
     return *this;
   }
 
@@ -402,7 +426,10 @@ public:
       adopt_moved_(other);
     } else if (allocators_equal_(alloc_, other.alloc_)) {
       adopt_moved_(other);
-    } else if (!other.empty()) {
+    } else {
+      /// Unequal allocators cannot share arrays, so the elements are moved one by
+      /// one.  *this is emptied first whether or not other has elements, or a
+      /// move from an empty other would silently keep the old contents.
       is_.clear();
       size_     = 0;
       max_load_ = floor_max_load_(capacity());
@@ -418,7 +445,7 @@ public:
   constexpr void swap(hash_table &other) noexcept;
 
 public:
-  constexpr ~hash_table() noexcept {}
+  constexpr ~hash_table() noexcept { }
 
 public:
   // clang-format off
@@ -445,6 +472,52 @@ public:
     size_     = 0;
     max_load_ = floor_max_load_(capacity());
   }
+
+  /// Rehashes into a capacity that is at least count and at least large enough
+  /// for the current size, if that differs from the current capacity (boost's
+  /// rehash, L1824).
+  constexpr void rehash(size_type count)
+  {
+    auto const min_needed = ceil_capacity_for_load_(size_);
+    if (count < min_needed) count = min_needed;
+    if (count) count = group_aligned_capacity_(count);
+    if (count != capacity()) {
+      auto storage_alloc = static_cast<typename inline_storage_type::allocator_type>(alloc_);
+      auto storage       = inline_storage_type::create(storage_alloc, count);
+      force_rehash_(storage);
+    }
+  }
+
+
+  /// Grows the storage to hold elem_count elements, never shrinking, and only
+  /// allocating when the current capacity is too small (boost's noshrink_reserve,
+  /// L2004).  The storage must already be empty, so growing only frees the old
+  /// arrays without touching elements.
+  constexpr void noshrink_reserve_(size_type elem_count)
+  {
+    if (elem_count == 0) return;
+    auto const needed = group_aligned_capacity_(ceil_capacity_for_load_(elem_count));
+    if (needed <= capacity()) return;
+
+    auto storage_alloc = static_cast<typename inline_storage_type::allocator_type>(alloc_);
+    is_                = inline_storage_type::create(storage_alloc, needed);
+    max_load_          = floor_max_load_(capacity());
+  }
+
+  /// Copies other's live elements into this table, which must be empty.  size_ is
+  /// advanced per element so a throwing copy leaves a valid, partially filled
+  /// table instead of one whose count lies about its occupancy.
+  constexpr void copy_insert_occupied_(hash_table const &other)
+  {
+    inline_storage_type::for_each_occupied(other.is_, [&](raw_pointer element_ptr, raw_group_pointer, unsigned) {
+      auto hash = hasher_(Traits::key_fn(*element_ptr));
+      emplace_at_available_slot_(is_, hash, is_.group_index(hash), static_cast<value_type const &>(*element_ptr));
+      ++size_;
+      return true;
+    });
+  }
+  /// Reserves room for count elements: rehash(ceil(count / max_load_factor)).
+  constexpr void reserve(size_type count) { rehash(ceil_capacity_for_load_(count)); }
 
   [[nodiscard]] constexpr iterator begin() noexcept
   {
@@ -685,8 +758,6 @@ public:
   // constexpr size_type bucket(key_type const &key_val) const;
 
   // constexpr float load_factor() const noexcept;
-  // constexpr void rehash(size_type bucket_count);
-  // constexpr void reserve(size_type bucket_count);
   // constexpr void reset() noexcept;
 
   // consteval auto freeze();
