@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#pragma once 
+#pragma once
 
 #include <cassert> // assert
 #include <cstdint> // size_t
@@ -117,7 +117,7 @@ private:
   {
     return static_cast<int>(fingerprint_table[static_cast<unsigned char>(hash)]);
   }
-  
+
   static constexpr unsigned char get_fingerprint_byte(size_t hash) noexcept
   {
     return static_cast<unsigned char>(broadcast_fingerprint(hash));
@@ -154,19 +154,22 @@ public:
 
   constexpr int fingerprint_mask(size_t hash) const
   {
-    if consteval {
-      auto fp  = get_fingerprint_byte(hash);
-      int mask = 0;
-      for (size_t i = 0; i < capacity(); ++i) {
-        if (slot_fp_bytes_[i] == fp) mask |= (1 << i);
-      }
-      return mask;
-    } else {
+    if constexpr (is_simd_enabled) {
+      if consteval {
+        auto fp  = get_fingerprint_byte(hash);
+        int mask = 0;
+        for (size_t i = 0; i < capacity(); ++i) {
+          if (slot_fp_bytes_[i] == fp) mask |= (1 << i);
+        }
+        return mask;
+      } else {
 #if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (_M_IX86_FP >= 2)
-      return _mm_movemask_epi8(_mm_cmpeq_epi8(load_fp_vector(), _mm_set1_epi32(broadcast_fingerprint(hash)))) & 0x7F'FF;
+        return _mm_movemask_epi8(_mm_cmpeq_epi8(load_fp_vector(), _mm_set1_epi32(broadcast_fingerprint(hash)))) & 0x7F'FF;
 #elif (defined(__ARM_NEON__) || defined(__ARM_NEON)) && !defined(__ARM_BIG_ENDIAN)
-      return simde_mm_movemask_epi8(vceqq_u8(load_fp_vector(), vdupq_n_u8(get_fingerprint_byte(hash)))) & 0x7F'FF;
-#else
+        return simde_mm_movemask_epi8(vceqq_u8(load_fp_vector(), vdupq_n_u8(get_fingerprint_byte(hash)))) & 0x7F'FF;
+#endif
+      }
+    } else {
       constexpr uint64_t fp_match_slot_mask[] = {
         0x00'00'00'00'00'00'00'00ull,
         0x00'00'00'00'00'00'ff'ffull,
@@ -198,149 +201,132 @@ public:
       folded &= folded >> 16;
 
       return folded & 0x7F'FF;
-#endif
     }
   }
 
   constexpr void reset() noexcept
   {
-    if consteval {
-      for (size_t i = 0; i < (sizeof(slot_fp_bytes_) / sizeof(slot_fp_bytes_[0])); ++i) slot_fp_bytes_[i] = 0;
-    } else {
+    if constexpr (is_simd_enabled) {
+      if consteval {
+        for (size_t i = 0; i < (sizeof(slot_fp_bytes_) / sizeof(slot_fp_bytes_[0])); ++i) slot_fp_bytes_[i] = 0;
+      } else {
 #if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (_M_IX86_FP >= 2)
-      _mm_store_si128(reinterpret_cast<__m128i *>(slot_fp_bytes_), _mm_setzero_si128());
+        _mm_store_si128(reinterpret_cast<__m128i *>(slot_fp_bytes_), _mm_setzero_si128());
 #elif (defined(__ARM_NEON__) || defined(__ARM_NEON)) && !defined(__ARM_BIG_ENDIAN)
-      vst1q_u8(reinterpret_cast<uint8_t *>(slot_fp_bytes_), vdupq_n_u8(0));
-#else
-      slot_fp_words_[0] = slot_fp_words_[1] = 0;
+        vst1q_u8(reinterpret_cast<uint8_t *>(slot_fp_bytes_), vdupq_n_u8(0));
 #endif
+      }
+    } else {
+      slot_fp_words_[0] = slot_fp_words_[1] = 0;
     }
   }
 
   constexpr void reset(size_t slot_index)
   {
     assert(slot_index < capacity() && "slot index out of range");
-    if consteval {
-      slot_fp_bytes_[slot_index] = slot_available_mark;
-    } else {
 #if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (_M_IX86_FP >= 2) || \
     ((defined(__ARM_NEON__) || defined(__ARM_NEON)) && !defined(__ARM_BIG_ENDIAN))
-      slot_fp_bytes_[slot_index] = slot_available_mark;
+    slot_fp_bytes_[slot_index] = slot_available_mark;
 #else
-      set_fingerprint_hash_impl(slot_index, slot_available_mark);
+    set_fingerprint_hash_impl(slot_index, slot_available_mark);
 #endif
-    }
   }
 
   static constexpr void reset(unsigned char *byte)
   {
-    if consteval {
+    if constexpr (is_simd_enabled) {
       *byte = slot_available_mark;
     } else {
-#if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (_M_IX86_FP >= 2) || \
-    ((defined(__ARM_NEON__) || defined(__ARM_NEON)) && !defined(__ARM_BIG_ENDIAN))
-      *byte = slot_available_mark;
-#else
-      size_t pos = reinterpret_cast<uintptr_t>(byte) % sizeof(group15);
-      byte -= pos;
-      reinterpret_cast<group15 *>(byte)->reset(pos);
-#endif
+      if consteval {
+        // The scalar layout spreads one slot over several 16-bit lanes, so
+        // clearing it needs the enclosing group; deriving that group from a
+        // bare address requires pointer->integer, which is not a constant
+        // expression.  Consteval callers must clear via reset(group, slot).
+        throw;
+      } else {
+        size_t pos = reinterpret_cast<uintptr_t>(byte) % sizeof(group15);
+        reinterpret_cast<group15 *>(byte - pos)->reset(pos);
+      }
     }
   }
 
   constexpr void set_fingerprint_hash(size_t slot_index, size_t hash)
   {
     assert(slot_index < capacity() && "slot index out of range");
-    if consteval {
-      slot_fp_bytes_[slot_index] = get_fingerprint_byte(hash);
-    } else {
 #if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (_M_IX86_FP >= 2) || \
     ((defined(__ARM_NEON__) || defined(__ARM_NEON)) && !defined(__ARM_BIG_ENDIAN))
-      slot_fp_bytes_[slot_index] = get_fingerprint_byte(hash);
+    slot_fp_bytes_[slot_index] = get_fingerprint_byte(hash);
 #else
-      set_fingerprint_hash_impl(slot_index, get_fingerprint_byte(hash));
+    set_fingerprint_hash_impl(slot_index, get_fingerprint_byte(hash));
 #endif
-    }
   }
 
   constexpr void set_overflow_mark(size_t hash) noexcept
   {
-    if consteval {
-      overflow() |= static_cast<unsigned char>(1 << (hash % 8));
+    if constexpr (is_simd_enabled) {
+      overflow() |= static_cast<unsigned char>(1u << (hash % 8));
     } else {
-#if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (_M_IX86_FP >= 2) || \
-    ((defined(__ARM_NEON__) || defined(__ARM_NEON)) && !defined(__ARM_BIG_ENDIAN))
-      overflow() |= static_cast<unsigned char>(1 << (hash % 8));
-#else
-      reinterpret_cast<uint16_t *>(slot_fp_words_)[hash % 8] |= 0x80'00u;
-#endif
+      if consteval {
+        // Scalar layout: the overflow flag of lane j = hash % 8 lives at bit 15
+        // of the j-th 16-bit lane, i.e. bit 15 + 16 * (j % 4) of word j / 4.
+        auto const lane = uint64_t(0x80'00u) << (16 * (hash % 4));
+        if ((hash % 8) < 4)
+          slot_fp_words_[0] |= lane;
+        else
+          slot_fp_words_[1] |= lane;
+      } else {
+        reinterpret_cast<uint16_t *>(slot_fp_words_)[hash % 8] |= 0x80'00u;
+      }
     }
   }
 
   constexpr bool is_overflow(size_t hash) const noexcept
   {
-    if consteval {
+    if constexpr (is_simd_enabled) {
       constexpr unsigned char shift[] = { 1, 2, 4, 8, 16, 32, 64, 128 };
-
-      return overflow() & shift[hash % 8];
+      return (overflow() & shift[hash % 8]) != 0;
     } else {
-#if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (_M_IX86_FP >= 2) || \
-    ((defined(__ARM_NEON__) || defined(__ARM_NEON)) && !defined(__ARM_BIG_ENDIAN))
-      constexpr unsigned char shift[] = { 1, 2, 4, 8, 16, 32, 64, 128 };
-
-      return overflow() & shift[hash % 8];
-#else
-      return reinterpret_cast<uint16_t const *>(slot_fp_words_)[hash % 8] & 0x80'00u;
-#endif
+      if consteval {
+        auto const lane = uint64_t(0x80'00u) << (16 * (hash % 4));
+        return (((hash % 8) < 4 ? slot_fp_words_[0] : slot_fp_words_[1]) & lane) != 0;
+      } else {
+        return reinterpret_cast<uint16_t const *>(slot_fp_words_)[hash % 8] & 0x80'00u;
+      }
     }
   }
 
-  static constexpr bool is_overflow(unsigned char const *byte)
+  static bool is_overflow(unsigned char const *byte)
   {
-    if consteval {
-      throw;
-    } else {
-      size_t pos = reinterpret_cast<uintptr_t>(byte) % sizeof(group15);
-      auto *ptr  = reinterpret_cast<group15 const *>(byte - pos);
-#if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (_M_IX86_FP >= 2) || \
-    ((defined(__ARM_NEON__) || defined(__ARM_NEON)) && !defined(__ARM_BIG_ENDIAN))
+    size_t pos = reinterpret_cast<uintptr_t>(byte) % sizeof(group15);
+    auto *ptr  = reinterpret_cast<group15 const *>(byte - pos);
+    if constexpr (is_simd_enabled) {
       return ptr->is_overflow(static_cast<size_t>(*byte));
-#else
+    } else {
       uint64_t x = ((ptr->slot_fp_words_[0]) >> pos) & 0x00'01'00'01'00'01ull;
       uint32_t y = static_cast<uint32_t>(x | (x >> 15) | (x >> 30));
       return ptr->is_overflow(static_cast<size_t>(y));
-#endif
     }
   }
 
   constexpr void set_sentinel_mark() noexcept
   {
-    if consteval {
-      slot_fp_bytes_[capacity() - 1] = slot_sentinel_mark;
-    } else {
 #if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (_M_IX86_FP >= 2) || \
     ((defined(__ARM_NEON__) || defined(__ARM_NEON)) && !defined(__ARM_BIG_ENDIAN))
-      slot_fp_bytes_[capacity() - 1] = slot_sentinel_mark;
+    slot_fp_bytes_[capacity() - 1] = slot_sentinel_mark;
 #else
-      set_fingerprint_hash_impl(capacity() - 1, slot_sentinel_mark);
+    set_fingerprint_hash_impl(capacity() - 1, slot_sentinel_mark);
 #endif
-    }
   }
 
   constexpr bool is_sentinel(size_t slot_index) const
   {
     assert(slot_index < capacity() && "slot index out of range");
-    if consteval {
+    if constexpr (is_simd_enabled) {
       return slot_index == capacity() - 1 && slot_fp_bytes_[slot_index] == slot_sentinel_mark;
     } else {
-#if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (_M_IX86_FP >= 2) || \
-    ((defined(__ARM_NEON__) || defined(__ARM_NEON)) && !defined(__ARM_BIG_ENDIAN))
-      return slot_index == capacity() - 1 && slot_fp_bytes_[slot_index] == slot_sentinel_mark;
-#else
       return slot_index == capacity() - 1 &&
              (slot_fp_words_[0] & uint64_t(0x40'00'40'00'40'00'40'00ull)) == uint64_t(0x40'00ull) &&
              (slot_fp_words_[1] & uint64_t(0x40'00'40'00'40'00'40'00ull)) == 0;
-#endif
     }
   }
 
@@ -352,15 +338,10 @@ public:
   constexpr bool is_occupied(size_t slot_index) const
   {
     assert(slot_index < capacity() && "slot index out of range");
-    if consteval {
+    if constexpr (is_simd_enabled) {
       return slot_fp_bytes_[slot_index] != slot_available_mark;
     } else {
-#if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (_M_IX86_FP >= 2) || \
-    ((defined(__ARM_NEON__) || defined(__ARM_NEON)) && !defined(__ARM_BIG_ENDIAN))
-      return slot_fp_bytes_[slot_index] != slot_available_mark;
-#else
       return ((slot_fp_words_[0] | slot_fp_words_[1]) & (0x00'01'00'01'00'01'00'01ull << slot_index)) != 0;
-#endif
     }
   }
 
@@ -377,45 +358,49 @@ public:
 
   constexpr int available_mask() const
   {
-    if consteval {
-      int mask = 0;
-      for (size_t i = 0; i < capacity(); ++i) {
-        if (slot_fp_bytes_[i] == slot_available_mark) mask |= (1 << i);
-      }
-      return mask;
-    } else {
+    if constexpr (is_simd_enabled) {
+      if consteval {
+        int mask = 0;
+        for (size_t i = 0; i < capacity(); ++i) {
+          if (slot_fp_bytes_[i] == slot_available_mark) mask |= (1 << i);
+        }
+        return mask;
+      } else {
 #if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (_M_IX86_FP >= 2)
-      return _mm_movemask_epi8(_mm_cmpeq_epi8(load_fp_vector(), _mm_setzero_si128())) & 0x7F'FF;
+        return _mm_movemask_epi8(_mm_cmpeq_epi8(load_fp_vector(), _mm_setzero_si128())) & 0x7F'FF;
 #elif (defined(__ARM_NEON__) || defined(__ARM_NEON)) && !defined(__ARM_BIG_ENDIAN)
-      return simde_mm_movemask_epi8(vceqq_u8(load_fp_vector(), vdupq_n_u8(0))) & 0x7F'FF;
-#else
+        return simde_mm_movemask_epi8(vceqq_u8(load_fp_vector(), vdupq_n_u8(0))) & 0x7F'FF;
+#endif
+      }
+    } else {
       uint64_t x = ~(slot_fp_words_[0] | slot_fp_words_[1]);
       uint32_t y = static_cast<uint32_t>(x & (x >> 32));
       y &= y >> 16;
       return y & 0x7F'FF;
-#endif
     }
   }
 
   constexpr int occupied_mask() const
   {
-    if consteval {
-      int mask = 0;
-      for (size_t i = 0; i < capacity(); ++i) {
-        if (slot_fp_bytes_[i] != slot_available_mark) mask |= (1 << i);
-      }
-      return mask;
-    } else {
+    if constexpr (is_simd_enabled) {
+      if consteval {
+        int mask = 0;
+        for (size_t i = 0; i < capacity(); ++i) {
+          if (slot_fp_bytes_[i] != slot_available_mark) mask |= (1 << i);
+        }
+        return mask;
+      } else {
 #if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (_M_IX86_FP >= 2)
-      return (~available_mask()) & 0x7F'FF;
+        return (~available_mask()) & 0x7F'FF;
 #elif (defined(__ARM_NEON__) || defined(__ARM_NEON)) && !defined(__ARM_BIG_ENDIAN)
-      return simde_mm_movemask_epi8(vcgtq_u8(load_fp_vector(), vdupq_n_u8(0))) & 0x7F'FF;
-#else
+        return simde_mm_movemask_epi8(vcgtq_u8(load_fp_vector(), vdupq_n_u8(0))) & 0x7F'FF;
+#endif
+      }
+    } else {
       uint64_t x = slot_fp_words_[0] | slot_fp_words_[1];
       uint32_t y = static_cast<uint32_t>(x | (x >> 32));
       y |= y >> 16;
       return y & 0x7F'FF;
-#endif
     }
   }
 
@@ -454,6 +439,10 @@ private:
 #  endif
   }
 #else
+
+  // The scalar bit layout is expressed with plain integer masks so that the
+  // constant-evaluated and runtime paths share one representation on platforms
+  // without SIMD.
   constexpr void set_fingerprint_hash_impl(size_t slot_index, unsigned char fp_hash) noexcept
   {
     constexpr uint64_t write_masks[] = {
