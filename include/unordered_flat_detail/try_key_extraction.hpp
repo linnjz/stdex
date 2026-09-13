@@ -24,7 +24,10 @@ namespace stdex::unordered_flat_detail
 {
 // clang-format off
 struct extract_key_priority_tag0 {};
-struct extract_key_priority_tag1 {};
+// tag1 derives from tag0 so that a tag1 overload whose constraints fail still
+// lets the tag0 overload be selected; without this the without_key fallback is
+// never a candidate and key-free emplace cannot compile.
+struct extract_key_priority_tag1 : extract_key_priority_tag0 {};
 
 // clang-format on
 
