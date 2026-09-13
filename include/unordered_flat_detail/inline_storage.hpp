@@ -54,9 +54,9 @@ struct inline_storage
   static constexpr auto group_size      = group_type::capacity();
   static constexpr auto min_group_count = 2;
 
-  // static constexpr group_type dummy_groups[min_group_count] = {
-  //   group_type::make_dummy_group(), group_type::make_dummy_group()
-  // };
+  static constexpr group_type dummy_groups[min_group_count] = {
+    group_type::make_dummy_group(), group_type::make_dummy_group()
+  };
 
   constexpr value_type *elements_address() const noexcept { return std::to_address(us_.heap_.elements_ptr_); }
 
@@ -108,7 +108,8 @@ struct inline_storage
 
     if constexpr (std::is_same_v<std::add_pointer_t<group_type>, group_pointer>) {
       if (capacity == 0) [[unlikely]] {
-        return (/*s.us_.heap_.groups_ptr_ = const_cast<group_pointer>(dummy_groups),*/ s);
+        s.us_.heap_.groups_ptr_ = const_cast<group_pointer>(dummy_groups);
+        return s;
       }
     }
 
@@ -124,7 +125,8 @@ struct inline_storage
       for (size_t i = 0; i < group_count; ++i) std::construct_at(groups_ptr + i);
       groups_ptr[group_count - 1].set_sentinel_mark();
 
-      return (s.us_.heap_ = { elements_ptr, groups_ptr }, s);
+      s.us_.heap_ = { elements_ptr, groups_ptr };
+      return s;
     } else {
       auto elements_ptr = allocator_traits::allocate(alloc, calculate_storage_size(group_count));
       auto byte_ptr     = reinterpret_cast<unsigned char *>(std::to_address(elements_ptr) + actual_capacity);
@@ -136,7 +138,8 @@ struct inline_storage
       std::memset(groups_ptr, 0, sizeof(group_type) * group_count);
       groups_ptr[group_count - 1].set_sentinel_mark();
 
-      return (s.us_.heap_ = { elements_ptr, group_pointer_traits::pointer_to(*groups_ptr) }, s);
+      s.us_.heap_ = { elements_ptr, group_pointer_traits::pointer_to(*groups_ptr) };
+      return s;
     }
   }
 
@@ -186,10 +189,12 @@ struct inline_storage
       // stack: if it holds a non-trivial type (e.g. std::string), it needs destruction
     }
 
-    union_storage(union_storage const &)                  = default;
-    union_storage &operator= (union_storage const &)      = default;
-    constexpr union_storage(union_storage &&)             = default;
-    constexpr union_storage &operator= (union_storage &&) = default;
+    /// Storage owns its allocation, so copying would alias and double-free;
+    /// ownership is transferred by move only.
+    union_storage(union_storage const &)                           = delete;
+    union_storage &operator= (union_storage const &)               = delete;
+    constexpr union_storage(union_storage &&) noexcept             = default;
+    constexpr union_storage &operator= (union_storage &&) noexcept = default;
   } us_;
 
   size_t group_index_shift_;

@@ -240,7 +240,7 @@ protected:
           emplace_at_available_slot_(is_, hash, is_.group_index(hash), *occupied_ptr);
         });
       }
-      is_       = storage;
+      is_       = std::move(storage);
       size_     = other.size_;
       max_load_ = is_gc_equal ? other.max_load_ : floor_max_load_(capacity()); ///< is_ -> is_.group_count_mask_ -> capacity -> max_load_
     }
@@ -303,7 +303,7 @@ public:
       typename inline_storage_type::guard g { &storage, storage_alloc };
       {
         inline_storage_type::destroy(storage_alloc, is_);
-        is_ = storage;
+        is_ = std::move(storage);
       }
       g.release();
     }
