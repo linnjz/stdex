@@ -67,15 +67,15 @@ public:
 
 private:
   /// Transient occupancy mark for slots whose fingerprint is not yet known.
-  /// It exists only while a table is built into a temporary storage, so an
-  /// element_guard can tell which slots hold live objects; it must be non-zero
+  /// It exists only while a table is built into a temporary storage, so the
+  /// storage's destructor can tell which slots hold live objects; it must be non-zero
   /// and differ from the sentinel mark.  It is never a valid table state: the
   /// caller must overwrite the whole group with real data (copying the source
   /// groups does exactly that) before the storage is read.
   static constexpr unsigned char slot_occupied_mark = 2;
 
   /// Marks a slot occupied without knowing its hash.  Used while a table is
-  /// built into a temporary storage so an element_guard's backout can find the
+  /// built into a temporary storage so the storage's backout can find the
   /// live slots.  This is occupancy only, not a fingerprint: the caller must
   /// overwrite the whole group with real data (copying the source groups does
   /// that) before the storage is read, otherwise find would miss the element.
