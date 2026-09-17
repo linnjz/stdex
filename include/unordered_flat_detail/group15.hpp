@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 LinnJz
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -108,7 +108,7 @@ public:
   class attorney
   {
     // clang-format off
-    template <class> friend class hash_table;
+    template <class, class, class, class> friend class hash_table;
     static constexpr void set_occupied_mask(group15 &g, size_t i) noexcept { g.set_occupied_mask(i); }
     static constexpr bool equals(group15 const &a, group15 const &b) noexcept { return a.equals(b); }
 
