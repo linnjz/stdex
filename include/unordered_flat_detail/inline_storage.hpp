@@ -24,6 +24,7 @@
 #include <memory>      // std::allocator, std::allocator_traits,
                        // std::pointer_traits, std::to_address,
                        // std::construct_at
+#include <new>         // placement new
 #include <type_traits> // std::is_same_v, std::add_pointer_t
 
 #include "group15.hpp"
@@ -71,13 +72,8 @@ struct inline_storage : public Traits
 
   enum class storage_mode : uint8_t { heap = 0, stack = 1 };
 
-  constexpr inline_storage()
-  {
-    if constexpr (inline_capacity == 0) {
-      std::construct_at(&heap_);
-      dissociate_();
-    }
-  }
+  struct alignas(16) heap_block;
+  struct alignas(16) stack_block;
 
   template <class H = hasher, class K = key_equal, class Al = allocator_type>
   constexpr inline_storage(H &&hash_arg, K &&key_eq, Al &&alloc)
@@ -85,22 +81,10 @@ struct inline_storage : public Traits
       , key_eq_ { std::forward<K>(key_eq) }
       , alloc_ { std::forward<Al>(alloc) }
   {
-    if constexpr (inline_capacity == 0) {
-      std::construct_at(&heap_);
-      dissociate_();
-    }
+    dissociate_();
   }
 
-  constexpr ~inline_storage() noexcept
-  {
-    if constexpr (inline_capacity == 0) {
-      if (elements_address_()) {
-        if (!empty()) destroy_elements_unchecked_();
-        deallocate_unchecked_();
-      }
-      // dissociate_();
-    }
-  }
+  constexpr ~inline_storage() noexcept { dispose_(); }
 
   constexpr inline_storage(inline_storage &&other) noexcept
   {
@@ -124,12 +108,20 @@ struct inline_storage : public Traits
            }
   constexpr void construct_element_unchecked_(value_type *element_ptr, Args &&...args)
   {
-    allocator_traits::construct(alloc_, element_ptr, std::forward<Args>(args)...);
+    if (is_heap()) {
+      allocator_traits::construct(alloc_, element_ptr, std::forward<Args>(args)...);
+    } else {
+      std::construct_at(element_ptr, std::forward<Args>(args)...);
+    }
   }
 
   constexpr void destroy_element_unchecked_(value_type *element_ptr) noexcept
   {
-    allocator_traits::destroy(alloc_, element_ptr);
+    if (is_heap()) {
+      allocator_traits::destroy(alloc_, element_ptr);
+    } else {
+      std::destroy_at(element_ptr);
+    }
   }
 
   constexpr void destroy_elements_unchecked_() noexcept
@@ -155,7 +147,7 @@ struct inline_storage : public Traits
     }
     sentinel_group->set_sentinel_mark();
     size_     = 0;
-    // max_load_ = initial_max_load_(capacity());
+    //< max_load_ = initial_max_load_(capacity());
   }
 
   constexpr void allocate_unchecked_impl_(allocator_type &alloc, size_type capacity) 
@@ -169,9 +161,9 @@ struct inline_storage : public Traits
       auto groups_alloc = group_allocator_type { alloc };
       auto groups_ptr   = group_allocator_traits::allocate(groups_alloc, group_count_());
 
-      /// reset() after construct_at zeroes every byte through a member write;
-      /// MSVC's constant evaluator needs that write (not just value-init) to
-      /// consider the union member live before available_mask reads it.
+      // reset() after construct_at zeroes every byte through a member write;
+      // MSVC's constant evaluator needs that write (not just value-init) to
+      // consider the union member live before available_mask reads it.
       for (size_type i = 0; i < group_count_(); ++i) {
         std::construct_at(groups_ptr + i);
         groups_ptr[i].reset();
@@ -199,17 +191,17 @@ struct inline_storage : public Traits
     allocate_unchecked_impl_(alloc_, capacity);
   }
 
-  static constexpr inline_storage allocate_unchecked_(allocator_type alloc, size_type capacity)
-  {
-    inline_storage result;
-    if constexpr (std::is_move_assignable_v<allocator_type>) {
-      result.alloc_ = std::move(alloc);
-    } else {
-      result.alloc_ = alloc;
-    }
-    result.allocate_unchecked_impl_(result.alloc_, capacity);
-    return result;
-  }
+  // static constexpr inline_storage allocate_unchecked_(allocator_type alloc, size_type capacity)
+  // {
+  //   inline_storage result;
+  //   if constexpr (std::is_move_assignable_v<allocator_type>) {
+  //     result.alloc_ = std::move(alloc);
+  //   } else {
+  //     result.alloc_ = alloc;
+  //   }
+  //   result.allocate_unchecked_impl_(result.alloc_, capacity);
+  //   return result;
+  // }
 
   constexpr void deallocate_unchecked_() noexcept(noexcept(allocator_traits::deallocate(alloc_, nullptr, 0)))
   {
@@ -242,14 +234,41 @@ struct inline_storage : public Traits
   [[nodiscard]] constexpr size_type group_index_(size_type hash) const noexcept { return hash >> group_index_shift_; }
   [[nodiscard]] constexpr size_type capacity_unchecked_() const noexcept { return group_count_() * group_size_() - 1; }
 
-  [[nodiscard]] constexpr value_type *elements_address_() const noexcept { return std::to_address(heap_.elements_ptr_); }
-  [[nodiscard]] constexpr group_type *groups_address_() const noexcept { return std::to_address(heap_.groups_ptr_); }
+  [[nodiscard]] constexpr value_type *elements_address_() noexcept
+  {
+    if (is_heap()) return std::to_address(heap_.elements_ptr_);
+    if constexpr (inline_capacity > 0) return stack_.elements_;
+    else return nullptr;
+  }
+
+  [[nodiscard]] constexpr value_type const *elements_address_() const noexcept
+  {
+    if (is_heap()) return std::to_address(heap_.elements_ptr_);
+    if constexpr (inline_capacity > 0) return stack_.elements_;
+    else return nullptr;
+  }
+
+  [[nodiscard]] constexpr group_type *groups_address_() noexcept
+  {
+    if (is_heap()) return std::to_address(heap_.groups_ptr_);
+    if constexpr (inline_capacity > 0) return stack_.groups_;
+    else return nullptr;
+  }
+
+  [[nodiscard]] constexpr group_type const *groups_address_() const noexcept
+  {
+    if (is_heap()) return std::to_address(heap_.groups_ptr_);
+    if constexpr (inline_capacity > 0) return stack_.groups_;
+    else return nullptr;
+  }
 
   // clang-format on
 
   /// Given the capacity, figure out how much it can hold.
   [[nodiscard]] constexpr size_type initial_max_load_(size_type capacity) const noexcept
   {
+    //< if (is_stack()) return capacity; // 100%
+
     if (capacity <= 2 * group_size_() - 1) {
       return capacity; // <= 29, 100%
     } else {
@@ -258,19 +277,19 @@ struct inline_storage : public Traits
   }
 
   /// Given the number of elements, calculate the actual required capacity based on the max load factor
-  constexpr size_type required_capacity_(size_type elem_count) const noexcept
+  static constexpr size_type required_capacity_(size_type elem_count) noexcept
   {
     return (elem_count * max_load_factor_num + max_load_factor_den - 1) / max_load_factor_den;
   }
 
-  constexpr size_type required_capacity_for_growth_(size_type elem_count) const noexcept
+  static constexpr size_type required_capacity_for_growth_(size_type elem_count) noexcept
   {
     return required_capacity_(elem_count + elem_count / 61 + 1);
   }
 
   /// The actual number of groups, aligned to a power of two, is calculated based on
   /// the capacity calculated from the load factor and serves as the actual capacity.
-  constexpr size_type aligned_capacity_(size_type capacity) const noexcept
+  static constexpr size_type aligned_capacity_(size_type capacity) noexcept
   {
     return group_count_by_(group_index_shift_by_(capacity)) * group_size_() - 1;
   }
@@ -287,7 +306,7 @@ struct inline_storage : public Traits
     return size_type(1) << (sizeof(size_type) * CHAR_BIT - index_shift);
   }
 
-  constexpr size_type align_up_(size_type value, size_type alignment) const noexcept
+  static constexpr size_type align_up_(size_type value, size_type alignment) noexcept
   {
     return (value + alignment - 1) & ~(alignment - 1);
   }
@@ -310,7 +329,7 @@ struct inline_storage : public Traits
   constexpr void demote_to_stack_() noexcept
   {
     std::destroy_at(&heap_);
-    std::construct_at(&stack_);
+    ::new (static_cast<void *>(&stack_)) stack_block;
     storage_mode_ = storage_mode::stack;
   }
 
@@ -318,39 +337,84 @@ struct inline_storage : public Traits
   {
     std::destroy_at(&stack_);
     std::construct_at(&heap_);
-    heap_.groups_ptr_ = const_cast<group_pointer>(dummy_groups);
+    //< heap_.groups_ptr_ = const_cast<group_pointer>(dummy_groups);
     storage_mode_ = storage_mode::heap;
   }
 
   constexpr void dispose_() noexcept
   {
-    if (elements_address_()) {
-      if (!empty()) destroy_elements_unchecked_();
-      deallocate_unchecked_();
+    if (!empty()) destroy_elements_unchecked_();
+
+    if constexpr (inline_capacity == 0) {
+      if (elements_address_()) deallocate_unchecked_();
     }
   }
 
   constexpr void dissociate_() noexcept
   {
-    heap_.elements_ptr_ = pointer {};
-    if constexpr (std::is_same_v<std::add_pointer_t<group_type>, group_pointer>) {
-      heap_.groups_ptr_ = const_cast<group_pointer>(dummy_groups);
+
+    if constexpr (inline_capacity == 0) {
+    } else {
     }
-    storage_mode_      = inline_capacity == 0 ? storage_mode::heap : storage_mode::stack;
-    group_index_shift_ = static_cast<uint8_t>(group_index_shift_by_(0));
-    group_count_mask_  = min_group_count - 1;
-    size_              = 0;
-    max_load_          = initial_max_load_(0);
+    if constexpr (inline_capacity == 0) {
+      std::construct_at(&heap_);
+
+      heap_.elements_ptr_ = pointer {};
+      if constexpr (std::is_same_v<std::add_pointer_t<group_type>, group_pointer>) {
+        heap_.groups_ptr_ = const_cast<group_pointer>(dummy_groups);
+      }
+      storage_mode_      = storage_mode::heap;
+      group_index_shift_ = static_cast<uint8_t>(group_index_shift_by_(0));
+      group_count_mask_  = min_group_count - 1;
+      size_              = 0;
+      max_load_          = initial_max_load_(0);
+    } else {
+      ::new (static_cast<void *>(&stack_)) stack_block;
+
+      /// Only the group bytes are initialized: empty slots hold no live element
+      /// (elements_ stays raw storage and is constructed on insert).
+      std::memset(stack_.groups_, 0, sizeof(stack_.groups_));
+      stack_.groups_[group_count_() - 1].set_sentinel_mark();
+
+      storage_mode_      = storage_mode::stack;
+      group_index_shift_ = static_cast<uint8_t>(group_index_shift_by_(inline_capacity));
+      group_count_mask_  = (inline_capacity + 1) / group_size_() - 1;
+      size_              = 0;
+      max_load_          = inline_capacity;
+    }
   }
   
   template <class Fn>
+  constexpr void for_each_occupied_slot_(Fn &&fn)
+  {
+    if (elements_address_() == nullptr) return; ///< dissociated table has no elements
+
+    auto *elements_ptr = elements_address_();
+    auto *groups_ptr   = groups_address_();
+
+    auto *const sentinel_group   = groups_ptr + group_count_() - 1;
+    auto const *const groups_end = std::next(sentinel_group);
+
+    for (; groups_ptr != groups_end; ++groups_ptr, elements_ptr += group_size_()) {
+      auto occupied_mask = group_type::occupied_mask_excluding_sentinel(groups_ptr, sentinel_group);
+      while (occupied_mask) {
+        unsigned slot_index = std::countr_zero(static_cast<unsigned>(occupied_mask));
+        fn(elements_ptr + slot_index, groups_ptr, slot_index);
+        occupied_mask &= occupied_mask - 1;
+      }
+    }
+  }
+
+  template <class Fn>
   constexpr void for_each_occupied_slot_(Fn &&fn) const
   {
-    value_type *elements_ptr = elements_address_();
-    group_type *groups_ptr   = groups_address_();
+    if (elements_address_() == nullptr) return; ///< dissociated table has no elements
 
-    group_type *const sentinel_group   = groups_ptr + group_count_() - 1;
-    group_type const *const groups_end = std::next(sentinel_group);
+    auto const *elements_ptr = elements_address_();
+    auto const *groups_ptr   = groups_address_();
+
+    auto const *const sentinel_group   = groups_ptr + group_count_() - 1;
+    auto const *const groups_end = std::next(sentinel_group);
 
     for (; groups_ptr != groups_end; ++groups_ptr, elements_ptr += group_size_()) {
       auto occupied_mask = group_type::occupied_mask_excluding_sentinel(groups_ptr, sentinel_group);
@@ -407,10 +471,15 @@ struct inline_storage : public Traits
   template <typename T, std::size_t N> struct storage_for { using type = T[N]; };
   template <typename T> struct storage_for<T, 0> { using type = char; };
 
+  /// The arrays are raw storage: the default constructor deliberately starts no
+  /// member lifetime, so elements are constructed on demand and only the group
+  /// bytes are initialized.  (A defaulted constructor would be deleted because
+  /// value_type is not trivially default constructible.)
   struct alignas(16) stack_block
   {
-    union { typename storage_for<value_type, inline_capacity>::type elements; };
-    union { typename storage_for<group_type, inline_capacity>::type groups; };
+    union { typename storage_for<value_type, inline_capacity>::type elements_; };
+    union { typename storage_for<group_type, (inline_capacity + 1) / group_type::capacity()>::type groups_; };
+    constexpr stack_block() noexcept {}
   };
 
   union
