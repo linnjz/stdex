@@ -401,7 +401,7 @@ public:
     return *byte != slot_available_mark;
   }
 
-  static constexpr int occupied_mask_excluding_sentinel(group15 *curr, group15 *sentinel_group)
+  static constexpr int occupied_mask_excluding_sentinel(group15 const *curr, group15 const *sentinel_group)
   {
     ///< excluding the sentinel
     return curr->occupied_mask() & ~(static_cast<int>(curr == sentinel_group) << (capacity() - 1));
