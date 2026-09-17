@@ -200,6 +200,27 @@ private:
     }
   }
 
+  template <bool Move>
+  constexpr bool transfer_without_allocate_(std::conditional_t<Move, hash_table &, hash_table const &> other)
+  {
+    if (group_count_() == other.group_count_()) {
+      transfer_storage_same_layout_<Move>(other);
+      return true;
+    }
+    if (other.size() <= capacity_unchecked_()) {
+      transfer_storage_with_rehash_<Move>(other);
+      return true;
+    }
+    return false;
+  }
+
+  template <bool Move>
+  constexpr void allocate_and_transfer_(std::conditional_t<Move, hash_table &, hash_table const &> other)
+  {
+    allocate_unchecked_(required_capacity_(other.size()));
+    transfer_storage_with_rehash_<Move>(other);
+  }
+
 public:
   /// <summary>
  /// Copy construction:
@@ -227,16 +248,9 @@ public:
     if constexpr (inline_capacity == 0) {
       allocate_unchecked_(required_capacity_(other.size()));
       transfer_from_unchecked_<false>(other);
-    } else if (other.size() <= capacity_unchecked_()) {
-      if (other.is_stack()) {
-        transfer_storage_same_layout_<false>(other);
-      } else {
-        transfer_storage_with_rehash_<false>(other);
-      }
-    } else {
+    } else if (!transfer_without_allocate_<false>(other)) {
       promote_to_heap_();
-      allocate_unchecked_(required_capacity_(other.size()));
-      transfer_storage_with_rehash_<false>(other);
+      allocate_and_transfer_<false>(other);
     }
   }
 
@@ -286,8 +300,7 @@ public:
         transfer_storage_with_rehash_<false>(other);
       } else {
         promote_to_heap_();
-        allocate_unchecked_(required_capacity_(other.size()));
-        transfer_storage_with_rehash_<false>(other);
+        allocate_and_transfer_<false>(other);
       }
     }
     return *this;
@@ -312,22 +325,14 @@ public:
       return;
 
     if constexpr (inline_capacity != 0) {
-      if (group_count_() == other.group_count_()) {
-        transfer_storage_same_layout_<true>(other);
-        return;
-      }
-      if (other.size() <= capacity_unchecked_()) {
-        transfer_storage_with_rehash_<true>(other);
-        return;
-      }
+      if (transfer_without_allocate_<true>(other)) return;
       promote_to_heap_();
     }
 
     if (allocators_equal_(get_allocator(), other.get_allocator())) {
       steal_heap_from_(other);
     } else {
-      allocate_unchecked_(required_capacity_(other.size()));
-      transfer_storage_with_rehash_<true>(other);
+      allocate_and_transfer_<true>(other);
     }
   }
 
@@ -338,14 +343,7 @@ public:
       return;
 
     if constexpr (inline_capacity != 0) {
-      if (group_count_() == other.group_count_()) {
-        transfer_storage_same_layout_<true>(other);
-        return;
-      }
-      if (other.size() <= capacity_unchecked_()) {
-        transfer_storage_with_rehash_<true>(other);
-        return;
-      }
+      if (transfer_without_allocate_<true>(other)) return;
       promote_to_heap_();
     }
     steal_heap_from_(other);
@@ -370,45 +368,28 @@ public:
         steal_heap_from_(other);
       } else {
         if (!is_nullobj) deallocate_unchecked_();
-        allocate_unchecked_(required_capacity_(other.size()));
-        transfer_storage_with_rehash_<true>(other);
+        allocate_and_transfer_<true>(other);
       }
-    } else if (is_this_stack && is_other_stack) {
+    } else if (is_this_stack) {
       if constexpr (is_pocma_v) this->alloc_ = std::move(other.alloc_);
-      transfer_storage_same_layout_<true>(other);
-    } else if (is_this_stack && !is_other_stack) {
-      if constexpr (is_pocma_v) this->alloc_ = std::move(other.alloc_);
-      if (group_count_() == other.group_count_()) {
-        transfer_storage_same_layout_<true>(other);
-      } else if (other.size() <= capacity_unchecked_()) {
-        transfer_storage_with_rehash_<true>(other);
+      if (transfer_without_allocate_<true>(other)) return *this;
+      promote_to_heap_();
+      if (is_pocma_v || allocators_equal_(get_allocator(), other.get_allocator())) {
+        steal_heap_from_(other);
       } else {
-        promote_to_heap_();
-        if (is_pocma_v || allocators_equal_(get_allocator(), other.get_allocator())) {
-          steal_heap_from_(other);
-        } else {
-          allocate_unchecked_(required_capacity_(other.size()));
-          transfer_storage_with_rehash_<true>(other);
-        }
+        allocate_and_transfer_<true>(other);
       }
     } else /*!is_this_stack && is_other_stack*/ {
       // this started as a stack but promoted to heap on insertion; max_load comes from the exact capacity computed by required_capacity_,
       // then group_index_shift_by_ rounds up to the smallest power-of-two memory, then group_count_by_ derives the group count and multiplies (group size - 1) to get the real capacity before applying the factor for max_load_
       // max_load_ >= inline_capacity >= other.size(): the current heap elements (load factor may be 100% or 87.5%) fit the stack 100% load capacity
-      if (this->max_load_ >= other.size()) {
-        if (is_pocma_v && !allocators_equal_(get_allocator(), other.get_allocator())) {
-          if (!is_nullobj) deallocate_unchecked_();
-          this->alloc_ = std::move(other.alloc_);
-          allocate_unchecked_(required_capacity_(other.size()));
-          transfer_storage_with_rehash_<true>(other);
-        } else {
-          transfer_storage_with_rehash_<true>(other);
-        }
+      bool const is_propagator = is_pocma_v && !allocators_equal_(get_allocator(), other.get_allocator());
+      if (this->max_load_ >= other.size() && !is_propagator) {
+        transfer_storage_with_rehash_<true>(other);
       } else {
         if (!is_nullobj) deallocate_unchecked_();
         if constexpr (is_pocma_v) this->alloc_ = std::move(other.alloc_);
-        allocate_unchecked_(required_capacity_(other.size()));
-        transfer_storage_with_rehash_<true>(other);
+        allocate_and_transfer_<true>(other);
       }
     }
     return *this;
