@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (c) 2026 LinnJz
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -96,13 +96,14 @@ private:
   using base::deallocate_unchecked_;
   using base::destroy_element_unchecked_;
   using base::destroy_elements_unchecked_;
+  using base::demote_to_stack_;
+  using base::promote_to_heap_;
   using base::elements_address_;
   using base::groups_address_;
   using base::group_count_;
   using base::group_index_;
   using base::group_size_;
   using base::initial_max_load_;
-  using base::promote_to_heap_;
   using base::required_capacity_;
   using base::required_capacity_for_growth_;
   using base::for_each_occupied_slot_;
@@ -144,7 +145,7 @@ private:
   {
     if constexpr (Move) destroy_elements_on_exit g { other };
 
-    other.for_each_occupied_slot_([&other, this](value_type *occupied_ptr, group_type *, unsigned)
+    other.for_each_occupied_slot_([&other, this](auto *occupied_ptr, auto *, unsigned)
     {
       auto *dst = elements_address_() + (occupied_ptr - other.elements_address_());
       if constexpr (Move) {
@@ -178,7 +179,7 @@ private:
   {
     if constexpr (Move) destroy_elements_on_exit g { other };
 
-    other.for_each_occupied_slot_([this](value_type *occupied_ptr, group_type *, unsigned)
+    other.for_each_occupied_slot_([this](auto *occupied_ptr, auto *, unsigned)
     {
       auto hash = this->hasher_(Traits::key_fn(*occupied_ptr));
       if constexpr (Move) {
@@ -274,9 +275,8 @@ public:
     bool is_nullobj = elements_address_() == nullptr;
     if (!is_nullobj && !empty()) destroy_elements_unchecked_();
 
-    using std::swap;
-    swap(this->hasher_, hasher);
-    swap(this->key_eq_, key_eq);
+    std::ranges::swap(this->hasher_, hasher);
+    std::ranges::swap(this->key_eq_, key_eq);
 
     bool const is_propagator = is_pocca_v && get_allocator() != other.get_allocator();
     bool const is_this_stack = is_stack();
@@ -309,12 +309,11 @@ public:
 private:
   constexpr void steal_heap_from_(hash_table &other) noexcept
   {
-    using std::swap;
-    swap(this->heap_, other.heap_);
-    swap(this->group_index_shift_, other.group_index_shift_);
-    swap(this->group_count_mask_, other.group_count_mask_);
-    swap(this->size_, other.size_);
-    swap(this->max_load_, other.max_load_);
+    std::ranges::swap(this->heap_, other.heap_);
+    std::ranges::swap(this->group_index_shift_, other.group_index_shift_);
+    std::ranges::swap(this->group_count_mask_, other.group_count_mask_);
+    std::ranges::swap(this->size_, other.size_);
+    std::ranges::swap(this->max_load_, other.max_load_);
   }
 
 public:
@@ -357,9 +356,8 @@ public:
     bool is_nullobj = elements_address_() == nullptr;
     if (!is_nullobj && !empty()) destroy_elements_unchecked_();
 
-    using std::swap;
-    swap(this->hasher_, other.hasher_);
-    swap(this->key_eq_, other.key_eq_);
+    std::ranges::swap(this->hasher_, other.hasher_);
+    std::ranges::swap(this->key_eq_, other.key_eq_);
 
     bool const is_this_stack = is_stack(), is_other_stack = other.is_stack();
     if (!is_this_stack && !is_other_stack) {
@@ -393,6 +391,74 @@ public:
       }
     }
     return *this;
+  }
+
+private:
+  /// Precondition: this is heap and other is stack.  A stack table can only hold
+  /// trivially copyable elements (the array is a union member, so a non-trivial
+  /// type would need a live object there), which is what makes exchanging the
+  /// whole inline storage a valid object-representation swap.  The heap side
+  /// keeps its block: it simply moves to other.
+  constexpr void swap_heap_to_stack_(hash_table &other)
+  {
+    auto const this_heap  = this->heap_;
+    auto const this_shift = this->group_index_shift_;
+    auto const this_mask  = this->group_count_mask_;
+    auto const this_size  = this->size_;
+    auto const this_load  = this->max_load_;
+
+    demote_to_stack_();
+    this->group_index_shift_ = other.group_index_shift_;
+    this->group_count_mask_  = other.group_count_mask_;
+    this->max_load_          = other.max_load_;
+    std::ranges::swap(this->stack_.elements_, other.stack_.elements_);
+    std::ranges::swap(this->stack_.groups_, other.stack_.groups_);
+    this->size_              = other.size_;
+
+    other.promote_to_heap_();
+    other.heap_              = this_heap;
+    other.group_index_shift_ = this_shift;
+    other.group_count_mask_  = this_mask;
+    other.size_              = this_size;
+    other.max_load_          = this_load;
+  }
+
+public:
+  constexpr void swap(hash_table &other)
+    noexcept(std::is_nothrow_swappable_v<hasher> && std::is_nothrow_swappable_v<key_equal> &&
+             (is_pocs_v || allocator_traits::is_always_equal::value))
+  {
+    if (this == std::addressof(other)) [[unlikely]]
+      return;
+
+    if constexpr (is_pocs_v) {
+      std::ranges::swap(this->alloc_, other.alloc_);
+    } else {
+      assert(allocators_equal_(this->alloc_, other.alloc_) &&
+             "[container.requirements.general]/8: if propagate_on_container_swap is false, swapping two containers with "
+             "unequal allocators is undefined behavior.");
+    }
+    std::ranges::swap(this->hasher_, other.hasher_);
+    std::ranges::swap(this->key_eq_, other.key_eq_);
+
+    bool const is_this_heap = is_heap(), is_other_heap = other.is_heap();
+    if (is_this_heap && is_other_heap) {
+      std::ranges::swap(this->heap_, other.heap_);
+      std::ranges::swap(this->group_index_shift_, other.group_index_shift_);
+      std::ranges::swap(this->group_count_mask_, other.group_count_mask_);
+      std::ranges::swap(this->size_, other.size_);
+      std::ranges::swap(this->max_load_, other.max_load_);
+    } else if (is_this_heap && !is_other_heap) {
+      swap_heap_to_stack_(other);
+    } else if (!is_this_heap && is_other_heap) {
+      other.swap_heap_to_stack_(*this);
+    } else {
+      /// Both are stack: their layout metadata is identical, so only the inline
+      /// storage and the element count have to move.
+      std::ranges::swap(this->stack_.elements_, other.stack_.elements_);
+      std::ranges::swap(this->stack_.groups_, other.stack_.groups_);
+      std::ranges::swap(this->size_, other.size_);
+    }
   }
 };
 } // namespace stdex::unordered_flat_detail
