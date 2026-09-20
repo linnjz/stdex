@@ -180,8 +180,8 @@ private:
     ++slot_index_;
 
     while (slot_index_ < group_type::capacity()) {
-      if (group_ptr_->is_occupied(slot_index_)) {
-        if (group_ptr_->is_sentinel(slot_index_)) [[unlikely]]
+      if (group_ptr_->is_occupied_by_slot(slot_index_)) {
+        if (group_ptr_->is_sentinel_by_slot(slot_index_)) [[unlikely]]
           element_ptr_ = nullptr;
         return;
       }
@@ -196,7 +196,7 @@ private:
       int mask = group_ptr_->occupied_mask();
       if (mask != 0) {
         auto slot_index = std::countr_zero(static_cast<unsigned>(mask));
-        if (group_ptr_->is_sentinel(slot_index)) [[unlikely]] {
+        if (group_ptr_->is_sentinel_by_slot(slot_index)) [[unlikely]] {
           element_ptr_ = nullptr;
         } else {
           element_ptr_ += static_cast<difference_type>(slot_index);

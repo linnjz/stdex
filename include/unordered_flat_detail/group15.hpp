@@ -331,7 +331,7 @@ public:
     }
   }
 
-  constexpr bool is_overflow(size_t hash) const noexcept
+  constexpr bool is_overflow_by_hash(size_t hash) const noexcept
   {
     if constexpr (is_simd_enabled) {
       constexpr unsigned char shift[] = { 1, 2, 4, 8, 16, 32, 64, 128 };
@@ -346,16 +346,30 @@ public:
     }
   }
 
+  constexpr bool is_overflow_by_slot(size_t slot_index) const noexcept
+  {
+    if constexpr (is_simd_enabled) {
+      return is_overflow_by_hash(static_cast<size_t>(slot_fp_bytes_[slot_index]));
+    } else {
+      if consteval {
+        auto const lane = uint64_t(0x80'00u) << (16 * (slot_index % 4));
+        return (((slot_index % 8) < 4 ? slot_fp_words_[0] : slot_fp_words_[1]) & lane) != 0;
+      } else {
+        return reinterpret_cast<uint16_t const *>(slot_fp_words_)[slot_index % 8] & 0x80'00u;
+      }
+    }
+  }
+
   static bool is_overflow(unsigned char const *byte)
   {
     size_t pos = reinterpret_cast<uintptr_t>(byte) % sizeof(group15);
     auto *ptr  = reinterpret_cast<group15 const *>(byte - pos);
     if constexpr (is_simd_enabled) {
-      return ptr->is_overflow(static_cast<size_t>(*byte));
+      return ptr->is_overflow_by_hash(static_cast<size_t>(*byte));
     } else {
       uint64_t x = ((ptr->slot_fp_words_[0]) >> pos) & 0x00'01'00'01'00'01ull;
       uint32_t y = static_cast<uint32_t>(x | (x >> 15) | (x >> 30));
-      return ptr->is_overflow(static_cast<size_t>(y));
+      return ptr->is_overflow_by_hash(static_cast<size_t>(y));
     }
   }
 
@@ -369,7 +383,7 @@ public:
 #endif
   }
 
-  constexpr bool is_sentinel(size_t slot_index) const
+  constexpr bool is_sentinel_by_slot(size_t slot_index) const
   {
     assert(slot_index < capacity() && "slot index out of range");
     if constexpr (is_simd_enabled) {
@@ -386,7 +400,7 @@ public:
     return *byte == slot_sentinel_mark;
   }
 
-  constexpr bool is_occupied(size_t slot_index) const
+  constexpr bool is_occupied_by_slot(size_t slot_index) const
   {
     assert(slot_index < capacity() && "slot index out of range");
     if constexpr (is_simd_enabled) {

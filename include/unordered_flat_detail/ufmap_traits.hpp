@@ -25,9 +25,9 @@ struct ufmap_traits
 {
   using key_type        = KeyType;
   using mapped_type     = ValueType;
-  using value_type      = std::pair<KeyType, ValueType>;
-  using reference       = std::pair<KeyType const &, ValueType &>;
-  using const_reference = std::pair<KeyType const &, ValueType const &>;
+  using value_type      = std::pair<key_type, mapped_type>;
+  using reference       = std::pair<key_type const &, mapped_type &>;
+  using const_reference = std::pair<key_type const &, mapped_type const &>;
 
   static constexpr size_t inline_capacity = N;
 
