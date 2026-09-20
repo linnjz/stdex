@@ -23,8 +23,8 @@ struct ufset_traits
 {
   using key_type        = KeyType;
   using value_type      = KeyType;
-  using reference       = KeyType &;
-  using const_reference = KeyType const &;
+  using reference       = value_type &;
+  using const_reference = value_type const &;
 
   static constexpr size_t inline_capacity = N;
 

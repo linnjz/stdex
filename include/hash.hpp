@@ -408,14 +408,14 @@ template <hash_detail::byte_like Byte, hash_detail::hash_mode Mode = standard_t>
 [[nodiscard]] constexpr uint64_t hash_bytes(void const *const data, size_t const size, uint64_t const seed = 0, Mode = {}) noexcept
 {
   [[assume(data != nullptr)]];
-  return hash_bytes(Mode {}, std::span<std::byte const> { static_cast<std::byte const *>(data), size }, seed);
+  return hash_bytes(std::span<std::byte const> { static_cast<std::byte const *>(data), size }, seed, Mode {});
 }
 
 template <hash_detail::contiguous_byte_range Range, hash_detail::hash_mode Mode = standard_t>
 [[nodiscard]] constexpr uint64_t hash_range(Range const &range, uint64_t const seed = 0, Mode = {}) noexcept
 {
   using byte_type = std::remove_cv_t<std::ranges::range_value_t<Range>>;
-  return hash_bytes(Mode {}, std::span<byte_type const> { std::ranges::data(range), std::ranges::size(range) }, seed);
+  return hash_bytes(std::span<byte_type const> { std::ranges::data(range), std::ranges::size(range) }, seed, Mode {});
 }
 
 template <hash_detail::contiguous_object_range Range, hash_detail::hash_mode Mode = standard_t>
@@ -423,13 +423,13 @@ template <hash_detail::contiguous_object_range Range, hash_detail::hash_mode Mod
 {
   using value_type   = std::remove_cv_t<std::ranges::range_value_t<Range>>;
   auto const objects = std::span<value_type const> { std::ranges::data(range), std::ranges::size(range) };
-  return hash_bytes(Mode {}, std::as_bytes(objects), seed);
+  return hash_bytes(std::as_bytes(objects), seed, Mode {});
 }
 
 template <hash_detail::hash_mode Mode = standard_t>
 [[nodiscard]] constexpr uint64_t hash(std::string_view const text, uint64_t const seed = 0) noexcept
 {
-  return hash_bytes(Mode {}, std::span<char const> { text.data(), text.size() }, seed);
+  return hash_bytes(std::span<char const> { text.data(), text.size() }, seed, Mode {});
 }
 
 template <hash_detail::scalar_hashable T, hash_detail::hash_mode Mode = standard_t>
@@ -446,7 +446,7 @@ template <hash_detail::scalar_hashable T, hash_detail::hash_mode Mode = standard
     bits = static_cast<unsigned_type>(value);
   }
   auto const bytes = hash_detail::little_endian_array(bits);
-  return hash_range(Mode {}, bytes, seed);
+  return hash_range(bytes, seed, Mode {});
 }
 } // namespace stdex::hash
 
