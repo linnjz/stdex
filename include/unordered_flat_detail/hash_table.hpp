@@ -170,23 +170,51 @@ public:
   constexpr ~hash_table() = default;
 
 private:
-  struct destroy_elements_on_exit
+  struct destroy_source_elements_on_exit
   {
-    constexpr ~destroy_elements_on_exit() { holder_.destroy_elements_unchecked_(); }
+    constexpr ~destroy_source_elements_on_exit() { holder_.destroy_elements_unchecked_(); }
 
     hash_table &holder_;
+  };
+
+  /// Groups are bulk-copied only after every element transferred, so a throwing
+  /// transfer would leave dest.size_ > 0 with empty groups and leak the partial
+  /// elements. The guard mirror-destroys exactly the constructed prefix on unwind.
+  struct destroy_dest_elements_on_exit
+  {
+    constexpr ~destroy_dest_elements_on_exit()
+    {
+      if (dismissed_ || dest_.size_ == 0) return;
+      auto *dest_elements   = dest_.elements_address_();
+      auto *source_elements = source_.elements_address_();
+      source_.for_each_occupied_slot_unchecked_([&](auto *occupied_ptr, auto *, unsigned)
+      {
+        dest_.destroy_element_unchecked_(dest_elements + (occupied_ptr - source_elements));
+        if (--dest_.size_ == 0) return;
+      });
+    }
+
+    constexpr void dismiss() noexcept { dismissed_ = true; }
+
+    hash_table const &source_;
+    hash_table &dest_;
+    bool dismissed_ = false;
   };
 
   template <bool Move>
   static constexpr void transfer_same_layout_unchecked_(std::conditional_t<Move, hash_table &, hash_table const &> source, hash_table &dest)
   {
-    if constexpr (Move) destroy_elements_on_exit e { source };
+    if constexpr (Move) destroy_source_elements_on_exit se { source };
 
-    auto transfer_elements = [&]() constexpr
+    destroy_dest_elements_on_exit de { source, dest };
+
+    auto transfer_elements = [](std::conditional_t<Move, hash_table &, hash_table const &> source, hash_table &dest) static constexpr
     {
+      auto *dest_elements   = dest.elements_address_();
+      auto *source_elements = source.elements_address_();
       source.for_each_occupied_slot_unchecked_([&](auto *occupied_ptr, auto *, unsigned)
       {
-        value_type *dst = dest.elements_address_() + (occupied_ptr - source.elements_address_());
+        value_type *dst = dest_elements + (occupied_ptr - source_elements);
         if constexpr (Move) {
           dest.construct_element_unchecked_(dst, std::move(*occupied_ptr));
         } else {
@@ -198,14 +226,15 @@ private:
 
     if constexpr (std::is_trivially_copy_constructible_v<value_type> && (std::is_same_v<allocator_type, std::allocator<value_type>> || !requires (allocator_type &a, value_type *p, value_type const &v) { a.construct(p, v); })) {
       if consteval {
-        transfer_elements();
+        transfer_elements(source, dest);
       } else {
         std::memcpy(dest.elements_address_(), source.elements_address_(), source.capacity() * sizeof(value_type));
         dest.size_ = source.size_;
       }
     } else {
-      transfer_elements();
+      transfer_elements(source, dest);
     }
+    de.dismiss();
 
     std::copy_n(source.groups_address_(), source.group_count_(), dest.groups_address_());
   }
@@ -213,7 +242,7 @@ private:
   template <bool Move>
   static constexpr void transfer_with_rehash_unchecked_(std::conditional_t<Move, hash_table &, hash_table const &> source, hash_table &dest)
   {
-    if constexpr (Move) destroy_elements_on_exit e { source };
+    if constexpr (Move) destroy_source_elements_on_exit e { source };
 
     source.for_each_occupied_slot_unchecked_([&dest](auto *occupied_ptr, auto *, unsigned)
     {
@@ -565,6 +594,7 @@ private:
         } else {
           dest.emplace_at_available_slot_unchecked_(hash, *occupied_ptr);
         }
+        ++dest.size_;
       });
     }
 
@@ -822,14 +852,14 @@ private:
   {
     constexpr ~erase_on_exit()
     {
-      if (!rollback_) holder_.erase(element_iterator_);
+      if (!dismissed_) holder_.erase(element_iterator_);
     }
 
-    constexpr void rollback() noexcept { rollback_ = true; }
+    constexpr void dismiss() noexcept { dismissed_ = true; }
 
     hash_table &holder_;
     const_iterator element_iterator_;
-    bool rollback_ = false;
+    bool dismissed_ = false;
   };
 
   template <class, class, class, class>
@@ -991,7 +1021,7 @@ public:
     other.for_each_occupied_slot_unchecked_([&](value_type *occupied_ptr, group_type *group_ptr, unsigned slot_index) 
     {
       erase_on_exit g { other, const_iterator { occupied_ptr, group_ptr, slot_index } };
-      if (!emplace(std::move(*occupied_ptr)).second) g.rollback();
+      if (!emplace(std::move(*occupied_ptr)).second) g.dismiss();
     });
   }
 
