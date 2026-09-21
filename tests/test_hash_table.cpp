@@ -2000,6 +2000,486 @@ void test_flat_map_api()
 }
 
 // ==================================================================
+// 32. Full-collision hash: triangular probing + full overflow path
+// ==================================================================
+void test_full_collision()
+{
+  SECTION("full collision hash");
+
+ // heap table: insert / find / erase / reinsert / erase-all across groups and the overflow chain.
+  {
+    CollisionMap<0> t { constant_int_hash {}, std::equal_to<> {}, std::allocator<std::pair<int, int>> {} };
+    for (int i = 0; i < 200; ++i) t.emplace(i, i * 2);
+    CHECK_EQ(t.size(), 200u);
+    for (int i = 0; i < 200; ++i) {
+      auto it = t.find(i);
+      CHECK(it != t.end());
+      if (it != t.end()) CHECK_EQ(it->second, i * 2);
+    }
+    CHECK_EQ(t.count(199), 1u);
+
+    for (int i = 0; i < 200; i += 2) CHECK_EQ(t.erase(i), 1u);
+    CHECK_EQ(t.size(), 100u);
+    for (int i = 1; i < 200; i += 2) CHECK(t.contains(i));
+    for (int i = 0; i < 200; i += 2) CHECK(!t.contains(i));
+
+    for (int i = 0; i < 200; i += 2) t.emplace(i, i);
+    CHECK_EQ(t.size(), 200u);
+    auto [b, e] = t.equal_range(7);
+    CHECK(b != e);
+
+    for (int i = 0; i < 200; ++i) t.erase(i);
+    CHECK(t.empty());
+  }
+
+ // stack table: fill, erase half, grow past capacity.
+  {
+    CollisionMap<29> t { constant_int_hash {}, std::equal_to<> {}, std::allocator<std::pair<int, int>> {} };
+    for (int i = 0; i < 29; ++i) t.emplace(i, i);
+    CHECK(t.is_stack());
+    CHECK_EQ(t.size(), 29u);
+    for (int i = 0; i < 29; ++i) CHECK(t.contains(i));
+
+    for (int i = 0; i < 10; ++i) t.erase(i);
+    CHECK_EQ(t.size(), 19u);
+
+    for (int i = 0; i < 40; ++i) t.emplace(100 + i, i);
+    CHECK_EQ(t.size(), 59u);
+    for (int i = 10; i < 29; ++i) CHECK(t.contains(i));
+    for (int i = 0; i < 40; ++i) CHECK(t.contains(100 + i));
+  }
+}
+
+// ==================================================================
+// 33. Larger stack capacity inline_capacity = 59
+// ==================================================================
+void test_inline_capacity_59()
+{
+  SECTION("inline_capacity = 59");
+
+  IMap<59> t { std::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, int>> {} };
+  CHECK(t.is_stack());
+  CHECK_EQ(t.capacity(), 59u);
+
+  for (int i = 0; i < 59; ++i) t.emplace(i, i * 2);
+  CHECK(t.is_stack());
+  CHECK_EQ(t.size(), 59u);
+
+  t.emplace(59, 59);
+  CHECK(t.is_heap());
+  CHECK_EQ(t.size(), 60u);
+  for (int i = 0; i < 60; ++i) {
+    auto it = t.find(i);
+    CHECK(it != t.end());
+    if (it != t.end()) CHECK_EQ(it->second, i == 59 ? 59 : i * 2);
+  }
+
+  ISet<59> s { std::hash<int> {}, std::equal_to<> {}, std::allocator<int> {} };
+  for (int i = 0; i < 60; ++i) s.emplace(i);
+  CHECK(s.is_heap());
+  CHECK_EQ(s.size(), 60u);
+  CHECK(s.contains(59));
+}
+
+// ==================================================================
+// 34. std::pmr aliases
+// ==================================================================
+void test_pmr_aliases()
+{
+  SECTION("pmr aliases");
+
+  stdex::pmr::unordered_flat_map<int, int> m;
+  for (int i = 0; i < 50; ++i) m[i] = i * 3;
+  CHECK_EQ(m.size(), 50u);
+  CHECK_EQ(m.at(7), 21);
+  CHECK_EQ(m.erase(7), 1u);
+  CHECK(!m.contains(7));
+
+  stdex::pmr::unordered_flat_set<int> s;
+  for (int i = 0; i < 50; ++i) s.emplace(i);
+  CHECK_EQ(s.size(), 50u);
+  CHECK(s.contains(49));
+
+ // external memory resource: element and group memory use a monotonic buffer.
+  char buf[4096];
+  std::pmr::monotonic_buffer_resource pool(buf, sizeof(buf));
+  stdex::pmr::unordered_flat_map<int, int> mp { std::pmr::polymorphic_allocator<std::pair<int, int>> { &pool } };
+  for (int i = 0; i < 20; ++i) mp.emplace(i, i);
+  CHECK_EQ(mp.size(), 20u);
+  for (int i = 0; i < 20; ++i) CHECK(mp.contains(i));
+}
+
+// ==================================================================
+// 35. Public flat_map construction / assignment
+// ==================================================================
+void test_flat_map_ctors()
+{
+  SECTION("flat_map ctors / assignment");
+
+  using Map   = stdex::unordered_flat_map<int, int>;
+  using Alloc = std::allocator<std::pair<int, int>>;
+  Alloc alloc;
+  std::hash<int> hash;
+  std::equal_to<int> equal;
+  std::vector<std::pair<int, int>> v { { 1, 10 }, { 2, 20 }, { 3, 30 } };
+
+  Map m0(alloc);
+  CHECK(m0.empty());
+
+  Map mb1(100);
+  CHECK(mb1.capacity() >= 100u);
+  Map mb2(100, alloc);
+  CHECK(mb2.capacity() >= 100u);
+  Map mb3(100, hash);
+  CHECK(mb3.capacity() >= 100u);
+  Map mb4(100, hash, alloc);
+  CHECK(mb4.capacity() >= 100u);
+  Map mb5(100, hash, equal);
+  CHECK(mb5.capacity() >= 100u);
+  Map mb6(100, hash, equal, alloc);
+  CHECK(mb6.capacity() >= 100u);
+  mb6.emplace(1, 1);
+  CHECK(mb6.contains(1));
+
+  Map r1(v.begin(), v.end());
+  CHECK_EQ(r1.size(), 3u);
+  Map r2(v.begin(), v.end(), alloc);
+  CHECK_EQ(r2.size(), 3u);
+  Map r3(v.begin(), v.end(), 100u);
+  CHECK_EQ(r3.size(), 3u);
+  CHECK(r3.capacity() >= 100u);
+  Map r4(v.begin(), v.end(), 100u, alloc);
+  CHECK_EQ(r4.size(), 3u);
+  Map r5(v.begin(), v.end(), 100u, hash);
+  CHECK_EQ(r5.size(), 3u);
+  Map r6(v.begin(), v.end(), 100u, hash, alloc);
+  CHECK_EQ(r6.size(), 3u);
+  Map r7(v.begin(), v.end(), 100u, hash, equal);
+  CHECK_EQ(r7.size(), 3u);
+  Map r8(v.begin(), v.end(), 100u, hash, equal, alloc);
+  CHECK_EQ(r8.size(), 3u);
+  CHECK(r8.contains(2));
+
+  Map f1(std::from_range, v);
+  CHECK_EQ(f1.size(), 3u);
+  Map f2(std::from_range, v, alloc);
+  CHECK_EQ(f2.size(), 3u);
+  Map f3(std::from_range, v, 100u);
+  CHECK_EQ(f3.size(), 3u);
+  CHECK(f3.capacity() >= 100u);
+  Map f4(std::from_range, v, 100u, alloc);
+  CHECK_EQ(f4.size(), 3u);
+  Map f5(std::from_range, v, 100u, hash);
+  CHECK_EQ(f5.size(), 3u);
+  Map f6(std::from_range, v, 100u, hash, alloc);
+  CHECK_EQ(f6.size(), 3u);
+  Map f7(std::from_range, v, 100u, hash, equal);
+  CHECK_EQ(f7.size(), 3u);
+  Map f8(std::from_range, v, 100u, hash, equal, alloc);
+  CHECK_EQ(f8.size(), 3u);
+  CHECK(f8.contains(3));
+
+  Map c1(r1);
+  CHECK(c1 == r1);
+  Map c2(r1, alloc);
+  CHECK(c2 == r1);
+
+  Map mtmp(r1);
+  Map mvd(std::move(mtmp));
+  CHECK(mvd == r1);
+  CHECK(mtmp.empty());
+  Map mtmp2(r1);
+  Map mvd2(std::move(mtmp2), alloc);
+  CHECK(mvd2 == r1);
+
+  Map asg;
+  asg = r1;
+  CHECK(asg == r1);
+  Map amsg;
+  amsg = std::move(c1);
+  CHECK(amsg == r1);
+  Map ail;
+  ail = { { 7, 70 }, { 8, 80 } };
+  CHECK_EQ(ail.size(), 2u);
+  CHECK(ail.contains(7));
+
+ // move construction + unequal allocators takes element-wise transfer.
+  {
+    char b1[4096], b2[4096];
+    std::pmr::monotonic_buffer_resource pool1(b1, sizeof(b1)), pool2(b2, sizeof(b2));
+    using PMap = stdex::pmr::unordered_flat_map<int, int>;
+    PMap p1 { typename PMap::allocator_type { &pool1 } };
+    for (int i = 0; i < 20; ++i) p1.emplace(i, i);
+    PMap p2(std::move(p1), typename PMap::allocator_type { &pool2 });
+    CHECK_EQ(p2.size(), 20u);
+    CHECK(p1.empty());
+    for (int i = 0; i < 20; ++i) CHECK(p2.contains(i));
+  }
+}
+
+// ==================================================================
+// 36. Public flat_set construction / assignment
+// ==================================================================
+void test_flat_set_ctors()
+{
+  SECTION("flat_set ctors / assignment");
+
+  using Set   = stdex::unordered_flat_set<int>;
+  using Alloc = std::allocator<int>;
+  Alloc alloc;
+  std::hash<int> hash;
+  std::equal_to<int> equal;
+  std::vector<int> v { 1, 2, 3 };
+
+  Set s0(alloc);
+  CHECK(s0.empty());
+
+  Set sb1(100);
+  CHECK(sb1.capacity() >= 100u);
+  Set sb2(100, hash, equal, alloc);
+  CHECK(sb2.capacity() >= 100u);
+  sb2.emplace(1);
+  CHECK(sb2.contains(1));
+
+  Set sr1(v.begin(), v.end());
+  CHECK_EQ(sr1.size(), 3u);
+  Set sr2(v.begin(), v.end(), alloc);
+  CHECK_EQ(sr2.size(), 3u);
+  Set sr3(v.begin(), v.end(), 100u, hash, equal, alloc);
+  CHECK_EQ(sr3.size(), 3u);
+
+  Set sf1(std::from_range, v);
+  CHECK_EQ(sf1.size(), 3u);
+  Set sf2(std::from_range, v, 100u, hash, equal, alloc);
+  CHECK_EQ(sf2.size(), 3u);
+
+  Set sc1(sr1);
+  CHECK(sc1 == sr1);
+  Set sc2(sr1, alloc);
+  CHECK(sc2 == sr1);
+
+  Set stmp(sr1);
+  Set svd(std::move(stmp));
+  CHECK(svd == sr1);
+  CHECK(stmp.empty());
+
+  Set sasg;
+  sasg = sr1;
+  CHECK(sasg == sr1);
+  Set samsg;
+  samsg = std::move(sc1);
+  CHECK(samsg == sr1);
+  Set sail;
+  sail = { 9, 10 };
+  CHECK_EQ(sail.size(), 2u);
+}
+
+// ==================================================================
+// 37. CTAD deduction (compile-time assert, zero runtime cost)
+// ==================================================================
+void test_ctad_deduction()
+{
+  SECTION("CTAD deduction");
+
+  using MapAlloc = std::allocator<std::pair<int, int>>;
+  using SetAlloc = std::allocator<int>;
+  MapAlloc ma;
+  SetAlloc sa;
+  std::hash<int> h;
+  std::vector<std::pair<int, int>> v { { 1, 1 } };
+  std::vector<int> sv { 1 };
+  std::initializer_list<std::pair<int, int>> il = { { 1, 1 } };
+  std::initializer_list<int> sil = { 1 };
+
+  stdex::unordered_flat_map d1(v.begin(), v.end());
+  static_assert(std::is_same_v<typename decltype(d1)::key_type, int>);
+  stdex::unordered_flat_map d2(v.begin(), v.end(), ma);
+  static_assert(std::is_same_v<typename decltype(d2)::allocator_type, MapAlloc>);
+  stdex::unordered_flat_map d3(v.begin(), v.end(), 10u, ma);
+  static_assert(std::is_same_v<typename decltype(d3)::hasher, std::hash<int>>);
+  stdex::unordered_flat_map d4(v.begin(), v.end(), 10u, h, ma);
+  static_assert(std::is_same_v<typename decltype(d4)::hasher, std::hash<int>>);
+
+  stdex::unordered_flat_map d5 { std::pair { 1, 1 }, std::pair { 2, 2 } };
+  static_assert(std::is_same_v<typename decltype(d5)::key_type, int>);
+  CHECK_EQ(d5.size(), 2u);
+  stdex::unordered_flat_map d6(il, ma);
+  static_assert(std::is_same_v<typename decltype(d6)::allocator_type, MapAlloc>);
+  stdex::unordered_flat_map d7(il, 10u, ma);
+  static_assert(std::is_same_v<typename decltype(d7)::key_type, int>);
+  stdex::unordered_flat_map d8(il, 10u, h, ma);
+  static_assert(std::is_same_v<typename decltype(d8)::hasher, std::hash<int>>);
+
+  stdex::unordered_flat_map d9(std::from_range, v);
+  static_assert(std::is_same_v<typename decltype(d9)::key_type, int>);
+  stdex::unordered_flat_map d10(std::from_range, v, ma);
+  static_assert(std::is_same_v<typename decltype(d10)::allocator_type, MapAlloc>);
+  stdex::unordered_flat_map d11(std::from_range, v, 10u, ma);
+  static_assert(std::is_same_v<typename decltype(d11)::key_type, int>);
+  stdex::unordered_flat_map d12(std::from_range, v, 10u, h, ma);
+  static_assert(std::is_same_v<typename decltype(d12)::hasher, std::hash<int>>);
+
+  stdex::unordered_flat_set e1(sv.begin(), sv.end());
+  static_assert(std::is_same_v<typename decltype(e1)::key_type, int>);
+  stdex::unordered_flat_set e2(sv.begin(), sv.end(), sa);
+  static_assert(std::is_same_v<typename decltype(e2)::allocator_type, SetAlloc>);
+  stdex::unordered_flat_set e3(sv.begin(), sv.end(), 10u, sa);
+  static_assert(std::is_same_v<typename decltype(e3)::key_type, int>);
+  stdex::unordered_flat_set e4(sv.begin(), sv.end(), 10u, h, sa);
+  static_assert(std::is_same_v<typename decltype(e4)::hasher, std::hash<int>>);
+
+  stdex::unordered_flat_set e5 { 1, 2, 3 };
+  static_assert(std::is_same_v<typename decltype(e5)::key_type, int>);
+  CHECK_EQ(e5.size(), 3u);
+  stdex::unordered_flat_set e6(sil, sa);
+  static_assert(std::is_same_v<typename decltype(e6)::allocator_type, SetAlloc>);
+  stdex::unordered_flat_set e7(sil, 10u, sa);
+  static_assert(std::is_same_v<typename decltype(e7)::key_type, int>);
+  stdex::unordered_flat_set e8(sil, 10u, h, sa);
+  static_assert(std::is_same_v<typename decltype(e8)::hasher, std::hash<int>>);
+
+  stdex::unordered_flat_set e9(std::from_range, sv);
+  static_assert(std::is_same_v<typename decltype(e9)::key_type, int>);
+  stdex::unordered_flat_set e10(std::from_range, sv, sa);
+  static_assert(std::is_same_v<typename decltype(e10)::allocator_type, SetAlloc>);
+  stdex::unordered_flat_set e11(std::from_range, sv, 10u, sa);
+  static_assert(std::is_same_v<typename decltype(e11)::key_type, int>);
+  stdex::unordered_flat_set e12(std::from_range, sv, 10u, h, sa);
+  static_assert(std::is_same_v<typename decltype(e12)::hasher, std::hash<int>>);
+}
+
+// ==================================================================
+// 38. Non-member swap and observers
+// ==================================================================
+void test_nonmember_swap_and_observers()
+{
+  SECTION("non-member swap and observers");
+
+  stdex::unordered_flat_map<int, int> m1 { { 1, 1 } };
+  stdex::unordered_flat_map<int, int> m2 { { 2, 2 }, { 3, 3 } };
+  swap(m1, m2);
+  CHECK_EQ(m1.size(), 2u);
+  CHECK_EQ(m2.size(), 1u);
+  CHECK(m1.contains(2) && m2.contains(1));
+
+  stdex::unordered_flat_set<int> s1 { 1 };
+  stdex::unordered_flat_set<int> s2 { 2, 3 };
+  swap(s1, s2);
+  CHECK_EQ(s1.size(), 2u);
+  CHECK_EQ(s2.size(), 1u);
+  CHECK(s1.contains(2) && s2.contains(1));
+
+  CHECK_EQ(m1.hash_function()(1), std::hash<int> {}(1));
+  CHECK(m1.key_eq()(1, 1));
+  CHECK(!m1.key_eq()(1, 2));
+  std::allocator<std::pair<int, int>> const expected_map_alloc;
+  CHECK(m1.get_allocator() == expected_map_alloc);
+  CHECK(s1.get_allocator() == std::allocator<int> {});
+}
+
+// ==================================================================
+// 39. const& key overloads of try_emplace / insert_or_assign
+// ==================================================================
+void test_const_key_overloads()
+{
+  SECTION("const& key overloads");
+
+  stdex::unordered_flat_map<int, int> m;
+  int k1 = 20, k2 = 21, k3 = 22, k4 = 23;
+
+  auto [a1, b1] = m.try_emplace(k1, 200);
+  CHECK(b1);
+  auto [a2, b2] = m.try_emplace(k1, 999);
+  CHECK(!b2);
+  CHECK_EQ(a2->second, 200);
+
+  auto a3 = m.try_emplace(m.cbegin(), k2, 210);
+  CHECK_EQ(a3->second, 210);
+  auto a4 = m.try_emplace(m.cbegin(), k2, 999);
+  CHECK_EQ(a4->second, 210);
+
+  auto [c1, d1] = m.insert_or_assign(k3, 300);
+  CHECK(d1);
+  auto [c2, d2] = m.insert_or_assign(k3, 301);
+  CHECK(!d2);
+  CHECK_EQ(c2->second, 301);
+  auto c3 = m.insert_or_assign(m.cbegin(), k4, 400);
+  CHECK_EQ(c3->second, 400);
+}
+
+// ==================================================================
+// 40. const& / template / initializer_list insert overloads
+// ==================================================================
+void test_insert_overloads()
+{
+  SECTION("insert overloads");
+
+  IMap<0> t { std::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, int>> {} };
+
+  std::pair<int, int> lv { 10, 100 };
+  auto r1 = t.insert(lv);
+  CHECK(r1.second);
+  auto r2 = t.insert(lv);
+  CHECK(!r2.second);
+  CHECK_EQ(r2.first->second, 100);
+
+  auto r3 = t.insert(std::pair<short, short> { 11, 110 });
+  CHECK(r3.second);
+  CHECK_EQ(r3.first->second, 110);
+
+  t.insert({ { 12, 120 }, { 13, 130 } });
+  CHECK_EQ(t.size(), 4u);
+  CHECK(t.contains(13));
+}
+
+// ==================================================================
+// 41. Const find, small node members, set erase/clear at runtime
+// ==================================================================
+void test_const_find_and_node()
+{
+  SECTION("const find and node members");
+
+  IMap<0> t { std::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, int>> {} };
+  for (int i = 0; i < 10; ++i) t.emplace(i, i);
+  auto const &ct = t;
+  auto it        = ct.find(5);
+  CHECK(it != ct.end());
+  CHECK_EQ(it->second, 5);
+
+  TransparentSMap<0> st { transparent_str_hash {}, std::equal_to<> {},
+                         std::allocator<std::pair<std::string, int>> {} };
+  st.emplace("hello", 1);
+  auto const &cst = st;
+  std::string_view sv = "hello";
+  auto hit            = cst.find(sv);
+  CHECK(hit != cst.end());
+  CHECK_EQ(hit->second, 1);
+
+  IMap<0> u { std::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, int>> {} };
+  u.emplace(1, 10);
+  IMap<0>::node_type n0;
+  CHECK(!static_cast<bool>(n0));
+  IMap<0>::node_type n1(std::pair<int, int> { 7, 70 });
+  CHECK(static_cast<bool>(n1));
+  CHECK_EQ(n1.value().first, 7);
+  std::pair<int, int> p { 8, 80 };
+  IMap<0>::node_type n2(p);
+  CHECK_EQ(n2.value().second, 80);
+  auto pr = std::move(n1).value();
+  CHECK_EQ(pr.first, 7);
+  CHECK_EQ(pr.second, 70);
+  n2.reset();
+  CHECK(!static_cast<bool>(n2));
+
+  ISet<0> s { std::hash<int> {}, std::equal_to<> {}, std::allocator<int> {} };
+  for (int i = 0; i < 20; ++i) s.emplace(i);
+  CHECK_EQ(s.erase(5), 1u);
+  CHECK_EQ(s.erase(5), 0u);
+  s.clear();
+  CHECK(s.empty());
+}
+
+// ==================================================================
 // main
 // ==================================================================
 int main()
@@ -2037,6 +2517,16 @@ int main()
   test_container_compare();
   test_erase_if();
   test_flat_map_api();
+  test_full_collision();
+  test_inline_capacity_59();
+  test_pmr_aliases();
+  test_flat_map_ctors();
+  test_flat_set_ctors();
+  test_ctad_deduction();
+  test_nonmember_swap_and_observers();
+  test_const_key_overloads();
+  test_insert_overloads();
+  test_const_find_and_node();
 
   std::println("\n===============================");
   std::println("PASS: {}   FAIL: {}", g_pass, g_fail);
@@ -2161,13 +2651,52 @@ Suggestion: rewrite the IMap<0>/IMap<29> insert-find-erase-rehash-copy path as
 --------------------------------------------------------------------------------
 [6] Degenerate and boundary cases
 --------------------------------------------------------------------------------
-  - full-collision hash (always returns the same constant): triangular probing + overflow marks need verification on
-    find / insert / erase are all correct with no infinite loop.
-  - inline_capacity only tested 0 and 29; larger stack capacities like 59 (4*15-1) have no test.
-  - std::pmr aliases have no test.
+  - covered by test_full_collision(): full-collision hash with 200-key heap insert / find /
+    erase / reinsert / erase-all (across groups and the overflow chain, no infinite loop); stack table filled then half-erased
+    then grow past capacity.
+  - covered by test_inline_capacity_59(): inline_capacity = 59 with filled stack,
+    the 60th promotes to heap; set smoke test at the same capacity.
+  - covered by test_pmr_aliases(): pmr aliases with default-resource CRUD + monotonic
+    buffer with externally supplied memory resource.
 
 --------------------------------------------------------------------------------
-[7] Integration and performance
+[8] Public wrapper (map/set) coverage
+--------------------------------------------------------------------------------
+ Every item in this section belongs to unordered_flat_map / unordered_flat_set members themselves,
+ hash_table-layer logic already has tests; no duplication.
+  - covered by test_flat_map_ctors(): map alloc, 6 bucket, 8 range,
+    8 from_range constructions, copy/move (+alloc) constructions with three-way assignment, plus move construction
+    + element-wise transfer with an unequal pmr allocator.
+  - covered by test_flat_set_ctors(): set alloc, bucket, range, from_range
+    (one representative of each shape) with copy/move (+alloc) construction and three-way assignment.
+  - adopted by test_ctad_deduction() as static_assert: 24 CTAD groups (map/set
+    12 each, zero runtime cost).
+  - covered by test_nonmember_swap_and_observers(): ADL swap and
+    hash_function/key_eq/get_allocator。
+  - covered by test_const_key_overloads(): const-key overloads of try_emplace / insert_or_assign,
+    const& key overloads (earlier cases all used literals and only hit the && version).
+  - covered by test_insert_overloads(): lvalue const& insert and convertible-type template
+    insert and initializer_list insert.
+  - covered by test_const_find_and_node(): const find (plain + transparent),
+    explicit node construction / reset / rvalue value, plus set erase(key)/clear at runtime.
+
+--------------------------------------------------------------------------------
+[7] Completion
+--------------------------------------------------------------------------------
+1. map/set rule-of-five and construction overloads: copy/move (+alloc) construction and assignment, explicit(alloc), 6 bucket, 8 range, 8 from_range -- zero coverage at the public wrapper layer (hash_table layer fully covered). Only ilist construction got covered incidentally (in erase_if/map-api tests).
+2. map/set operator= (copy/move/ilist): zero coverage.
+3. 24 CTAD groups (map 12 + set 12): zero in-repo coverage -- previously verified only in Temp probes; adopt as static_assert (zero runtime cost).
+4. Non-member swap (map/set, ADL): only member swap was tested (test_swap); the swap(a, b) free function was never tested.
+5. Observers hash_function() / key_eq(): zero calls file-wide (get_allocator has a dozen).
+6. const& key overloads of try_emplace / insert_or_assign: existing cases all use literals hitting only the && overloads; the const& (lvalue key) version was never called.
+7. const& insert overloads + non-hint template overloads: the non-hint layer only called value_type&& (r1/r2 pure rvalues); lvalue insert(obj) via const& and convertible types via U&& were never called (hint-layer U&& covered by it3).
+8. insert(initializer_list): zero calls.
+9. const find overloads (plain + hetero): ct.find(...) never appears; only the two non-const find overloads are covered. Note all four equal_range overloads are covered (added in 5).
+10. Three small node_type members: reset() never called directly; explicit node_type(value&&) / (value const&) never constructed explicitly (only indirectly via extract); the value() && rvalue overload never called.
+11. Set erase(key) at runtime: only called in constexpr_stack_access; runtime tests exercise erase only on maps; clear() was never called on a set.
+
+--------------------------------------------------------------------------------
+[8] Integration and performance
 --------------------------------------------------------------------------------
   - no integration case using stdex::hash::hash from hash.hpp as the Hasher.
   - no CRUD performance comparison against boost::unordered_flat_map / std::unordered_map.
