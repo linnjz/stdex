@@ -83,17 +83,7 @@ struct inline_storage : public Traits
   constexpr inline_storage(allocator_type const &alloc) noexcept
       : alloc_ { alloc }
   {
-    if constexpr (inline_capacity == 0) {
-      std::construct_at(&heap_);
-      storage_mode_ = storage_mode::heap;
-    } else {
-#if __cplusplus >= 202603L
-      ::new (static_cast<void *>(&stack_)) stack_block;
-#else
-      std::construct_at(&stack_);
-#endif
-      storage_mode_ = storage_mode::stack;
-    }
+    dissociate_();
   }
 
   template <class H = hasher, class K = key_equal, class Al = allocator_type>
@@ -173,31 +163,56 @@ struct inline_storage : public Traits
 
   constexpr void allocate_unchecked_(size_type capacity)
   {
-    group_index_shift_ = static_cast<uint8_t>(group_index_shift_by_(capacity));
-    group_count_mask_  = group_count_by_(static_cast<size_type>(group_index_shift_)) - 1; // Power of 2 alignment
-    max_load_          = initial_max_load_(capacity_unchecked_());                        // Depends on group_count
+    auto const new_group_index_shift = static_cast<uint8_t>(group_index_shift_by_(capacity));
+    auto const new_group_count_mask  = group_count_by_(static_cast<size_type>(new_group_index_shift)) - 1;
+    auto const new_group_count       = new_group_count_mask + 1;
+    auto const new_capacity          = new_group_count * group_size_() - 1;
+    auto const new_max_load          = initial_max_load_(new_capacity);
 
     if consteval {
-      auto elements_ptr = allocator_traits::allocate(alloc_, capacity_unchecked_());
+      auto elements_ptr = allocator_traits::allocate(alloc_, new_capacity);
+      element_allocation_guard elements_guard { *this, elements_ptr, new_capacity };
       auto groups_alloc = group_allocator_type { alloc_ };
-      auto groups_ptr   = group_allocator_traits::allocate(groups_alloc, group_count_());
+      auto groups_ptr   = group_allocator_traits::allocate(groups_alloc, new_group_count);
 
-      initial_group_array_(groups_ptr);
+      initial_group_array_(groups_ptr, new_group_count);
 
       heap_ = { elements_ptr, groups_ptr };
+      elements_guard.release();
     } else {
-      auto elements_ptr = allocator_traits::allocate(alloc_, calculate_storage_size_(group_count_()));
-      auto byte_ptr     = reinterpret_cast<unsigned char *>(std::to_address(elements_ptr) + capacity_unchecked_());
+      auto elements_ptr = allocator_traits::allocate(alloc_, calculate_storage_size_(new_group_count));
+      element_allocation_guard elements_guard { *this, elements_ptr, calculate_storage_size_(new_group_count) };
+      auto byte_ptr     = reinterpret_cast<unsigned char *>(std::to_address(elements_ptr) + new_capacity);
 
       // The group must be 16-byte aligned
       byte_ptr += (uintptr_t(sizeof(group_type)) - reinterpret_cast<uintptr_t>(byte_ptr)) % sizeof(group_type);
 
       auto groups_ptr = reinterpret_cast<group_type *>(byte_ptr);
-      initial_group_array_(groups_ptr);
+      initial_group_array_(groups_ptr, new_group_count);
 
       heap_ = { elements_ptr, group_pointer_traits::pointer_to(*groups_ptr) };
+      elements_guard.release();
     }
+
+    group_index_shift_ = new_group_index_shift;
+    group_count_mask_  = new_group_count_mask;
+    max_load_          = new_max_load;
   }
+
+  struct element_allocation_guard
+  {
+    constexpr ~element_allocation_guard()
+    {
+      if (active_) allocator_traits::deallocate(owner_.alloc_, pointer_, count_);
+    }
+
+    constexpr void release() noexcept { active_ = false; }
+
+    inline_storage &owner_;
+    pointer pointer_;
+    size_type count_;
+    bool active_ = true;
+  };
 
   constexpr void deallocate_unchecked_() noexcept(noexcept(allocator_traits::deallocate(alloc_, nullptr, 0)))
   {
@@ -253,20 +268,20 @@ struct inline_storage : public Traits
 
   // clang-format on
 
-  constexpr void initial_group_array_(group_type *groups_ptr) noexcept
+  constexpr void initial_group_array_(group_type *groups_ptr, size_type group_count) noexcept
   {
     if consteval {
       // reset() after construct_at zeroes every byte through a member write;
       // MSVC's constant evaluator needs that write (not just value-init) to
       // consider the union member live before available_mask reads it.
-      for (size_type i = 0; i < group_count_(); ++i) {
+      for (size_type i = 0; i < group_count; ++i) {
         std::construct_at(groups_ptr + i);
         groups_ptr[i].reset();
       }
     } else {
-      std::memset(groups_ptr, 0, sizeof(group_type) * group_count_());
+      std::memset(groups_ptr, 0, sizeof(group_type) * group_count);
     }
-    groups_ptr[group_count_() - 1].set_sentinel_mark();
+    groups_ptr[group_count - 1].set_sentinel_mark();
   }
 
   /// Given the capacity, figure out how much it can hold.
@@ -340,7 +355,7 @@ struct inline_storage : public Traits
       size_              = 0;
       max_load_          = inline_capacity;
 
-      initial_group_array_(stack_.groups_);
+      initial_group_array_(stack_.groups_, group_count_());
     }
   }
 
@@ -384,7 +399,7 @@ struct inline_storage : public Traits
 
       // Only the group bytes are initialized: empty slots hold no live element
       // (elements_ stays raw storage and is constructed on insert).
-      initial_group_array_(stack_.groups_);
+      initial_group_array_(stack_.groups_, group_count_());
     }
   }
 
