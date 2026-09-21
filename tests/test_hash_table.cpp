@@ -103,6 +103,82 @@ struct allocator_probe_state
   std::size_t fail_on_attempt      = 0;
 };
 
+struct no_default_value
+{
+  static inline int live_count = 0;
+
+  explicit no_default_value(int value)
+      : value { value }
+  {
+    ++live_count;
+  }
+
+  no_default_value(no_default_value const &other)
+      : value { other.value }
+  {
+    ++live_count;
+  }
+
+  no_default_value(no_default_value &&other) noexcept
+      : value { other.value }
+  {
+    ++live_count;
+  }
+
+  no_default_value &operator=(no_default_value const &) = default;
+  no_default_value &operator=(no_default_value &&) noexcept = default;
+
+  ~no_default_value() { --live_count; }
+
+  int value;
+};
+
+struct throwing_move_value
+{
+  static inline int live_count       = 0;
+  static inline int copy_count       = 0;
+  static inline int move_count       = 0;
+  static inline int throw_on_copy    = 0;
+  static inline int throw_on_move    = 0;
+
+  explicit throwing_move_value(int value)
+      : value { value }
+  {
+    ++live_count;
+  }
+
+  throwing_move_value(throwing_move_value const &other)
+      : value { other.value }
+  {
+    ++copy_count;
+    if (throw_on_copy != 0 && copy_count == throw_on_copy) throw 1;
+    ++live_count;
+  }
+
+  throwing_move_value(throwing_move_value &&other) noexcept(false)
+      : value { other.value }
+  {
+    ++move_count;
+    if (throw_on_move != 0 && move_count == throw_on_move) throw 2;
+    ++live_count;
+  }
+
+  throwing_move_value &operator=(throwing_move_value const &) = default;
+  throwing_move_value &operator=(throwing_move_value &&) noexcept(false) = default;
+
+  ~throwing_move_value() { --live_count; }
+
+  static void reset_counters() noexcept
+  {
+    copy_count    = 0;
+    move_count    = 0;
+    throw_on_copy = 0;
+    throw_on_move = 0;
+  }
+
+  int value;
+};
+
 template <class T, bool PropagateCopy, bool PropagateMove, bool PropagateSwap>
 struct allocator_probe
 {
@@ -199,6 +275,34 @@ using ProbeMap = ufd::hash_table<
     std::hash<int>,
     std::equal_to<>,
     allocator_probe<std::pair<int, int>, PropagateCopy, PropagateMove, PropagateSwap>>;
+
+template <size_t N>
+using NoDefaultMap = ufd::hash_table<
+    ufd::ufmap_traits<int, no_default_value, N>,
+    std::hash<int>,
+    std::equal_to<>,
+    std::allocator<std::pair<int, no_default_value>>>;
+
+template <size_t N>
+using ThrowingMap = ufd::hash_table<
+    ufd::ufmap_traits<int, throwing_move_value, N>,
+    std::hash<int>,
+    std::equal_to<>,
+    std::allocator<std::pair<int, throwing_move_value>>>;
+
+template <size_t N>
+using ThrowingProbeMap = ufd::hash_table<
+    ufd::ufmap_traits<int, throwing_move_value, N>,
+    std::hash<int>,
+    std::equal_to<>,
+    allocator_probe<std::pair<int, throwing_move_value>, false, false, false>>;
+
+template <size_t N>
+using UniqueMap = ufd::hash_table<
+    ufd::ufmap_traits<int, std::unique_ptr<int>, N>,
+    std::hash<int>,
+    std::equal_to<>,
+    std::allocator<std::pair<int, std::unique_ptr<int>>>>;
 
 // ==================================================================
 // 1. Basics: empty / single element / insert / find / count
@@ -1231,6 +1335,366 @@ void test_constexpr()
 }
 
 // ==================================================================
+// 18. force_rehash_ value paths: move-only / throwing-copy / throw rollback
+// ==================================================================
+void test_rehash_value_paths()
+{
+  SECTION("rehash value paths (move-only / throwing copy)");
+
+ // move-only value_type takes move_path (!is_copy_constructible).
+  {
+    UniqueMap<0> t { std::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, std::unique_ptr<int>>> {} };
+    for (int i = 0; i < 40; ++i) t.emplace(i, std::make_unique<int>(i * 10));
+    t.rehash(200);
+    CHECK_EQ(t.size(), 40u);
+    for (int i = 0; i < 40; ++i) {
+      auto it = t.find(i);
+      CHECK(it != t.end());
+      if (it != t.end()) CHECK_EQ(*it->second, i * 10);
+    }
+  }
+
+ // stack source + move-only: the force_rehash_ move loop destroys source slots one by one,
+ // then exchange heap blocks via promote_to_heap_.
+  {
+    UniqueMap<29> t { std::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, std::unique_ptr<int>>> {} };
+    for (int i = 0; i < 29; ++i) t.emplace(i, std::make_unique<int>(i));
+    CHECK(t.is_stack());
+    t.rehash(200);
+    CHECK(t.is_heap());
+    CHECK_EQ(t.size(), 29u);
+    for (int i = 0; i < 29; ++i) {
+      auto it = t.find(i);
+      CHECK(it != t.end());
+      if (it != t.end()) CHECK_EQ(*it->second, i);
+    }
+  }
+
+ // a copyable type whose copy and move are both not nothrow takes copy_path.
+  {
+    throwing_move_value::reset_counters();
+    {
+      ThrowingMap<0> t { std::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, throwing_move_value>> {} };
+      for (int i = 0; i < 40; ++i) t.emplace(i, throwing_move_value { i });
+      throwing_move_value::reset_counters();
+      t.rehash(200);
+      CHECK_EQ(t.size(), 40u);
+      CHECK(throwing_move_value::copy_count > 0);
+      CHECK_EQ(throwing_move_value::move_count, 0);
+      for (int i = 0; i < 40; ++i) CHECK_EQ(t.find(i)->second.value, i);
+    }
+    CHECK_EQ(throwing_move_value::live_count, 0);
+  }
+
+ // copy_path throws midway: source kept intact (copy never touches source), destination partial result destroys itself.
+  {
+    throwing_move_value::reset_counters();
+    {
+      ThrowingMap<0> t { std::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, throwing_move_value>> {} };
+      for (int i = 0; i < 40; ++i) t.emplace(i, throwing_move_value { i });
+      throwing_move_value::reset_counters();
+      throwing_move_value::throw_on_copy = 3;
+
+      bool threw = false;
+      try {
+        t.rehash(1000);
+      } catch (int e) {
+        threw = true;
+        CHECK_EQ(e, 1);
+      }
+
+      throwing_move_value::throw_on_copy = 0;
+      CHECK(threw);
+      CHECK_EQ(t.size(), 40u);
+      for (int i = 0; i < 40; ++i) {
+        auto it = t.find(i);
+        CHECK(it != t.end());
+        if (it != t.end()) CHECK_EQ(it->second.value, i);
+      }
+      CHECK_EQ(throwing_move_value::live_count, 40);
+
+      // the table stays usable after failure.
+      t.emplace(1000, throwing_move_value { 1000 });
+      CHECK(t.contains(1000));
+    }
+    CHECK_EQ(throwing_move_value::live_count, 0);
+  }
+}
+
+// ==================================================================
+// 19. Transfer exception safety: copy / move construction throws midway
+// ==================================================================
+void test_transfer_exception_safety()
+{
+  SECTION("transfer exception safety (copy/move ctor)");
+
+ // stack->stack copy construction succeeds: same-layout direct transfer.
+  {
+    throwing_move_value::reset_counters();
+    {
+      ThrowingMap<29> src { std::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, throwing_move_value>> {} };
+      for (int i = 0; i < 20; ++i) src.emplace(i, throwing_move_value { i });
+      ThrowingMap<29> dst(src, src.get_allocator());
+      CHECK_EQ(dst.size(), 20u);
+      for (int i = 0; i < 20; ++i) CHECK_EQ(dst.find(i)->second.value, i);
+    }
+    CHECK_EQ(throwing_move_value::live_count, 0);
+  }
+
+ // stack->stack copy construction throws midway: source kept intact, destination partial result must be cleaned up.
+  {
+    throwing_move_value::reset_counters();
+    {
+      ThrowingMap<29> src { std::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, throwing_move_value>> {} };
+      for (int i = 0; i < 20; ++i) src.emplace(i, throwing_move_value { i });
+      throwing_move_value::reset_counters();
+      throwing_move_value::throw_on_copy = 3;
+
+      bool threw = false;
+      try {
+        ThrowingMap<29> dst(src, src.get_allocator());
+        (void) dst;
+      } catch (int e) {
+        threw = true;
+        CHECK_EQ(e, 1);
+      }
+
+      throwing_move_value::throw_on_copy = 0;
+      CHECK(threw);
+      CHECK_EQ(src.size(), 20u);
+      for (int i = 0; i < 20; ++i) CHECK_EQ(src.find(i)->second.value, i);
+      CHECK_EQ(throwing_move_value::live_count, 20);
+    }
+    CHECK_EQ(throwing_move_value::live_count, 0);
+  }
+
+ // heap->heap copy construction throws midway (different capacity takes transfer_with_rehash): source kept intact.
+  {
+    throwing_move_value::reset_counters();
+    {
+      ThrowingMap<0> src { std::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, throwing_move_value>> {} };
+      for (int i = 0; i < 200; ++i) src.emplace(i, throwing_move_value { i });
+      for (int i = 40; i < 200; ++i) src.erase(i); // keep 40 elements with the large capacity retained
+      CHECK_EQ(src.size(), 40u);
+      throwing_move_value::reset_counters();
+      throwing_move_value::throw_on_copy = 3;
+
+      bool threw = false;
+      try {
+        ThrowingMap<0> dst(src, src.get_allocator());
+        (void) dst;
+      } catch (int e) {
+        threw = true;
+        CHECK_EQ(e, 1);
+      }
+
+      throwing_move_value::throw_on_copy = 0;
+      CHECK(threw);
+      CHECK_EQ(src.size(), 40u);
+      for (int i = 0; i < 40; ++i) CHECK_EQ(src.find(i)->second.value, i);
+      CHECK_EQ(throwing_move_value::live_count, 40);
+    }
+    CHECK_EQ(throwing_move_value::live_count, 0);
+  }
+
+ // stack->stack move construction succeeds: source emptied.
+  {
+    throwing_move_value::reset_counters();
+    {
+      ThrowingMap<29> src { std::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, throwing_move_value>> {} };
+      for (int i = 0; i < 20; ++i) src.emplace(i, throwing_move_value { i });
+      ThrowingMap<29> dst(std::move(src));
+      CHECK_EQ(dst.size(), 20u);
+      for (int i = 0; i < 20; ++i) CHECK_EQ(dst.find(i)->second.value, i);
+      CHECK(src.empty());
+    }
+    CHECK_EQ(throwing_move_value::live_count, 0);
+  }
+
+ // stack->stack move construction throws midway: source emptied but usable, no leak.
+  {
+    throwing_move_value::reset_counters();
+    {
+      ThrowingMap<29> src { std::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, throwing_move_value>> {} };
+      for (int i = 0; i < 20; ++i) src.emplace(i, throwing_move_value { i });
+      throwing_move_value::reset_counters();
+      throwing_move_value::throw_on_move = 3;
+
+      bool threw = false;
+      try {
+        ThrowingMap<29> dst(std::move(src));
+        (void) dst;
+      } catch (int e) {
+        threw = true;
+        CHECK_EQ(e, 2);
+      }
+
+      throwing_move_value::throw_on_move = 0;
+      CHECK(threw);
+      CHECK(src.empty());
+      CHECK_EQ(throwing_move_value::live_count, 0);
+      src.emplace(999, throwing_move_value { 999 });
+      CHECK(src.contains(999));
+    }
+    CHECK_EQ(throwing_move_value::live_count, 0);
+  }
+
+ // move construction + unequal allocators takes transfer_with_rehash: midway throw still leaks nothing.
+  {
+    allocator_probe_state source_state, destination_state;
+    {
+      ThrowingProbeMap<0> src { std::hash<int> {}, std::equal_to<> {}, { &source_state, 1 } };
+      for (int i = 0; i < 40; ++i) src.emplace(i, throwing_move_value { i });
+      throwing_move_value::reset_counters();
+      throwing_move_value::throw_on_move = 3;
+
+      bool threw = false;
+      try {
+        ThrowingProbeMap<0> dst(std::move(src), { &destination_state, 2 });
+        (void) dst;
+      } catch (int e) {
+        threw = true;
+        CHECK_EQ(e, 2);
+      }
+
+      throwing_move_value::throw_on_move = 0;
+      CHECK(threw);
+      CHECK(src.empty());
+      CHECK_EQ(throwing_move_value::live_count, 0);
+    }
+    CHECK_EQ(throwing_move_value::live_count, 0);
+  }
+}
+
+// ==================================================================
+// 20. node_type copy / move construction and assignment
+// ==================================================================
+void test_node_value_semantics()
+{
+  SECTION("node_type copy/move");
+
+  {
+    IMap<0> t { std::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, int>> {} };
+    t.emplace(1, 10);
+    t.emplace(2, 20);
+
+    auto n1 = t.extract(1);
+    auto n2 = n1; // copy construction
+    CHECK(static_cast<bool>(n1) && static_cast<bool>(n2));
+    CHECK_EQ(n2.value().second, 10);
+
+    IMap<0>::node_type n3;
+    n3 = n2; // copy assignment: empty <- full
+    CHECK_EQ(n3.value().second, 10);
+    n3 = n3; // self-assignment
+    CHECK(static_cast<bool>(n3));
+    CHECK_EQ(n3.value().second, 10);
+
+    auto n4 = t.extract(2);
+    n3 = std::move(n4); // move assignment: full <- full
+    CHECK_EQ(n3.value().second, 20);
+
+    IMap<0>::node_type n5;
+    n5 = std::move(n3); // move assignment: empty <- full
+    CHECK_EQ(n5.value().second, 20);
+    n5 = std::move(n5); // self move-assignment
+    CHECK(static_cast<bool>(n5));
+    CHECK_EQ(n5.value().second, 20);
+    n5 = IMap<0>::node_type {}; // move assignment: full <- empty
+    CHECK(!static_cast<bool>(n5));
+
+    t.emplace(3, 30);
+    auto n6 = t.extract(3);
+    auto n7 = std::move(n6); // move construction
+    CHECK(static_cast<bool>(n7));
+    CHECK_EQ(n7.value().second, 30);
+  }
+
+ // live balance of node semantics.
+  {
+    throwing_move_value::reset_counters();
+    {
+      ThrowingMap<0> t { std::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, throwing_move_value>> {} };
+      t.emplace(1, throwing_move_value { 1 });
+      auto a = t.extract(1);
+      auto b = a;
+      auto c = std::move(b);
+      ThrowingMap<0>::node_type d;
+      d = c;
+      d = std::move(c);
+      CHECK_EQ(d.value().second.value, 1);
+    }
+    CHECK_EQ(throwing_move_value::live_count, 0);
+  }
+}
+
+// ==================================================================
+// 21. Non-default-constructible value_type and duplicate-key paths
+// ==================================================================
+void test_no_default_value()
+{
+  SECTION("non-default-constructible value_type");
+
+  {
+    {
+      NoDefaultMap<29> t { std::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, no_default_value>> {} };
+      for (int i = 0; i < 20; ++i) t.emplace(i, no_default_value { i * 10 });
+      CHECK(t.is_stack());
+
+      // duplicate key (with_key path): no overwrite, no temporary leak.
+      auto [dup_it, dup_ok] = t.emplace(5, no_default_value { 999 });
+      CHECK(!dup_ok);
+      CHECK_EQ(dup_it->second.value, 50);
+
+      CHECK_EQ(t.find(5)->second.value, 50);
+      CHECK_EQ(t.erase(5), 1u);
+      t.emplace(5, no_default_value { 55 });
+      CHECK_EQ(t.find(5)->second.value, 55);
+
+      // exceeding inline capacity promotes to heap.
+      for (int i = 20; i < 60; ++i) t.emplace(i, no_default_value { i });
+      CHECK(t.is_heap());
+      CHECK_EQ(t.size(), 60u);
+      for (int i = 0; i < 60; ++i) CHECK(t.contains(i));
+    }
+    CHECK_EQ(no_default_value::live_count, 0);
+  }
+
+  {
+    NoDefaultMap<0> t { std::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, no_default_value>> {} };
+    for (int i = 0; i < 40; ++i) t.emplace(i, no_default_value { i });
+    CHECK_EQ(t.size(), 40u);
+    for (int i = 0; i < 40; ++i) CHECK_EQ(t.find(i)->second.value, i);
+  }
+
+ // partially filled stack destruction for non-trivial types: destroy only constructed slots.
+  {
+    throwing_move_value::reset_counters();
+    {
+      ThrowingMap<29> t { std::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, throwing_move_value>> {} };
+      for (int i = 0; i < 10; ++i) t.emplace(i, throwing_move_value { i });
+      CHECK(t.is_stack());
+    }
+    CHECK_EQ(throwing_move_value::live_count, 0);
+  }
+
+ // without_key duplicate-key path: zero-arg emplace builds a temporary first, then checks duplicates.
+  {
+    IMap<0> t { std::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, int>> {} };
+    t.emplace(0, 999);
+    auto [it, ok] = t.emplace();
+    CHECK(!ok);
+    CHECK_EQ(it->second, 999);
+
+    IMap<0> fresh { std::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, int>> {} };
+    auto [it2, ok2] = fresh.emplace();
+    CHECK(ok2);
+    CHECK_EQ(it2->first, 0);
+    CHECK_EQ(it2->second, 0);
+  }
+}
+
+// ==================================================================
 // main
 // ==================================================================
 int main()
@@ -1254,6 +1718,10 @@ int main()
   test_fuzz_vs_std_map();
   test_fuzz_strings();
   test_constexpr();
+  test_rehash_value_paths();
+  test_transfer_exception_safety();
+  test_node_value_semantics();
+  test_no_default_value();
 
   std::println("\n===============================");
   std::println("PASS: {}   FAIL: {}", g_pass, g_fail);
@@ -1323,25 +1791,32 @@ Suggestion: rewrite the IMap<0>/IMap<29> insert-find-erase-rehash-copy path as
 --------------------------------------------------------------------------------
 [4] value_type copy / move paths and exception safety
 --------------------------------------------------------------------------------
-  - move_path of force_rehash_ (hash_table.hpp:551):
-      * !is_copy_constructible branch: std::pair<std::string, std::unique_ptr<int>>
-        is taken (non-copyable -> move_path); no test.
-      * is_nothrow_move_constructible branch: pair<int,int> (already covered indirectly).
-      * copy_path: only a copyable type whose copy and move are both not nothrow calls
-        destroy_element_on_exit at hash_table.hpp:561. Add a
-        struct ThrowingMove { ThrowingMove(ThrowingMove&&); } covers it.
-      * A type with both noexcept copy and noexcept move still takes move_path.
-  - transfer_with_rehash_unchecked_ when copy / move construction throws
-    destroy_elements_on_exit (hash_table.hpp:180) and the force_rehash_ counter
-    whether it leaks / double-destroys; no test. This is the most mine-prone spot, unreachable via normal paths.
-  - copy construction and copy / move assignment of node_type (hash_table.hpp:840/855/873)
-    no test; nodes have only been produced by extract and consumed by insert.
-  - non-default-constructible value_type and the emplace failure path: stack_block elements_
-    deliberately a bare union (inline_storage.hpp:459-468), precisely to support types without default construction;
-    no such type was ever tested. The duplicate-key failure path (the with_key / without_key
-    try_key_extraction branches) have no dedicated test.
-  - destruction risk of stack storage for non-trivial value_type (stack_block elements_ is
-    value_type[N], whose destruction may destroy unconstructed slots); see Old To-Do List section 7, no evidence yet.
+  - covered by test_rehash_value_paths(): move_path of force_rehash_:
+      * !is_copy_constructible branch: UniqueMap (pair<int, unique_ptr<int>>)
+        heap / stack rehash.
+      * copy_path: ThrowingMap (neither copy nor move is nothrow) triggers
+        destroy_element_on_exit, witnessed by copy_count > 0 and move_count == 0.
+      * copy_path throws midway: source kept intact (copy never touches source), destination partial result destroyed, then
+        live_count drops back. The implementation depends on ++dest.size_ inside the loop; otherwise the destination destructor would
+        size_ == 0 would skip copied elements and leak (leak reproduced, now fixed).
+  - covered by test_transfer_exception_safety(): copy / move construction throws:
+      * stack->stack copy throw: source kept intact; the destination partial result goes through
+        rollback_dest_elements_on_exit cleans up mirroring the source occupancy -- groups
+        batch group copy is deferred until after the loop; on throw the destination destructor cannot find the partial result
+        (leak reproduced, now fixed).
+      * heap->heap copy throw (different capacity takes transfer_with_rehash): source kept intact.
+      * stack->stack move throw: source is emptied but stays usable; move construction with unequal allocators also leaks nothing.
+      * uncovered: a move-only type whose move throws, inside the force_rehash_ move loop,
+        throw -- source slots were destroyed one by one but occupancy was not reset, so the source cannot be restored to a valid state;
+        needs a redesign that resets occupancy slot by slot; deferred.
+  - covered by test_node_value_semantics(): copy construction and copy /
+    move assignment (incl. self-assignment and empty<->full) with live balance.
+  - covered by test_no_default_value():
+      * NoDefaultMap stack / heap emplace, find, erase, duplicate key (with_key
+        path) with live balance.
+      * without_key duplicate-key path: zero-arg emplace builds a temporary first, then checks for duplicates.
+      * partially filled stack destruction for non-trivial types: ThrowingMap<29> destroys only constructed slots,
+        live_count returns to zero (witnessed by stack_block's bare union + empty destructor).
 
 --------------------------------------------------------------------------------
 [5] API coverage gaps
@@ -1373,6 +1848,7 @@ Suggestion: rewrite the IMap<0>/IMap<29> insert-find-erase-rehash-copy path as
     test_heterogeneous_lookup calls the non-const transparent version.
   - piecewise_construct overloads of try_key_extraction
     (try_key_extraction.hpp:45) has no test.
+  - comparison tests, erase_if tests, and public []/at/try_emplace/insert_or_assign tests of unordered_flat_map
 
 --------------------------------------------------------------------------------
 [6] Degenerate and boundary cases
