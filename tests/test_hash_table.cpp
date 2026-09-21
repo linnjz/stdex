@@ -87,6 +87,11 @@ struct transparent_str_hash
   }
 };
 
+struct constant_int_hash
+{
+  constexpr std::size_t operator() (int) const noexcept { return 0; }
+};
+
 // ==================================================================
 // convenience aliases
 // ==================================================================
@@ -102,6 +107,9 @@ using TransparentSMap =
 
 template <size_t N>
 using ISet = ufd::hash_table<ufd::ufset_traits<int, N>, std::hash<int>, std::equal_to<>, std::allocator<int>>;
+
+template <size_t N>
+using CollisionMap = ufd::hash_table<ufd::ufmap_traits<int, int, N>, constant_int_hash, std::equal_to<>, std::allocator<std::pair<int, int>>>;
 
 // ==================================================================
 // 1. Basics: empty / single element / insert / find / count
@@ -236,6 +244,86 @@ void test_copy_move()
  // self-assignment
   cpy2 = cpy2;
   CHECK_EQ(cpy2.size(), 100u);
+}
+
+// ==================================================================
+// 4b. Storage conversion and capacity boundaries
+// ==================================================================
+void test_storage_conversion_and_capacity_boundaries()
+{
+  SECTION("storage conversion / capacity boundaries");
+
+ // same-layout stack copy: hits transfer_same_layout_unchecked_.
+  IMap<29> small { std::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, int>> {} };
+  for (int i = 0; i < 20; ++i) small.emplace(i, i * 10);
+
+  auto same_layout = IMap<29> { small, small.get_allocator() };
+  CHECK(small.is_stack() && same_layout.is_stack());
+  CHECK_EQ(same_layout.capacity(), small.capacity());
+  CHECK_EQ(same_layout.size(), small.size());
+  for (int i = 0; i < 20; ++i) {
+    auto it = same_layout.find(i);
+    CHECK(it != same_layout.end());
+    if (it != same_layout.end()) CHECK_EQ(it->second, i * 10);
+  }
+
+ // requesting the current capacity must neither reallocate nor lose elements.
+  auto const same_capacity = same_layout.capacity();
+  same_layout.rehash(same_capacity);
+  CHECK_EQ(same_layout.capacity(), same_capacity);
+  CHECK_EQ(same_layout.size(), 20u);
+  for (int i = 0; i < 20; ++i) CHECK(same_layout.contains(i));
+
+ // rehash(0) on an empty heap table must take the minimum group-count path and stay usable.
+  IMap<0> empty { std::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, int>> {} };
+  CHECK_EQ(empty.capacity(), 0u);
+  empty.rehash(0);
+  CHECK(empty.empty());
+  CHECK(empty.is_heap());
+  CHECK(empty.capacity() >= 29u);
+  auto const empty_capacity = empty.capacity();
+  empty.rehash(empty_capacity);
+  CHECK_EQ(empty.capacity(), empty_capacity);
+  empty.emplace(1, 10);
+  CHECK_EQ(empty.find(1)->second, 10);
+
+ // reset() with inline_capacity == 0 clears only elements and keeps heap capacity.
+  IMap<0> heap { std::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, int>> {} };
+  for (int i = 0; i < 50; ++i) heap.emplace(i, i);
+  auto const heap_capacity = heap.capacity();
+  heap.reset();
+  CHECK(heap.empty());
+  CHECK(heap.is_heap());
+  CHECK_EQ(heap.capacity(), heap_capacity);
+  heap.emplace(77, 770);
+  CHECK_EQ(heap.find(77)->second, 770);
+
+ // erasing then reinserting the same key should reuse capacity.
+  IMap<29> reuse { std::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, int>> {} };
+  for (int i = 0; i < 29; ++i) reuse.emplace(i, i);
+  auto const reuse_capacity = reuse.capacity();
+  CHECK_EQ(reuse.erase(0), 1u);
+  auto [reinserted, inserted] = reuse.emplace(0, 1000);
+  CHECK(inserted);
+  CHECK(reinserted != reuse.end());
+  CHECK_EQ(reinserted->second, 1000);
+  CHECK_EQ(reuse.capacity(), reuse_capacity);
+  CHECK_EQ(reuse.size(), 29u);
+  for (int i = 1; i < 29; ++i) CHECK(reuse.contains(i));
+
+ // erasing in an overflow group lowers max_load_; reinserting at the threshold boundary should grow early.
+  CollisionMap<29> drift { constant_int_hash {}, std::equal_to<> {}, std::allocator<std::pair<int, int>> {} };
+  for (int i = 0; i < 29; ++i) drift.emplace(i, i);
+  CHECK(drift.is_stack());
+  CHECK_EQ(drift.erase(0), 1u);
+  CHECK_EQ(drift.size(), 28u);
+
+  auto [drift_it, drift_inserted] = drift.emplace(29, 29);
+  CHECK(drift_inserted);
+  CHECK(drift_it != drift.end());
+  CHECK(drift.is_heap());
+  CHECK(drift.capacity() > 29u);
+  for (int i = 1; i < 30; ++i) CHECK(drift.contains(i));
 }
 
 // ==================================================================
@@ -899,6 +987,7 @@ int main()
   test_set_traits();
   test_stack_to_heap();
   test_copy_move();
+  test_storage_conversion_and_capacity_boundaries();
   test_swap();
   test_erase();
   test_rehash_reserve_clear_reset();
@@ -947,31 +1036,16 @@ Suggestion: rewrite the IMap<0>/IMap<29> insert-find-erase-rehash-copy path as
 --------------------------------------------------------------------------------
 [2] Untouched branches in storage conversion
 --------------------------------------------------------------------------------
-  - transfer_same_layout_unchecked_ (hash_table.hpp:145) was never tested intentionally.
-    it is entered only when source/dest group_count_() match, while test_copy_move uses a
-    100-element heap table, whose copy takes transfer_with_rehash. Copying an on-stack table with <=29 elements
-    table (both group_counts are 2) hits it:
-        IMap<29> small; for (int i=0;i<20;++i) small.emplace(i,i);
-        IMap<29> cpy(small, small.get_allocator());
-    this case also covers the memcpy fast path at hash_table.hpp:163 -- which requires
-    is_trivially_copy_constructible_v<value_type>, satisfied only by int tables; yet int tables
-    never performs a same-layout copy in existing tests, so this memcpy branch never runs.
-    (test_fuzz_strings random copy only enters the same-layout path indirectly when t happens to be a stack,
-    and value_type is std::string, still never reaching the memcpy branch.)
-  - rehash only tested growing. Untested:
-      * capacity-unchanged no-op: at hash_table.hpp:609,
-        the branch where `count != capacity_unchecked_()` is false;
-      * empty-table rehash(0): after count is zeroed, allocate_unchecked_(0) falls into
-        the min_group_count == 2 path.
-  - reset() on an inline_capacity == 0 table: at inline_storage.hpp:530,
-    if constexpr is false, only elements are destroyed and the heap is kept; unverified.
-    (note: an inline_capacity == 0 table is always a heap; the original on-stack reset() wording was wrong.)
-  - erase-then-reinsert: test_erase only asserts contains is false after erase, with no
-    key reinsertion case (reuses reset slots and stresses the max_load_ count).
-  - max_load_ drift: erase on overflow slots runs
-    `max_load_ -= is_overflow_by_slot(...)` (hash_table.hpp:779), repeated
-    repeated erase-insert drifts monotonically. This is a known todo (the `ml` anti-drift item in Old To-Do List),
-    currently no test observes it.
+  - covered by test_storage_conversion_and_capacity_boundaries():
+      * same-layout stack copy hits transfer_same_layout_unchecked_, covering int
+        the memcpy fast path for value_type;
+      * rehash no-op at the current capacity;
+      * empty-table rehash(0) min_group_count == 2 path;
+      * reset() on an inline_capacity == 0 table keeps heap capacity;
+      * erase then reinsert the same key.
+  - covered by CollisionMap<29> in the same test: max_load_ anti-drift with constant hash
+    forces overflow; erasing an overflow slot lowers max_load_, and reinsertion at the threshold
+    insertion must grow early.
 
 --------------------------------------------------------------------------------
 [3] Allocator-aware branches
