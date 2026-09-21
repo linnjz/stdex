@@ -19,6 +19,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio> // stderr
+#include <memory>
+#include <new>
 #include <print>
 #include <random>
 #include <string>
@@ -92,6 +94,86 @@ struct constant_int_hash
   constexpr std::size_t operator() (int) const noexcept { return 0; }
 };
 
+struct allocator_probe_state
+{
+  std::size_t allocation_attempts = 0;
+  std::size_t allocations         = 0;
+  std::size_t deallocations       = 0;
+  std::size_t active_allocations   = 0;
+  std::size_t fail_on_attempt      = 0;
+};
+
+template <class T, bool PropagateCopy, bool PropagateMove, bool PropagateSwap>
+struct allocator_probe
+{
+  using value_type = T;
+  using size_type = std::size_t;
+  using difference_type = std::ptrdiff_t;
+  using pointer = T *;
+  using const_pointer = T const *;
+
+  using propagate_on_container_copy_assignment = std::bool_constant<PropagateCopy>;
+  using propagate_on_container_move_assignment = std::bool_constant<PropagateMove>;
+  using propagate_on_container_swap            = std::bool_constant<PropagateSwap>;
+  using is_always_equal                        = std::false_type;
+
+  template <class U>
+  struct rebind
+  {
+    using other = allocator_probe<U, PropagateCopy, PropagateMove, PropagateSwap>;
+  };
+
+  allocator_probe() = default;
+
+  constexpr allocator_probe(allocator_probe_state *state, int id) noexcept
+      : state_ { state }
+      , id_ { id }
+  {
+  }
+
+  template <class U>
+  constexpr allocator_probe(allocator_probe<U, PropagateCopy, PropagateMove, PropagateSwap> const &other) noexcept
+      : state_ { other.state_ }
+      , id_ { other.id_ }
+  {
+  }
+
+  [[nodiscard]] constexpr int id() const noexcept { return id_; }
+
+  [[nodiscard]] T *allocate(std::size_t count)
+  {
+    ++state_->allocation_attempts;
+    if (state_->fail_on_attempt != 0 && state_->allocation_attempts == state_->fail_on_attempt) throw std::bad_alloc {};
+
+    auto *result = static_cast<T *>(::operator new(count * sizeof(T)));
+    ++state_->allocations;
+    ++state_->active_allocations;
+    return result;
+  }
+
+  void deallocate(T *ptr, std::size_t) noexcept
+  {
+    ::operator delete(ptr);
+    ++state_->deallocations;
+    --state_->active_allocations;
+  }
+
+  template <class U>
+  friend constexpr bool operator==(
+      allocator_probe const &left,
+      allocator_probe<U, PropagateCopy, PropagateMove, PropagateSwap> const &right) noexcept
+  {
+    return left.state_ == right.state_ && left.id_ == right.id_;
+  }
+
+  template <class, bool, bool, bool>
+  friend struct allocator_probe;
+
+private:
+  allocator_probe_state *state_ = nullptr;
+  int id_                       = 0;
+};
+
 // ==================================================================
 // convenience aliases
 // ==================================================================
@@ -110,6 +192,13 @@ using ISet = ufd::hash_table<ufd::ufset_traits<int, N>, std::hash<int>, std::equ
 
 template <size_t N>
 using CollisionMap = ufd::hash_table<ufd::ufmap_traits<int, int, N>, constant_int_hash, std::equal_to<>, std::allocator<std::pair<int, int>>>;
+
+template <size_t N, bool PropagateCopy, bool PropagateMove, bool PropagateSwap>
+using ProbeMap = ufd::hash_table<
+    ufd::ufmap_traits<int, int, N>,
+    std::hash<int>,
+    std::equal_to<>,
+    allocator_probe<std::pair<int, int>, PropagateCopy, PropagateMove, PropagateSwap>>;
 
 // ==================================================================
 // 1. Basics: empty / single element / insert / find / count
@@ -206,7 +295,170 @@ void test_stack_to_heap()
 }
 
 // ==================================================================
-// 4. Copy / move / assignment / destruction
+// 4. allocator-aware branches
+// ==================================================================
+void test_allocator_aware()
+{
+  SECTION("allocator-aware branches");
+
+  using NoPropMap   = ProbeMap<0, false, false, false>;
+  using CopyPropMap = ProbeMap<0, true, false, false>;
+  using MovePropMap = ProbeMap<0, false, true, false>;
+  using SwapPropMap = ProbeMap<0, false, false, true>;
+
+  // Non-propagating unequal allocators must copy into the destination allocator.
+  {
+    allocator_probe_state source_state, destination_state;
+    NoPropMap source { std::hash<int> {}, std::equal_to<> {}, { &source_state, 1 } };
+    NoPropMap destination { std::hash<int> {}, std::equal_to<> {}, { &destination_state, 2 } };
+    for (int i = 0; i < 40; ++i) source.emplace(i, i);
+    destination.emplace(999, 999);
+
+    destination = source;
+    CHECK_EQ(destination.get_allocator().id(), 2);
+    CHECK_EQ(destination.size(), 40u);
+    CHECK(!destination.contains(999));
+    for (int i = 0; i < 40; ++i) CHECK(destination.contains(i));
+  }
+
+  // POCCA propagates the source allocator when the allocators differ.
+  {
+    allocator_probe_state source_state, destination_state;
+    CopyPropMap source { std::hash<int> {}, std::equal_to<> {}, { &source_state, 3 } };
+    CopyPropMap destination { std::hash<int> {}, std::equal_to<> {}, { &destination_state, 4 } };
+    for (int i = 0; i < 40; ++i) source.emplace(i, i);
+
+    destination = source;
+    CHECK_EQ(destination.get_allocator().id(), 3);
+    CHECK_EQ(destination.size(), 40u);
+    for (int i = 0; i < 40; ++i) CHECK(destination.contains(i));
+  }
+
+  // Non-propagating unequal move assignment must transfer through the destination allocator.
+  {
+    allocator_probe_state source_state, destination_state;
+    NoPropMap source { std::hash<int> {}, std::equal_to<> {}, { &source_state, 5 } };
+    NoPropMap destination { std::hash<int> {}, std::equal_to<> {}, { &destination_state, 6 } };
+    for (int i = 0; i < 40; ++i) source.emplace(i, i);
+    destination.emplace(999, 999);
+
+    destination = std::move(source);
+    CHECK_EQ(destination.get_allocator().id(), 6);
+    CHECK_EQ(destination.size(), 40u);
+    CHECK(source.empty());
+    for (int i = 0; i < 40; ++i) CHECK(destination.contains(i));
+  }
+
+  // POCMA allows unequal allocators to steal the source heap.
+  {
+    allocator_probe_state source_state, destination_state;
+    MovePropMap source { std::hash<int> {}, std::equal_to<> {}, { &source_state, 7 } };
+    MovePropMap destination { std::hash<int> {}, std::equal_to<> {}, { &destination_state, 8 } };
+    for (int i = 0; i < 40; ++i) source.emplace(i, i);
+    destination.emplace(999, 999);
+
+    destination = std::move(source);
+    CHECK_EQ(destination.get_allocator().id(), 7);
+    CHECK_EQ(destination.size(), 40u);
+    CHECK(source.empty());
+    for (int i = 0; i < 40; ++i) CHECK(destination.contains(i));
+  }
+
+  // Explicit-allocator move construction covers both heap transfer paths.
+  {
+    allocator_probe_state source_state, equal_state, unequal_state;
+    NoPropMap unequal_source { std::hash<int> {}, std::equal_to<> {}, { &source_state, 9 } };
+    for (int i = 0; i < 40; ++i) unequal_source.emplace(i, i);
+    NoPropMap unequal_move { std::move(unequal_source), { &unequal_state, 10 } };
+    CHECK_EQ(unequal_move.get_allocator().id(), 10);
+    CHECK_EQ(unequal_move.size(), 40u);
+    CHECK(unequal_source.empty());
+
+    NoPropMap equal_source { std::hash<int> {}, std::equal_to<> {}, { &equal_state, 11 } };
+    for (int i = 0; i < 40; ++i) equal_source.emplace(i, i);
+    NoPropMap equal_move { std::move(equal_source), { &equal_state, 11 } };
+    CHECK_EQ(equal_move.get_allocator().id(), 11);
+    CHECK_EQ(equal_move.size(), 40u);
+    CHECK(equal_source.empty());
+  }
+
+  // Non-propagating equal allocators take the permitted swap path.
+  {
+    allocator_probe_state state;
+    NoPropMap left { std::hash<int> {}, std::equal_to<> {}, { &state, 12 } };
+    NoPropMap right { std::hash<int> {}, std::equal_to<> {}, { &state, 12 } };
+    left.emplace(1, 10);
+    right.emplace(2, 20);
+    left.swap(right);
+    CHECK(left.contains(2) && right.contains(1));
+    CHECK_EQ(left.get_allocator().id(), 12);
+    CHECK_EQ(right.get_allocator().id(), 12);
+  }
+
+  // POCS swaps unequal allocator state together with the table storage.
+  {
+    allocator_probe_state left_state, right_state;
+    SwapPropMap left { std::hash<int> {}, std::equal_to<> {}, { &left_state, 13 } };
+    SwapPropMap right { std::hash<int> {}, std::equal_to<> {}, { &right_state, 14 } };
+    for (int i = 0; i < 40; ++i) left.emplace(i, i);
+    right.emplace(999, 999);
+    left.swap(right);
+    CHECK_EQ(left.get_allocator().id(), 14);
+    CHECK_EQ(right.get_allocator().id(), 13);
+    CHECK(left.contains(999));
+    CHECK(right.contains(0));
+  }
+
+  // A failed allocation must leave an existing heap table usable and leak-free.
+  {
+    allocator_probe_state state;
+    NoPropMap table { std::hash<int> {}, std::equal_to<> {}, { &state, 15 } };
+    for (int i = 0; i < 40; ++i) table.emplace(i, i);
+    auto const old_capacity = table.capacity();
+    auto const old_attempts = state.allocation_attempts;
+    state.fail_on_attempt   = old_attempts + 1;
+
+    bool threw = false;
+    try {
+      table.rehash(old_capacity * 4);
+    } catch (std::bad_alloc const &) {
+      threw = true;
+    }
+
+    state.fail_on_attempt = 0;
+    CHECK(threw);
+    CHECK_EQ(table.capacity(), old_capacity);
+    CHECK_EQ(table.size(), 40u);
+    for (int i = 0; i < 40; ++i) CHECK(table.contains(i));
+  }
+
+  // Growth from stack storage must also roll back cleanly when allocation fails.
+  {
+    allocator_probe_state state;
+    ProbeMap<29, false, false, false> table {
+      std::hash<int> {}, std::equal_to<> {}, { &state, 16 }
+    };
+    for (int i = 0; i < 29; ++i) table.emplace(i, i);
+    state.fail_on_attempt = state.allocation_attempts + 1;
+
+    bool threw = false;
+    try {
+      table.emplace(29, 29);
+    } catch (std::bad_alloc const &) {
+      threw = true;
+    }
+
+    state.fail_on_attempt = 0;
+    CHECK(threw);
+    CHECK(table.is_stack());
+    CHECK_EQ(table.size(), 29u);
+    CHECK(!table.contains(29));
+    for (int i = 0; i < 29; ++i) CHECK(table.contains(i));
+  }
+}
+
+// ==================================================================
+// 5. Copy / move / assignment / destruction
 // ==================================================================
 void test_copy_move()
 {
@@ -986,6 +1238,7 @@ int main()
   test_basic_empty_single();
   test_set_traits();
   test_stack_to_heap();
+  test_allocator_aware();
   test_copy_move();
   test_storage_conversion_and_capacity_boundaries();
   test_swap();
