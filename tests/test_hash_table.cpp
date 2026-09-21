@@ -23,16 +23,23 @@
 #include <new>
 #include <print>
 #include <random>
+#include <ranges>
+#include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "hash.hpp"
 #include "hash_table.hpp"
 #include "ufmap_traits.hpp"
 #include "ufset_traits.hpp"
+#include "unordered_flat_map.hpp"
+#include "unordered_flat_set.hpp"
 
 namespace ufd = stdex::unordered_flat_detail;
 
@@ -303,6 +310,10 @@ using UniqueMap = ufd::hash_table<
     std::hash<int>,
     std::equal_to<>,
     std::allocator<std::pair<int, std::unique_ptr<int>>>>;
+
+// per hard constraint: set's iterator is const_iterator, map's must differ.
+static_assert(std::is_same_v<ISet<0>::iterator, ISet<0>::const_iterator>);
+static_assert(!std::is_same_v<IMap<0>::iterator, IMap<0>::const_iterator>);
 
 // ==================================================================
 // 1. Basics: empty / single element / insert / find / count
@@ -1695,6 +1706,300 @@ void test_no_default_value()
 }
 
 // ==================================================================
+// 22. Ranges version of insert_range: lazy input_range
+// ==================================================================
+void test_insert_range_lazy()
+{
+  SECTION("insert_range with lazy input_range");
+  auto rg = std::views::iota(0, 10) | std::views::transform([](int i) { return std::pair<int, int> { i, i * 2 }; });
+  static_assert(std::ranges::input_range<decltype(rg)>);
+
+  IMap<0> t { std::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, int>> {} };
+  t.insert_range(rg);
+  CHECK_EQ(t.size(), 10u);
+  for (int i = 0; i < 10; ++i) CHECK_EQ(t.find(i)->second, i * 2);
+}
+
+// ==================================================================
+// 23. Transparent (heterogeneous) erase / merge overloads
+// ==================================================================
+void test_hetero_erase_merge()
+{
+  SECTION("heterogeneous erase / merge");
+
+  TransparentSMap<0> t { transparent_str_hash {}, std::equal_to<> {},
+                        std::allocator<std::pair<std::string, int>> {} };
+  t.emplace("a", 1);
+  t.emplace("b", 2);
+
+  std::string_view sv = "a";
+  CHECK_EQ(t.erase(sv), 1u);
+  CHECK(!t.contains(sv));
+  CHECK_EQ(t.erase(std::string_view("zzz")), 0u);
+  CHECK_EQ(t.erase("b"), 1u);
+  CHECK(t.empty());
+
+ // heterogeneous merge overloads: same Traits/Allocator, different Hasher.
+  SMap<0> dst { std::hash<std::string> {}, std::equal_to<> {},
+               std::allocator<std::pair<std::string, int>> {} };
+  TransparentSMap<0> src { transparent_str_hash {}, std::equal_to<> {},
+                          std::allocator<std::pair<std::string, int>> {} };
+  dst.emplace("keep", 1);
+  src.emplace("keep", 999);
+  src.emplace("new", 2);
+
+  dst.merge(src);
+  CHECK_EQ(dst.size(), 2u);
+  CHECK_EQ(dst.find("keep")->second, 1);
+  CHECK_EQ(dst.find("new")->second, 2);
+  CHECK_EQ(src.size(), 1u);
+  CHECK_EQ(src.find(std::string_view("keep"))->second, 999);
+}
+
+// ==================================================================
+// 24. lazy_iterator: chained erase and erase(first, last) return value
+//
+// lazy_iterator is not assignable (single-shot); chained erase must use iterator as the loop variable;
+// increment_ runs only on conversion, so erase(first, last) returns a lazy to the last erased slot.
+// ==================================================================
+void test_lazy_iterator_erase()
+{
+  SECTION("lazy_iterator erase chaining");
+
+  IMap<0> t { std::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, int>> {} };
+  for (int i = 0; i < 50; ++i) t.emplace(i, i);
+
+  std::size_t n = 1;
+  for (IMap<0>::iterator it = t.erase(t.begin()); it != t.end(); it = t.erase(it)) ++n;
+  CHECK_EQ(n, 50u);
+  CHECK(t.empty());
+
+  IMap<0> u { std::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, int>> {} };
+  for (int i = 0; i < 10; ++i) u.emplace(i, i);
+
+  auto b = u.begin();
+  auto e = b;
+  ++e;
+  ++e;
+  ++e;
+  auto r = u.erase(b, e);
+  CHECK_EQ(u.size(), 7u);
+  CHECK(r != u.end());
+ IMap<0>::iterator rp = r; // lazy has no operator->, convert explicitly before use
+ CHECK(u.find(rp->first) == rp); // returned position is a live element
+
+  auto r2 = u.erase(u.begin(), u.end());
+  CHECK(r2 == u.end());
+  CHECK(u.empty());
+
+ // empty range: no-op, safe without converting the result.
+  IMap<0> w { std::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, int>> {} };
+  for (int i = 0; i < 5; ++i) w.emplace(i, i);
+  auto wb = w.begin();
+  w.erase(wb, wb);
+  CHECK_EQ(w.size(), 5u);
+}
+
+// ==================================================================
+// 25. Plain iterator postfix ++
+// ==================================================================
+void test_iterator_postfix()
+{
+  SECTION("iterator postfix ++");
+
+  IMap<0> t { std::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, int>> {} };
+  t.emplace(1, 10);
+  t.emplace(2, 20);
+
+  auto it  = t.begin();
+  auto key = it->first;
+  auto old = it++;
+  CHECK_EQ(old->first, key);
+  CHECK(old != it);
+}
+
+// ==================================================================
+// 26. Hinted insert overloads
+// ==================================================================
+void test_insert_hint()
+{
+  SECTION("insert with hint");
+
+  SMap<0> t { std::hash<std::string> {}, std::equal_to<> {},
+              std::allocator<std::pair<std::string, int>> {} };
+
+  auto it1 = t.insert(t.cbegin(), std::pair<std::string, int> { "x", 1 });
+  CHECK(it1 != t.end());
+  CHECK_EQ(it1->second, 1);
+
+  auto it2 = t.insert(t.cbegin(), std::pair<std::string, int> { "x", 999 });
+ CHECK_EQ(it2->second, 1); // duplicate key does not overwrite
+
+  auto it3 = t.insert(t.cbegin(), std::make_pair("y", 2));
+  CHECK_EQ(it3->second, 2);
+  CHECK_EQ(t.size(), 2u);
+}
+
+// ==================================================================
+// 27. Const equal_range overloads
+// ==================================================================
+void test_equal_range_const()
+{
+  SECTION("equal_range const overloads");
+
+  IMap<0> t { std::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, int>> {} };
+  t.emplace(5, 50);
+  auto const &ct = t;
+  auto [b, e]    = ct.equal_range(5);
+  CHECK(b != e);
+  CHECK_EQ(b->second, 50);
+
+  TransparentSMap<0> st { transparent_str_hash {}, std::equal_to<> {},
+                         std::allocator<std::pair<std::string, int>> {} };
+  st.emplace("hello", 1);
+  auto const &cst = st;
+  std::string_view sv = "hello";
+  auto [b2, e2]       = cst.equal_range(sv);
+  CHECK(b2 != e2);
+  CHECK_EQ(b2->second, 1);
+}
+
+// ==================================================================
+// 28. piecewise_construct overloads of try_key_extraction (tested directly via emplace)
+// ==================================================================
+void test_piecewise_emplace()
+{
+  SECTION("piecewise emplace");
+
+  SMap<0> t { std::hash<std::string> {}, std::equal_to<> {},
+              std::allocator<std::pair<std::string, int>> {} };
+
+  auto [p1, ok1] = t.emplace(std::piecewise_construct, std::forward_as_tuple("a"), std::forward_as_tuple(1));
+  CHECK(ok1);
+  CHECK_EQ(p1->second, 1);
+
+  auto [p2, ok2] = t.emplace(std::piecewise_construct, std::forward_as_tuple("a"), std::forward_as_tuple(999));
+  CHECK(!ok2);
+  CHECK_EQ(p2->second, 1);
+}
+
+// ==================================================================
+// 29. Container comparison
+// ==================================================================
+void test_container_compare()
+{
+  SECTION("container operator== / !=");
+
+  IMap<0> a { std::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, int>> {} };
+  IMap<0> b { std::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, int>> {} };
+ CHECK(a == b); // empty-table comparison must not touch empty storage
+  CHECK(!(a != b));
+  CHECK(a == a);
+
+  for (int i = 0; i < 20; ++i) {
+    a.emplace(i, i);
+    b.emplace(i, i);
+  }
+  CHECK(a == b);
+
+  b.emplace(100, 100);
+  CHECK(a != b);
+  CHECK(!(a == b));
+  b.erase(100);
+  CHECK(a == b);
+
+  a.emplace(101, 101);
+  CHECK(a != b);
+
+  ISet<0> s1 { std::hash<int> {}, std::equal_to<> {}, std::allocator<int> {} };
+  ISet<0> s2 { std::hash<int> {}, std::equal_to<> {}, std::allocator<int> {} };
+  CHECK(s1 == s2);
+  s1.emplace(1);
+  CHECK(s1 != s2);
+  s2.emplace(1);
+  CHECK(s1 == s2);
+
+ // public wrapper comparison through the base class works too.
+  stdex::unordered_flat_map<int, int> m1 { { 1, 1 }, { 2, 2 } };
+  stdex::unordered_flat_map<int, int> m2 { { 1, 1 }, { 2, 2 } };
+  CHECK(m1 == m2);
+  m2.emplace(3, 3);
+  CHECK(m1 != m2);
+}
+
+// ==================================================================
+// 30. erase_if (via public wrapper)
+// ==================================================================
+void test_erase_if()
+{
+  SECTION("erase_if");
+
+  stdex::unordered_flat_map<int, int> m { { 1, 1 }, { 2, 2 }, { 3, 3 } };
+  auto n = stdex::erase_if(m, [](auto const &p) { return p.first % 2 == 1; });
+  CHECK_EQ(n, 2u);
+  CHECK_EQ(m.size(), 1u);
+  CHECK(m.contains(2));
+
+  stdex::unordered_flat_set<int> s { 1, 2, 3, 4 };
+  auto n2 = stdex::erase_if(s, [](int x) { return x % 2 == 0; });
+  CHECK_EQ(n2, 2u);
+  CHECK_EQ(s.size(), 2u);
+  CHECK(s.contains(1) && s.contains(3));
+}
+
+// ==================================================================
+// 31. Public element access / mutation API of unordered_flat_map
+// ==================================================================
+void test_flat_map_api()
+{
+  SECTION("unordered_flat_map element access");
+
+  stdex::unordered_flat_map<int, int> m;
+  m[1] = 10;
+  m[1] = 20;
+  CHECK_EQ(m.at(1), 20);
+
+  int k = 2;
+  m[k] = 30;
+  m[int(3)] = 40;
+
+  auto const &cm = m;
+  CHECK_EQ(cm.at(1), 20);
+
+  bool threw = false;
+  try {
+    (void) m.at(999);
+  } catch (std::out_of_range const &) {
+    threw = true;
+  }
+  CHECK(threw);
+
+  auto [te1, ok1] = m.try_emplace(5, 50);
+  CHECK(ok1);
+  auto [te2, ok2] = m.try_emplace(5, 999);
+  CHECK(!ok2);
+  CHECK_EQ(te2->second, 50);
+  auto te3 = m.try_emplace(m.cbegin(), 6, 60);
+  CHECK_EQ(te3->second, 60);
+  auto te4 = m.try_emplace(m.cbegin(), 6, 999);
+  CHECK_EQ(te4->second, 60);
+
+  auto [ia1, aok1] = m.insert_or_assign(8, 80);
+  CHECK(aok1);
+  auto [ia2, aok2] = m.insert_or_assign(8, 81);
+  CHECK(!aok2);
+  CHECK_EQ(ia2->second, 81);
+  auto ia3 = m.insert_or_assign(m.cbegin(), 9, 90);
+  CHECK_EQ(ia3->second, 90);
+  CHECK_EQ(m.size(), 7u);
+
+ // heterogeneous at (transparent hash).
+  stdex::unordered_flat_map<std::string, int, 0, transparent_str_hash, std::equal_to<>> tm;
+  tm.emplace("hello", 1);
+  CHECK_EQ(tm.at(std::string_view("hello")), 1);
+}
+
+// ==================================================================
 // main
 // ==================================================================
 int main()
@@ -1722,6 +2027,16 @@ int main()
   test_transfer_exception_safety();
   test_node_value_semantics();
   test_no_default_value();
+  test_insert_range_lazy();
+  test_hetero_erase_merge();
+  test_lazy_iterator_erase();
+  test_iterator_postfix();
+  test_insert_hint();
+  test_equal_range_const();
+  test_piecewise_emplace();
+  test_container_compare();
+  test_erase_if();
+  test_flat_map_api();
 
   std::println("\n===============================");
   std::println("PASS: {}   FAIL: {}", g_pass, g_fail);
@@ -1821,34 +2136,27 @@ Suggestion: rewrite the IMap<0>/IMap<29> insert-find-erase-rehash-copy path as
 --------------------------------------------------------------------------------
 [5] API coverage gaps
 --------------------------------------------------------------------------------
-  - ranges version of insert_range: only std::vector is tested, unverified
-    container_compatible_range (hash_table.hpp:19-20) on a lazy input_range
-    behavior. Try `std::views::iota(0,10) | std::views::transform(...)` to confirm
-    the std::ranges::input_range concept applies and is not mistaken for forward_range with the wrong overload.
-  - the transparent erase overloads (hash_table.hpp:794) untested; the transparent extract version was tested.
-  - heterogeneous merge overloads hash_table<Traits,H2,KE2,Alloc> (hash_table.hpp:965)
-    untested; only same-type merge was exercised.
-  - lazy_iterator: the erase return value was never used. Chained erase needs verification:
-        for (auto it = t.erase(t.begin()); it != t.end();) it = t.erase(it);
-    and the return-value semantics of erase(first,last).
-    note hash_table_lazy_iterator only provides operator iterator() /
-    operator const_iterator() (hash_table_iterator.hpp:230/237), which only converts
-    increment_, with no operator++ of its own; the lazy semantics come from this conversion, not from postfix++.
-    (the original missing lazy_iterator postfix++ note means: both the lazy_iterator
-    conversion semantics test, as well as the plain iterator postfix++ test.)
-  - postfix ++ of hash_table_iterator (hash_table_iterator.hpp:123) never called,
-    test_iteration only used pre-increment.
-  - no compile-time assertion on begin()/end() return-type const-correctness. Per hard constraint, ISet's
-    iterator must have the same type as const_iterator, while map's must differ:
-        static_assert(std::is_same_v<ISet<0>::iterator, ISet<0>::const_iterator>);
-        static_assert(!std::is_same_v<IMap<0>::iterator, IMap<0>::const_iterator>);
-  - insert(const_iterator, value_type) (hint overloads, hash_table.hpp:685/690)
-    only partly covered indirectly via emplace_hint.
-  - the const overloads of equal_range (hash_table.hpp:727/757) were never called; existing
-    test_heterogeneous_lookup calls the non-const transparent version.
-  - piecewise_construct overloads of try_key_extraction
-    (try_key_extraction.hpp:45) has no test.
-  - comparison tests, erase_if tests, and public []/at/try_emplace/insert_or_assign tests of unordered_flat_map
+  - covered by test_insert_range_lazy(): ranges version of insert_range:
+    `iota | transform` lazy input_range compiles and behaves correctly.
+  - covered by test_hetero_erase_merge(): transparent erase / merge overloads; heterogeneous
+    merge once failed to compile because erase_on_exit hardcoded the current instantiation; its holder is now
+    fixed by templating.
+  - covered by test_lazy_iterator_erase(): lazy chained erase and erase(first,last)
+    return value. Two fixes recorded: the ledger's original `auto it` chained form did not compile --
+    lazy_iterator copy / move assignment are both deleted; the loop variable must be an iterator
+    (each assignment still converts); erase(first,last) used to return `first` (i.e. `last`),
+    while a lazy conversion always increment_s, so a partial range skips one element and a full range steps past end,
+    now returns by tracking the last erased slot (victim).
+  - covered by test_iterator_postfix(): postfix ++; ISet same-type / IMap different-type
+    static_assert already added in the alias block.
+  - covered by test_insert_hint(): three hint overloads; test_equal_range_const()
+    covers the const (incl. transparent) overloads; test_piecewise_emplace() directly tests the piecewise path
+    new and duplicate keys.
+  - covered by test_container_compare(): ==/!= (incl. empty-table comparison; empty tables once traversed
+    empty storage crash, fixed with an early-out); test_erase_if() covers via the public wrapper
+    map/set; test_flat_map_api() covers []/at/try_emplace/insert_or_assign
+    (incl. heterogeneous at). Probe first, then test once clean: probing also caught heterogeneous merge
+    guard and erase-range return bugs, both fixed (see above).
 
 --------------------------------------------------------------------------------
 [6] Degenerate and boundary cases

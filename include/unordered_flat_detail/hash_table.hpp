@@ -189,8 +189,10 @@ private:
       auto *source_elements = source_.elements_address_();
       source_.for_each_occupied_slot_unchecked_([&](auto *occupied_ptr, auto *, unsigned)
       {
+        // Stop at exactly the constructed prefix; later mirrored slots were never built.
+        if (dest_.size_ == 0) return;
         dest_.destroy_element_unchecked_(dest_elements + (occupied_ptr - source_elements));
-        if (--dest_.size_ == 0) return;
+        --dest_.size_;
       });
     }
 
@@ -832,8 +834,14 @@ public:
   }
   constexpr lazy_iterator erase(const_iterator first, const_iterator last) noexcept
   {
-    while (first != last) first = erase(first);
-    return first;
+    // A lazy converts by incrementing past its wrapped slot, so it must wrap
+    // the final erased slot (converting to `last`), not `last` itself.
+    const_iterator victim = first;
+    while (first != last) {
+      victim = first;
+      first  = erase(first);
+    }
+    return victim;
   }
   constexpr size_type erase(key_type const& key_val) noexcept
   {
@@ -848,6 +856,7 @@ public:
   }
 
 private:
+  template <class H2, class KE2>
   struct erase_on_exit
   {
     constexpr ~erase_on_exit()
@@ -857,7 +866,7 @@ private:
 
     constexpr void dismiss() noexcept { dismissed_ = true; }
 
-    hash_table &holder_;
+    hash_table<Traits, H2, KE2, Allocator> &holder_;
     const_iterator element_iterator_;
     bool dismissed_ = false;
   };
@@ -1020,7 +1029,7 @@ public:
 
     other.for_each_occupied_slot_unchecked_([&](value_type *occupied_ptr, group_type *group_ptr, unsigned slot_index) 
     {
-      erase_on_exit g { other, const_iterator { occupied_ptr, group_ptr, slot_index } };
+      erase_on_exit<H2, KE2> g { other, const_iterator { occupied_ptr, group_ptr, slot_index } };
       if (!emplace(std::move(*occupied_ptr)).second) g.dismiss();
     });
   }
@@ -1033,6 +1042,8 @@ public:
   {
     if (std::addressof(a) == std::addressof(b)) return true;
     if (a.size() != b.size()) return false;
+    // Fresh heap tables hold null storage; there is nothing to walk when empty.
+    if (a.empty()) return true;
 
     value_type *a_elements = a.elements_address_();
     group_type *a_groups   = a.groups_address_();
