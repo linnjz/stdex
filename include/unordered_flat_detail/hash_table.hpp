@@ -21,6 +21,7 @@
 #include <concepts>    // std::convertible_to, std::constructible_from
 #include <cstddef>     // std::size_t
 #include <cstring>     // std::memcpy
+#include <memory>      // std::allocator
 #include <ranges>      // std::ranges::input_range, std::ranges::range_reference_t, std::ranges::begin, std::ranges::end
 #include <type_traits> // std::conditional_t, std::is_same_v,
                        // std::is_convertible_v,
@@ -32,6 +33,27 @@
 
 namespace stdex::unordered_flat_detail
 {
+template <std::input_iterator Iter>
+using guide_key_t = std::remove_const_t<std::tuple_element_t<0, typename std::iterator_traits<Iter>::value_type>>;
+template <std::input_iterator Iter>
+using guide_mapped_t = std::tuple_element_t<1, typename std::iterator_traits<Iter>::value_type>;
+template <class Rng>
+using range_key_t = std::remove_const_t<std::tuple_element_t<0, std::ranges::range_value_t<Rng>>>;
+template <class Rng>
+using range_mapped_t = std::tuple_element_t<1, std::ranges::range_value_t<Rng>>;
+
+template <class A>
+concept is_allocator = requires (A &a) {
+  typename A::value_type;
+  a.deallocate(a.allocate(size_t{1}), size_t{1});
+};
+
+template <class Alloc>
+using guide_size_type_t = typename std::allocator_traits<std::conditional_t<is_allocator<Alloc>, Alloc, std::allocator<int>>>::size_type;
+
+template <class H, class K>
+concept is_hasher_for = std::invocable<H const &, K const &> && std::convertible_to<std::invoke_result_t<H const &, K const &>, std::size_t>;
+
 template <class R, class T>
 concept container_compatible_range = std::ranges::input_range<R> && std::convertible_to<std::ranges::range_reference_t<R>, T>;
 
@@ -50,7 +72,6 @@ concept heterogeneous_key = transparent_hash_equal<Hasher, KeyEqual> && not_iter
 template <class Traits, class Hasher, class KeyEqual, class Allocator>
 class hash_table : private inline_storage<Traits, Hasher, KeyEqual, Allocator>
 {
-  // clang-format off
   using base = inline_storage<Traits, Hasher, KeyEqual, Allocator>;
 
 public:
@@ -147,7 +168,6 @@ public:
   }
 
   constexpr ~hash_table() = default;
-  // clang-format on
 
 private:
   struct destroy_elements_on_exit
@@ -230,46 +250,8 @@ private:
     }
     return false;
   }
-  ///// <summary>
- ///// which side probes which: does the bigger group probe the smaller or vice versa
-  ///// </summary>
-  //bool for_each_occupied_eq(hash_table const &other)
-  //{
-  //  value_type *elements_ptr = other.elements_address_();
-  //  group_type *groups_ptr   = other.groups_address_();
-
-  //  group_type *const sentinel_group   = groups_ptr + other.group_count_() - 1;
-  //  group_type const *const groups_end = std::next(sentinel_group);
-
-  //  for (; groups_ptr != groups_end; ++groups_ptr, elements_ptr += other.group_size_()) {
-  //    auto occupied_mask = group_type::occupied_mask_excluding_sentinel(groups_ptr, sentinel_group);
-  //    while (occupied_mask) {
-  //      unsigned slot_index = std::countr_zero(static_cast<unsigned>(occupied_mask));
-  //      auto it = find(Traits::key_fn(elements_ptr[slot_index]);
-  //      if (it == end() || *it != elements_ptr[slot_index]) return false;
-  //      occupied_mask &= occupied_mask - 1;
-  //    }
-  //  }
-  //}
 
 public:
-  /// <summary>
- /// Copy construction:
- ///   this is heap (inline_capacity == 0):
- ///     1. initial state uses 29 groups by default with a 100% load factor
- ///     2. other is always a heap
- ///     3. other may be the initial 29 groups at 100% load; call transfer_same_layout_unchecked_
- ///     4. other may be at 87.5% load; call transfer_with_rehash_unchecked_
- ///     5. overall wrapper calls transfer_to_heap_unchecked_
- ///   this is stack (inline_capacity != 0):
- ///     1. other has three states: stack, stack promoted to heap by insertion without erases shrinking via rehash, stack promoted to heap by insertion with erases shrinking via rehash
- ///     2. stack: group_count always matches with a 100% load factor; call transfer_same_layout_unchecked_
- ///     3. heap with more groups: check other's size; if small enough to fit keep it, else promote to heap; both call transfer_with_rehash_unchecked_
- ///     4. heap with fewer groups where this stack fits other's size: transfer_with_rehash_unchecked_
- ///     5. cases 2, 3 (fits without promoting to heap) and 4 need no max_load assignment
-  /// </summary>
-  /// <param name="other"></param>
-  /// <param name="alloc"></param>
   constexpr hash_table(hash_table const &other, allocator_type const &alloc)
       : base { other.hash_function(), other.key_eq(), alloc }
   {
@@ -286,15 +268,6 @@ public:
     }
   }
 
-  /// <summary>
- /// Copy assignment:
- ///   1. copy hasher and key_eq first instead of destroy_elements_unchecked_, so a throw after destruction cannot lose destroyed elements
- ///   2. when is_pocca_v with unequal allocators: free with the old allocator, copy the new allocator, reallocate, copy elements
- ///   3. capacity insufficient: free memory, allocate with the allocator, copy elements
- ///   4. capacity sufficient: copy elements
-  /// </summary>
-  /// <param name="other"></param>
-  /// <returns></returns>
   constexpr hash_table &operator= (hash_table const &other)
   {
     if (this == std::addressof(other)) [[unlikely]]
@@ -366,7 +339,15 @@ public:
     }
   }
 
-  constexpr hash_table(hash_table &&other)
+  constexpr hash_table(hash_table &&other) noexcept(
+        std::is_nothrow_move_constructible_v<hasher> &&
+        std::is_nothrow_move_constructible_v<key_equal> &&
+        std::is_nothrow_move_constructible_v<allocator_type> &&
+        allocator_traits::is_always_equal::value &&
+        (inline_capacity == 0 ||
+         (std::is_nothrow_move_constructible_v<value_type> &&
+          std::is_nothrow_invocable_v<hasher&, key_type const&> &&
+          std::is_nothrow_invocable_v<key_equal&, key_type const&, key_type const&>)))
       : base { std::move(other.hasher_), std::move(other.key_eq_), std::move(other.alloc_) }
   {
     if (other.empty()) [[unlikely]]
@@ -379,7 +360,15 @@ public:
     steal_heap_from_(other);
   }
 
-  constexpr hash_table& operator= (hash_table&& other)
+  constexpr hash_table& operator= (hash_table&& other) noexcept(
+        std::is_nothrow_swappable_v<hasher> &&
+        std::is_nothrow_swappable_v<key_equal> &&
+        std::is_nothrow_move_assignable_v<allocator_type> &&
+        std::is_nothrow_move_constructible_v<value_type> &&
+        std::is_nothrow_destructible_v<value_type> &&
+        allocator_traits::is_always_equal::value &&
+        std::is_nothrow_invocable_v<hasher&, key_type const&> &&
+        std::is_nothrow_invocable_v<key_equal&, key_type const&, key_type const&>)
   {
     if (this == std::addressof(other)) [[unlikely]]
       return *this;
@@ -410,9 +399,6 @@ public:
         if (!other.empty()) transfer_with_rehash_unchecked_<true>(other, *this);
       }
     } else /*!is_this_stack && is_other_stack*/ {
-      // this started as a stack but promoted to heap on insertion; max_load comes from the exact capacity computed by required_capacity_,
-      // then group_index_shift_by_ rounds up to the smallest power-of-two memory, then group_count_by_ derives the group count and multiplies (group size - 1) to get the real capacity before applying the factor for max_load_
-      // max_load_ >= inline_capacity >= other.size(): the current heap elements (load factor may be 100% or 87.5%) fit the stack 100% load capacity
       bool const is_propagator = is_pocma_v && !allocators_equal_(get_allocator(), other.get_allocator());
       if (this->max_load_ >= other.size() && !is_propagator) {
         if (!other.empty()) transfer_with_rehash_unchecked_<true>(other, *this);
@@ -443,11 +429,11 @@ private:
         if (a_occupied && b_occupied) {
           std::ranges::swap(a.stack_.elements_[i], b.stack_.elements_[i]);
         } else if (a_occupied) {
-          std::construct_at(&b.stack_.elements_[i], std::move_if_noexcept(a.stack_.elements_[i]));
-          std::destroy_at(&a.stack_.elements_[i]);
+          std::construct_at(std::addressof(b.stack_.elements_[i]), std::move_if_noexcept(a.stack_.elements_[i]));
+          std::destroy_at(std::addressof(a.stack_.elements_[i]));
         } else if (b_occupied) {
-          std::construct_at(&a.stack_.elements_[i], std::move_if_noexcept(b.stack_.elements_[i]));
-          std::destroy_at(&b.stack_.elements_[i]);
+          std::construct_at(std::addressof(a.stack_.elements_[i]), std::move_if_noexcept(b.stack_.elements_[i]));
+          std::destroy_at(std::addressof(b.stack_.elements_[i]));
         }
       }
     }
@@ -687,6 +673,11 @@ public:
     return emplace(std::forward<Args>(args)...).first;
   }
 
+  constexpr std::pair<iterator, bool> insert(value_type const &obj) 
+  {
+    return emplace(obj); 
+  }
+
   constexpr std::pair<iterator, bool> insert(value_type &&obj) 
   { 
     return emplace(std::move(obj)); 
@@ -696,6 +687,11 @@ public:
   constexpr std::pair<iterator, bool> insert(U &&obj)
   {
     return emplace(std::forward<U>(obj));
+  }
+  
+  constexpr iterator insert(const_iterator, value_type const &obj) 
+  {
+    return emplace(obj).first; 
   }
 
   constexpr iterator insert(const_iterator, value_type &&obj) 
@@ -713,6 +709,11 @@ public:
   constexpr void insert(InputIter first, InputIter last)
   {
     for (auto pos = first; pos != last; ++pos) emplace(*pos);
+  }
+
+  constexpr void insert(std::initializer_list<value_type> list)
+  {
+    insert(list.begin(), list.end());
   }
 
   template <container_compatible_range<value_type> R>
@@ -783,7 +784,9 @@ public:
   [[nodiscard]] constexpr bool contains(K const &key_val) const { return find(key_val) != end(); }
 
 public:
-  constexpr lazy_iterator erase(iterator position) noexcept requires(!std::is_same_v<iterator, const_iterator>)
+  template <class Iter = iterator>
+  requires std::is_same_v<Iter, iterator> && (!std::is_same_v<iterator, const_iterator>)
+  constexpr lazy_iterator erase(Iter position) noexcept
   { 
     return erase(const_iterator { position }); 
   }
@@ -932,7 +935,6 @@ public:
 
   constexpr insert_return_type insert(node_type &&node)
   {
-    // empty node: not consumed, return an empty node directly
     if (!static_cast<bool>(node)) [[unlikely]] {
       return { end(), false, node_type {} };
     }
@@ -995,6 +997,30 @@ public:
 
   template <class H2, class KE2>
   constexpr void merge(hash_table<Traits, H2, KE2, Allocator> &&other) { merge(other); }
+
+public:
+  friend bool operator== (hash_table const &a, hash_table const &b) noexcept
+  {
+    if (std::addressof(a) == std::addressof(b)) return true;
+    if (a.size() != b.size()) return false;
+
+    value_type *a_elements = a.elements_address_();
+    group_type *a_groups   = a.groups_address_();
+    group_type *a_sentinel = a_groups + a.group_count_() - 1;
+    for (size_type group_index = 0; group_index < a.group_count_(); ++group_index) {
+      group_type *group_ptr = a_groups + group_index;
+      auto occupied_mask    = group_type::occupied_mask_excluding_sentinel(group_ptr, a_sentinel);
+      while (occupied_mask) {
+        unsigned slot_index     = std::countr_zero(static_cast<unsigned>(occupied_mask));
+        value_type *element_ptr = a_elements + group_index * group_size_() + slot_index;
+        auto it                 = b.find(Traits::key_fn(*element_ptr));
+        if (it == b.end() || !(*it == *element_ptr)) return false;
+        occupied_mask &= occupied_mask - 1;
+      }
+    }
+    return true;
+  }
+  friend bool operator!= (hash_table const& a, hash_table const& b) noexcept { return !(a == b); }
 
   // consteval auto freeze();
 };
