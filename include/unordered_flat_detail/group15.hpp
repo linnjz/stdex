@@ -203,7 +203,7 @@ private:
 public:
   static constexpr size_t capacity() noexcept { return 15; }
 
-  constexpr int fingerprint_mask(size_t hash) const
+  [[msvc::forceinline, gnu::always_inline]] constexpr int fingerprint_mask(size_t hash) const
   {
     if constexpr (is_simd_enabled) {
       if consteval {
@@ -301,7 +301,7 @@ public:
     }
   }
 
-  constexpr void set_fingerprint_hash(size_t slot_index, size_t hash)
+  [[msvc::forceinline, gnu::always_inline]] constexpr void set_fingerprint_hash(size_t slot_index, size_t hash)
   {
     assert(slot_index < capacity() && "slot index out of range");
 #if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (_M_IX86_FP >= 2) || \
@@ -312,7 +312,7 @@ public:
 #endif
   }
 
-  constexpr void set_overflow_mark(size_t hash) noexcept
+  [[msvc::forceinline, gnu::always_inline]] constexpr void set_overflow_mark(size_t hash) noexcept
   {
     if constexpr (is_simd_enabled) {
       overflow() |= static_cast<unsigned char>(1u << (hash % 8));
@@ -331,7 +331,7 @@ public:
     }
   }
 
-  constexpr bool is_overflow_by_hash(size_t hash) const noexcept
+  [[msvc::forceinline, gnu::always_inline]] constexpr bool is_overflow_by_hash(size_t hash) const noexcept
   {
     if constexpr (is_simd_enabled) {
       constexpr unsigned char shift[] = { 1, 2, 4, 8, 16, 32, 64, 128 };
@@ -421,7 +421,7 @@ public:
     return curr->occupied_mask() & ~(static_cast<int>(curr == sentinel_group) << (capacity() - 1));
   }
 
-  constexpr int available_mask() const
+  [[msvc::forceinline, gnu::always_inline]] constexpr int available_mask() const
   {
     if constexpr (is_simd_enabled) {
       if consteval {

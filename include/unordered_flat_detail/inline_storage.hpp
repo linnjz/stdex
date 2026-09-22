@@ -27,6 +27,10 @@
 #include <new>         // placement new
 #include <type_traits> // std::is_same_v, std::add_pointer_t
 
+#if defined(_MSC_VER)
+#  include <intrin.h> // _mm_prefetch
+#endif
+
 #include "group15.hpp"
 #include "hash_table_iterator.hpp"
 
@@ -425,18 +429,35 @@ struct inline_storage : public Traits
   };
   using prober_type = triangular_probing;
 
+  /// Mirrors boost's prefetch of the element block on a fingerprint hit. The
+  /// intrinsic is never a constant expression, so constant evaluation bails
+  /// out first and the constexpr contract stays intact.
+  static constexpr void prefetch_elements_(value_type const *element_ptr) noexcept
+  {
+    if (std::is_constant_evaluated()) return;
+#if defined(_MSC_VER)
+    _mm_prefetch(static_cast<char const *>(static_cast<void const *>(element_ptr)), _MM_HINT_T0);
+#elif defined(__GNUC__) || defined(__clang__)
+    __builtin_prefetch(element_ptr, 0, 3);
+#endif
+  }
+
   template <class... Args>
-  constexpr iterator emplace_at_available_slot_unchecked_(size_type hash, Args &&...args) noexcept(noexcept(
+  [[msvc::forceinline, gnu::always_inline]] constexpr iterator emplace_at_available_slot_unchecked_(
+      size_type hash, Args &&...args) noexcept(noexcept(
       std::declval<inline_storage &>().construct_element_unchecked_(
           std::declval<value_type *>(),
           std::declval<Args>()...)))
   {
-    for (prober_type prober(group_index_(hash));; prober.next(group_count_mask_)) {
+    value_type *elements_ptr = elements_address_();
+    group_type *groups_ptr   = groups_address_();
+    size_type const mask     = group_count_mask_;
+    for (prober_type prober(group_index_(hash));; prober.next(mask)) {
       size_type position    = prober.position();
-      group_type *group_ptr = groups_address_() + position;
+      group_type *group_ptr = groups_ptr + position;
       if (int avail_mask = group_ptr->available_mask()) [[likely]] {
         unsigned slot_index     = std::countr_zero(static_cast<unsigned>(avail_mask));
-        value_type *element_ptr = elements_address_() + position * group_size_() + slot_index;
+        value_type *element_ptr = elements_ptr + position * group_size_() + slot_index;
         construct_element_unchecked_(element_ptr, std::forward<Args>(args)...);
         group_ptr->set_fingerprint_hash(slot_index, hash);
         return iterator { element_ptr, group_ptr, slot_index };
@@ -447,16 +468,20 @@ struct inline_storage : public Traits
   }
 
   template <class K>
-  constexpr iterator find_fingerprint_slot_unchecked_(K const &key_val, size_type hash) const
+  [[msvc::forceinline, gnu::always_inline]] constexpr iterator find_fingerprint_slot_unchecked_(
+      K const &key_val, size_type hash) const
   {
     value_type *elements_ptr = elements_address_();
+    group_type *groups_ptr   = groups_address_();
+    size_type const mask     = group_count_mask_;
     prober_type prober(group_index_(hash));
     do [[likely]] {
         size_type position  = prober.position();
-        group_type *group_ptr = groups_address_() + position;
+        group_type *group_ptr = groups_ptr + position;
         if (auto fingerprint_mask = group_ptr->fingerprint_mask(hash)) {
           [[assume(elements_ptr != nullptr)]];
           value_type *element_ptr = elements_ptr + position * group_size_();
+          prefetch_elements_(element_ptr);
           do {
             unsigned slot_index = std::countr_zero(static_cast<unsigned>(fingerprint_mask));
             if (key_eq()(key_val, Traits::key_fn(element_ptr[slot_index]))) [[likely]] {
@@ -468,7 +493,7 @@ struct inline_storage : public Traits
         if (!group_ptr->is_overflow_by_hash(hash)) [[likely]] {
           return {};
         }
-    } while (prober.next(group_count_mask_));
+    } while (prober.next(mask));
 
     return {};
   }

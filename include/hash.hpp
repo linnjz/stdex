@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 LinnJz
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,19 +19,28 @@
 #include <algorithm>    // std::copy_n
 #include <array>        // std::array, std::to_array
 #include <bit>          // std::endian, std::byteswap, std::bit_cast
+#include <bitset>
 #include <climits>      // CHAR_BIT
 #include <concepts>     // std::same_as, std::integral, std::floating_point
 #include <cstddef>      // std::size_t, size_t, std::byte, std::to_integer
 #include <cstdint>      // uint64_t, uint32_t, uint8_t
+#include <memory>       // shared_ptr / unique_ptr
+#include <optional>
 #include <ranges>       // std::ranges::contiguous_range, std::ranges::sized_range,
                         // std::ranges::range_value_t, std::ranges::data, std::ranges::size
 #include <span>         // std::span, std::as_bytes
-#include <string_view>  // std::string_view
+#include <string>     
+#include <string_view>
+#include <system_error> // error_code / error_condition
+#include <thread>       // std::thread::id
 #include <type_traits>  // std::remove_cvref_t, std::is_enum_v,
                         // std::is_trivially_copyable_v, std::make_unsigned_t,
                         // std::underlying_type_t, std::conditional_t,
                         // std::remove_cv_t, std::is_same_v
+#include <typeindex>
 #include <utility>      // std::unreachable, std::to_underlying
+#include <variant>
+#include <vector>       // std::vector<bool>
 
 #if defined(_MSC_VER)
 #  include <intrin.h>
@@ -48,7 +57,7 @@
 #  pragma clang diagnostic ignored "-Wattributes"
 #endif
 
-namespace stdex::hash
+namespace stdex
 {
 // clang-format off
 struct standard_t{};
@@ -448,7 +457,227 @@ template <hash_detail::scalar_hashable T, hash_detail::hash_mode Mode = standard
   auto const bytes = hash_detail::little_endian_array(bits);
   return hash_range(bytes, seed, Mode {});
 }
-} // namespace stdex::hash
+
+template<class T>
+struct hasher;
+
+template <hash_detail::scalar_hashable T>
+struct hasher<T>
+{
+  using argument_type = T;
+  using result_type   = size_t;
+
+  [[nodiscard]] static constexpr size_t operator() (T const value) noexcept
+  {
+    return static_cast<size_t>(stdex::hash(value));
+  }
+};
+
+template <>
+struct hasher<std::nullptr_t>
+{
+  using argument_type = std::nullptr_t;
+  using result_type   = size_t;
+
+  [[nodiscard]] static constexpr size_t operator() (std::nullptr_t) noexcept
+  {
+    return static_cast<size_t>(stdex::hash(std::uintptr_t { 0 }));
+  }
+};
+
+template <class T>
+struct hasher<T *>
+{
+  using argument_type = T *;
+  using result_type   = size_t;
+
+  [[nodiscard]] static size_t operator() (T *const ptr) noexcept
+  {
+    auto const address = reinterpret_cast<std::uintptr_t>(ptr);
+    return static_cast<size_t>(stdex::hash(address));
+  }
+};
+
+template <class CharT, class Traits, class Allocator>
+struct hasher<std::basic_string<CharT, Traits, Allocator>>
+{
+  using argument_type = std::basic_string<CharT, Traits, Allocator>;
+  using result_type   = size_t;
+
+  [[nodiscard]] static constexpr size_t operator() (argument_type const &str) noexcept
+  {
+    return static_cast<size_t>(stdex::hash_range(str));
+  }
+};
+
+template <class CharT, class Traits>
+struct hasher<std::basic_string_view<CharT, Traits>>
+{
+  using argument_type = std::basic_string_view<CharT, Traits>;
+  using result_type   = size_t;
+
+  [[nodiscard]] static constexpr size_t operator() (argument_type const &sv) noexcept
+  {
+    return static_cast<size_t>(stdex::hash_range(sv));
+  }
+};
+
+template <class T>
+struct hasher<std::shared_ptr<T>>
+{
+  using argument_type = std::shared_ptr<T>;
+  using result_type   = size_t;
+
+  [[nodiscard]] static size_t operator() (argument_type const &ptr) noexcept
+  {
+    return hasher<T *> {}(ptr.get());
+  }
+};
+
+template <class T, class Deleter>
+struct hasher<std::unique_ptr<T, Deleter>>
+{
+  using argument_type = std::unique_ptr<T, Deleter>;
+  using result_type   = size_t;
+
+  [[nodiscard]] static constexpr size_t operator() (argument_type const &ptr) noexcept
+  {
+    return hasher<T *> {}(ptr.get());
+  }
+};
+
+template <>
+struct hasher<std::error_code>
+{
+  using argument_type = std::error_code;
+  using result_type   = size_t;
+
+  [[nodiscard]] static size_t operator() (argument_type const &ec) noexcept
+  {
+    return static_cast<size_t>(stdex::hash(ec.value()));
+  }
+};
+
+template <>
+struct hasher<std::error_condition>
+{
+  using argument_type = std::error_condition;
+  using result_type   = size_t;
+
+  [[nodiscard]] static size_t operator() (argument_type const &ec) noexcept
+  {
+    return static_cast<size_t>(stdex::hash(ec.value()));
+  }
+};
+
+template <std::size_t N>
+struct hasher<std::bitset<N>>
+{
+  using argument_type = std::bitset<N>;
+  using result_type   = size_t;
+
+[[nodiscard]] static constexpr size_t operator() (argument_type const &bs) noexcept
+  {
+    if constexpr (N <= 64) {
+      return static_cast<size_t>(stdex::hash(static_cast<std::uint64_t>(bs.to_ullong())));
+    } else {
+      constexpr std::size_t chunk_count = (N + 63) / 64;
+      std::array<std::uint64_t, chunk_count> chunks {};
+      for (std::size_t i = 0; i < N; ++i) {
+        chunks[i / 64] |= static_cast<std::uint64_t>(bs[i]) << (i % 64);
+      }
+      return static_cast<size_t>(stdex::hash_range(chunks));
+    }
+  }
+};
+
+template <>
+struct hasher<std::type_index>
+{
+  using argument_type = std::type_index;
+  using result_type   = size_t;
+
+  [[nodiscard]] static size_t operator() (argument_type const &ti) noexcept
+  {
+    return static_cast<size_t>(stdex::hash(static_cast<std::uint64_t>(ti.hash_code())));
+  }
+};
+
+template <>
+struct hasher<std::thread::id>
+{
+  using argument_type = std::thread::id;
+  using result_type   = size_t;
+
+  [[nodiscard]] static size_t operator() (argument_type const &id) noexcept
+  {
+    return static_cast<size_t>(stdex::hash_bytes<std::byte>(&id, sizeof(id)));
+  }
+};
+
+template <class T>
+struct hasher<std::optional<T>>
+{
+  using argument_type = std::optional<T>;
+  using result_type   = size_t;
+
+  [[nodiscard]] static constexpr size_t operator() (argument_type const &opt) noexcept
+  {
+    if (!opt.has_value()) {
+      return static_cast<size_t>(stdex::hash(std::uint8_t { 0 }));
+    }
+    return static_cast<size_t>(stdex::hash(std::uint8_t { 1 }) ^ hasher<T> {}(*opt));
+  }
+};
+
+template <>
+struct hasher<std::monostate>
+{
+  using argument_type = std::monostate;
+  using result_type   = size_t;
+
+  [[nodiscard]] static constexpr size_t operator() (std::monostate) noexcept
+  {
+    return static_cast<size_t>(stdex::hash(std::uint8_t { 0 }));
+  }
+};
+
+template <class... Ts>
+struct hasher<std::variant<Ts...>>
+{
+  using argument_type = std::variant<Ts...>;
+  using result_type   = size_t;
+
+  [[nodiscard]] static constexpr size_t operator() (argument_type const &v) noexcept
+  {
+    auto const tag = static_cast<std::uint64_t>(v.index());
+    if (v.valueless_by_exception()) {
+      return static_cast<size_t>(stdex::hash(tag));
+    }
+    auto const value = std::visit([]<class U>(U const &item) -> std::uint64_t
+    {
+      return hasher<std::remove_cvref_t<U>> {}(item);
+    }, v);
+    return static_cast<size_t>(stdex::hash(tag) ^ value);
+  }
+};
+
+template <>
+struct hasher<std::vector<bool>>
+{
+  using argument_type = std::vector<bool>;
+  using result_type   = size_t;
+
+  [[nodiscard]] static constexpr size_t operator() (argument_type const &vb) noexcept
+  {
+    std::vector<std::uint8_t> bytes((vb.size() + 7) / 8, 0);
+    for (std::size_t i = 0; i < vb.size(); ++i) {
+      bytes[i >> 3] |= static_cast<std::uint8_t>(static_cast<bool>(vb[i])) << (i & 7U);
+    }
+    return static_cast<size_t>(stdex::hash_range(bytes));
+  }
+};
+} // namespace stdex
 
 #if defined(__GNUC__) || defined(__clang__)
 #  pragma GCC diagnostic pop

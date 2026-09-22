@@ -652,11 +652,15 @@ public:
 
 private:
   template <class... Args>
-  constexpr std::pair<iterator, bool> emplace_with_key_(key_type const &key_val, Args &&...args)
+  [[msvc::forceinline, gnu::always_inline]] constexpr std::pair<iterator, bool> emplace_with_key_(
+      key_type const &key_val, Args &&...args)
   {
     iterator it;
     if (auto hash = hash_function()(key_val); elements_address_() != nullptr) {
-      // Check for duplicates first
+      // Hit path costs exactly one find-equivalent walk: no available-slot
+      // bookkeeping, no overflow writes. Misses pay a second short walk to
+      // the first available slot; single-pass probing regressed Update
+      // (+53% str median over 5 repetitions), so this keeps Boost's tradeoff.
       if (it = find_fingerprint_slot_unchecked_(key_val, hash); it != end()) {
         return { it, false };
       }
@@ -755,13 +759,13 @@ public:
   }
 
 public:
-  [[nodiscard]] constexpr iterator find(key_type const &key_val)
+  [[nodiscard, msvc::forceinline, gnu::always_inline]] constexpr iterator find(key_type const &key_val)
   {
     if (empty()) [[unlikely]] return end();
     return find_fingerprint_slot_unchecked_(key_val, hash_function()(key_val));
   }
 
-  [[nodiscard]] constexpr const_iterator find(key_type const &key_val) const
+  [[nodiscard, msvc::forceinline, gnu::always_inline]] constexpr const_iterator find(key_type const &key_val) const
   {
     if (empty()) [[unlikely]] return end();
     return find_fingerprint_slot_unchecked_(key_val, hash_function()(key_val));
@@ -783,14 +787,14 @@ public:
   [[nodiscard]] constexpr bool contains(key_type const &key_val) const { return find(key_val) != end(); }
 
   template <class K> requires heterogeneous_key<K const &, hasher, key_equal, iterator, const_iterator>
-  [[nodiscard]] constexpr iterator find(K const &key_val)
+  [[nodiscard, msvc::forceinline, gnu::always_inline]] constexpr iterator find(K const &key_val)
   {
     if (empty()) [[unlikely]] return end();
     return find_fingerprint_slot_unchecked_(key_val, hash_function()(key_val));
   }
 
   template <class K> requires heterogeneous_key<K const &, hasher, key_equal, iterator, const_iterator>
-  [[nodiscard]] constexpr const_iterator find(K const &key_val) const
+  [[nodiscard, msvc::forceinline, gnu::always_inline]] constexpr const_iterator find(K const &key_val) const
   {
     if (empty()) [[unlikely]] return end();
     return find_fingerprint_slot_unchecked_(key_val, hash_function()(key_val));
@@ -981,15 +985,10 @@ public:
     auto &val = node.value();
     auto &key = Traits::key_fn(val);
 
-    if (elements_address_() != nullptr) {
-      auto hash = hash_function()(key);
-      if (auto it = find_fingerprint_slot_unchecked_(key, hash); it != end()) {
-        return { it, false, std::move(node) };
-      }
-    }
-
+    // emplace_with_key_ already probes once: on duplicates it returns without
+    // touching val, so the node is still full and goes back intact.
     auto [it, ok] = emplace_with_key_(key, std::move(val));
-    assert(ok && "insert(node_type&&): duplicate check raced with emplace");
+    if (!ok) return { it, false, std::move(node) };
     return { it, true, node_type {} };
   }
 
