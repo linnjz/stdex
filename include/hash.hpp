@@ -52,9 +52,12 @@
 #  endif
 #endif
 
-#if defined(__clang__) || defined(__GNUC__)
+#if defined(__clang__)
 #  pragma clang diagnostic push
 #  pragma clang diagnostic ignored "-Wattributes"
+#elif defined(__GNUC__)
+#  pragma GCC diagnostic push
+#  pragma GCC diagnostic ignored "-Wattributes"
 #endif
 
 namespace stdex
@@ -679,6 +682,8 @@ struct hasher<std::vector<bool>>
 };
 } // namespace stdex
 
-#if defined(__GNUC__) || defined(__clang__)
+#if defined(__clang__)
+#  pragma clang diagnostic pop
+#elif defined(__GNUC__)
 #  pragma GCC diagnostic pop
 #endif
