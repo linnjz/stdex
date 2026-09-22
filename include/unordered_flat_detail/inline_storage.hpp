@@ -456,7 +456,7 @@ struct inline_storage : public Traits
       size_type position    = prober.position();
       group_type *const group_ptr = groups_ptr + position;
       if (int const avail_mask = group_ptr->available_mask()) [[likely]] {
-        unsigned const slot_index     = countr_zero_unchecked_(static_cast<unsigned>(avail_mask));
+        unsigned const slot_index = countr_zero_unchecked_(static_cast<unsigned>(avail_mask));
         [[assume(slot_index < group_type::capacity())]];
         value_type *const element_ptr = elements_ptr + position * group_size_() + slot_index;
         construct_element_unchecked_(element_ptr, std::forward<Args>(args)...);

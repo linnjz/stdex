@@ -16,31 +16,24 @@
 
 #pragma once
 
-#include <algorithm>    // std::copy_n
-#include <array>        // std::array, std::to_array
-#include <bit>          // std::endian, std::byteswap, std::bit_cast
-#include <bitset>
-#include <climits>      // CHAR_BIT
-#include <concepts>     // std::same_as, std::integral, std::floating_point
-#include <cstddef>      // std::size_t, size_t, std::byte, std::to_integer
-#include <cstdint>      // uint64_t, uint32_t, uint8_t
-#include <memory>       // shared_ptr / unique_ptr
-#include <optional>
-#include <ranges>       // std::ranges::contiguous_range, std::ranges::sized_range,
-                        // std::ranges::range_value_t, std::ranges::data, std::ranges::size
-#include <span>         // std::span, std::as_bytes
-#include <string>     
+#include <algorithm> // std::copy_n
+#include <array>     // std::array, std::to_array
+#include <bit>       // std::endian, std::byteswap, std::bit_cast
+#include <climits>   // CHAR_BIT
+#include <concepts>  // std::same_as, std::integral, std::floating_point
+#include <cstddef>   // std::size_t, size_t, std::byte, std::to_integer
+#include <cstdint>   // uint64_t, uint32_t, uint8_t
+#include <memory>    // std::shared_ptr, std::unique_ptr
+#include <ranges>    // std::ranges::contiguous_range, std::ranges::sized_range,
+                     // std::ranges::range_value_t, std::ranges::data, std::ranges::size
+#include <span>      // std::span, std::as_bytes
+#include <string>
 #include <string_view>
-#include <system_error> // error_code / error_condition
-#include <thread>       // std::thread::id
-#include <type_traits>  // std::remove_cvref_t, std::is_enum_v,
-                        // std::is_trivially_copyable_v, std::make_unsigned_t,
-                        // std::underlying_type_t, std::conditional_t,
-                        // std::remove_cv_t, std::is_same_v
-#include <typeindex>
-#include <utility>      // std::unreachable, std::to_underlying
-#include <variant>
-#include <vector>       // std::vector<bool>
+#include <type_traits> // std::remove_cvref_t, std::is_enum_v,
+                       // std::is_trivially_copyable_v, std::make_unsigned_t,
+                       // std::underlying_type_t, std::conditional_t,
+                       // std::remove_cv_t, std::is_same_v
+#include <utility>     // std::unreachable, std::to_underlying
 
 #if defined(_MSC_VER)
 #  include <intrin.h>
@@ -72,14 +65,14 @@ inline constexpr micro_t micro {};
 inline constexpr nano_t nano {};
 // clang-format on
 
-namespace hash_detail
-{
 template <class T>
 concept hash_mode =
     std::same_as<std::remove_cvref_t<T>, standard_t> ||
     std::same_as<std::remove_cvref_t<T>, micro_t> ||
     std::same_as<std::remove_cvref_t<T>, nano_t>;
 
+namespace hash_detail
+{
 template <hash_mode Mode>
 struct mode_traits;
 
@@ -192,7 +185,10 @@ struct uint128_t
   friend constexpr bool operator== (uint128_t, uint128_t) noexcept = default;
 };
 
-[[nodiscard, msvc::forceinline, gnu::always_inline]] constexpr uint128_t umul128_portable(uint64_t const lhs, uint64_t const rhs) noexcept
+/*
+// Although this version is logically clear, it generates a relatively large number of instructions, so it will not be adopted.
+[[nodiscard, msvc::forceinline, gnu::always_inline]] 
+constexpr uint128_t umul128_portable(uint64_t const lhs, uint64_t const rhs) noexcept
 {
   uint64_t const lhs_low  = static_cast<uint32_t>(lhs);
   uint64_t const lhs_high = lhs >> 32U;
@@ -208,6 +204,38 @@ struct uint128_t
   uint64_t const low          = carry_base + (middle2 << 32U);
   uint64_t const carry2       = low < carry_base ? 1U : 0U;
   uint64_t const high         = high_product + (middle1 >> 32U) + (middle2 >> 32U) + carry1 + carry2;
+  return { low, high };
+}
+*/
+
+[[nodiscard, msvc::forceinline, gnu::always_inline]]
+constexpr uint128_t umul128_portable(uint64_t const lhs, uint64_t const rhs) noexcept
+{
+  // Split into 32-bit half-words: x = x_low + x_high * 2^32
+  uint64_t const lhs_low  = static_cast<uint32_t>(lhs);
+  uint64_t const lhs_high = lhs >> 32U;
+  uint64_t const rhs_low  = static_cast<uint32_t>(rhs);
+  uint64_t const rhs_high = rhs >> 32U;
+
+  // Four 32x32 -> 64 partial products
+  uint64_t const low_product  = lhs_low * rhs_low;   // Contributes to bits [0, 64)
+  uint64_t const cross1       = lhs_low * rhs_high;  // Contributes to bits [32, 96)
+  uint64_t const cross2       = lhs_high * rhs_low;  // Contributes to bits [32, 96)
+  uint64_t const high_product = lhs_high * rhs_high; // Contributes to bits [64, 128)
+
+  // Start the high 64 bits from high_product, then accumulate the high 32 bits of the cross terms.
+  uint64_t high = high_product;
+  high += cross1 >> 32U;
+  high += cross2 >> 32U;
+
+  // Start the low 64 bits from low_product, and add in the low 32 bits of the cross terms shifted left by 32.
+  // The middle carry is carried naturally by a 64-bit temporary:
+  // the part of middle above 2^32 is the carry.
+  uint64_t const middle = (low_product >> 32U) + static_cast<uint32_t>(cross1) + static_cast<uint32_t>(cross2);
+
+  uint64_t const low = (middle << 32U) + static_cast<uint32_t>(low_product);
+  high += middle >> 32U;
+
   return { low, high };
 }
 
@@ -272,6 +300,18 @@ struct uint128_t
   rhs                = product.high;
 }
 
+template <scalar_hashable T>
+[[nodiscard]] constexpr unsigned_equivalent_t<T> to_unsigned_bits(T const value) noexcept
+{
+  if constexpr (std::floating_point<std::remove_cv_t<T>>) {
+    return std::bit_cast<unsigned_equivalent_t<T>>(value);
+  } else if constexpr (std::is_enum_v<std::remove_cv_t<T>>) {
+    return static_cast<unsigned_equivalent_t<T>>(std::to_underlying(value));
+  } else {
+    return static_cast<unsigned_equivalent_t<T>>(value);
+  }
+}
+
 template <byte_like T>
 [[nodiscard]] constexpr uint8_t byte_value(T const value) noexcept
 {
@@ -323,7 +363,7 @@ template <std::unsigned_integral UInt>
   }
 }
 
-template <byte_like Byte, hash_detail::hash_mode Mode>
+template <byte_like Byte, hash_mode Mode>
 [[nodiscard]] constexpr uint64_t hash_bytes_impl(Mode, std::span<Byte const> const input, uint64_t seed, std::array<uint64_t, 8> const &secret) noexcept
 {
   size_t const length = input.size();
@@ -402,94 +442,121 @@ template <byte_like Byte, hash_detail::hash_mode Mode>
 }
 } // namespace hash_detail
 
-template <hash_detail::byte_like Byte, hash_detail::hash_mode Mode = standard_t>
-[[nodiscard]] constexpr uint64_t hash_bytes(std::span<Byte const> const input, uint64_t const seed = 0, Mode = {}) noexcept
+template <hash_detail::byte_like Byte, hash_mode Mode = standard_t>
+[[nodiscard]] constexpr uint64_t hash_bytes(std::span<Byte const> const input, uint64_t const seed = 0) noexcept
 {
   [[assume(input.data() != nullptr)]];
   return hash_detail::hash_bytes_impl(Mode {}, input, seed, hash_detail::default_secret);
 }
 
-template <hash_detail::byte_like Byte, hash_detail::hash_mode Mode = standard_t>
-[[nodiscard]] constexpr uint64_t hash_bytes(std::span<Byte const> const input, uint64_t const seed, std::array<uint64_t, 8> const &secret, Mode = {}) noexcept
+template <hash_detail::byte_like Byte, hash_mode Mode = standard_t>
+[[nodiscard]] constexpr uint64_t hash_bytes(std::span<Byte const> const input, uint64_t const seed, std::array<uint64_t, 8> const &secret) noexcept
 {
   [[assume(input.data() != nullptr)]];
   return hash_detail::hash_bytes_impl(Mode {}, input, seed, secret);
 }
 
-template <hash_detail::byte_like Byte, hash_detail::hash_mode Mode = standard_t>
-[[nodiscard]] constexpr uint64_t hash_bytes(void const *const data, size_t const size, uint64_t const seed = 0, Mode = {}) noexcept
+template <hash_mode Mode = standard_t>
+[[nodiscard]] constexpr uint64_t hash_bytes(void const *const data, size_t const size, uint64_t const seed = 0) noexcept
 {
   [[assume(data != nullptr)]];
-  return hash_bytes(std::span<std::byte const> { static_cast<std::byte const *>(data), size }, seed, Mode {});
+  return hash_bytes<std::byte, Mode>(std::span<std::byte const> { static_cast<std::byte const *>(data), size }, seed);
 }
 
-template <hash_detail::contiguous_byte_range Range, hash_detail::hash_mode Mode = standard_t>
-[[nodiscard]] constexpr uint64_t hash_range(Range const &range, uint64_t const seed = 0, Mode = {}) noexcept
+template <hash_detail::contiguous_byte_range Range, hash_mode Mode = standard_t>
+[[nodiscard]] constexpr uint64_t hash_range(Range const &range, uint64_t seed = 0) noexcept
 {
   using byte_type = std::remove_cv_t<std::ranges::range_value_t<Range>>;
-  return hash_bytes(std::span<byte_type const> { std::ranges::data(range), std::ranges::size(range) }, seed, Mode {});
+  return hash_bytes<byte_type, Mode>(std::span<byte_type const> { std::ranges::data(range), std::ranges::size(range) }, seed);
 }
 
-template <hash_detail::contiguous_object_range Range, hash_detail::hash_mode Mode = standard_t>
-[[nodiscard]] constexpr uint64_t hash_range(Range const &range, uint64_t const seed = 0, Mode = {}) noexcept
+template <hash_detail::contiguous_object_range Range, hash_mode Mode = standard_t>
+[[nodiscard]] constexpr uint64_t hash_range(Range const &range, uint64_t seed = 0) noexcept
 {
   using value_type   = std::remove_cv_t<std::ranges::range_value_t<Range>>;
   auto const objects = std::span<value_type const> { std::ranges::data(range), std::ranges::size(range) };
-  return hash_bytes(std::as_bytes(objects), seed, Mode {});
+  return hash_bytes<std::byte, Mode>(std::as_bytes(objects), seed);
 }
 
-template <hash_detail::hash_mode Mode = standard_t>
-[[nodiscard]] constexpr uint64_t hash(std::string_view const text, uint64_t const seed = 0) noexcept
+template <hash_mode Mode = standard_t>
+[[nodiscard]] constexpr uint64_t hash_value(std::string_view text, uint64_t seed = 0) noexcept
 {
-  return hash_bytes(std::span<char const> { text.data(), text.size() }, seed, Mode {});
+  return hash_bytes<char, Mode>(std::span<char const> { text.data(), text.size() }, seed);
 }
 
-template <hash_detail::scalar_hashable T, hash_detail::hash_mode Mode = standard_t>
-[[nodiscard]] constexpr uint64_t hash(T const value, uint64_t const seed = 0, Mode = {}) noexcept
+template <hash_detail::scalar_hashable T, hash_mode Mode = standard_t>
+[[nodiscard]] constexpr uint64_t hash_value(T const value, uint64_t const seed = 0) noexcept
 {
-  using clean_type    = std::remove_cv_t<T>;
-  using unsigned_type = hash_detail::unsigned_equivalent_t<clean_type>;
-  unsigned_type bits {};
-  if constexpr (std::floating_point<clean_type>) {
-    bits = std::bit_cast<unsigned_type>(value);
-  } else if constexpr (std::is_enum_v<clean_type>) {
-    bits = static_cast<unsigned_type>(std::to_underlying(value));
-  } else {
-    bits = static_cast<unsigned_type>(value);
-  }
-  auto const bytes = hash_detail::little_endian_array(bits);
-  return hash_range(bytes, seed, Mode {});
+  auto const bytes = hash_detail::little_endian_array(hash_detail::to_unsigned_bits(value));
+  using byte_type  = std::remove_cv_t<decltype(bytes)>;
+  return hash_range<byte_type, Mode>(bytes, seed);
 }
 
-template<class T>
-struct hasher;
+template <class T>
+struct hash;
 
 template <hash_detail::scalar_hashable T>
-struct hasher<T>
+struct hash<T>
 {
   using argument_type = T;
   using result_type   = size_t;
 
-  [[nodiscard]] static constexpr size_t operator() (T const value) noexcept
+  [[nodiscard]] static constexpr size_t operator() (argument_type value) noexcept
+  requires (hash_detail::scalar_hashable<T>)
   {
-    return static_cast<size_t>(stdex::hash(value));
+    if constexpr (sizeof(void *) == 8) {
+      return hash_detail::mix(hash_detail::to_unsigned_bits(static_cast<uint64_t>(value)), 0x9E'37'79'B9'7F'4A'7C'15ull);
+    } else {
+      uint64_t product = hash_detail::to_unsigned_bits(static_cast<uint64_t>(value)) * 0xE8'17'FB'2Du;
+#if defined(__MSVC_RUNTIME_CHECKS)
+      return static_cast<uint32_t>(product & UINT32_MAX) ^ static_cast<uint32_t>(product >> 32);
+#else
+      return static_cast<uint32_t>(product) ^ static_cast<uint32_t>(product >> 32);
+#endif
+    }
+  }
+};
+
+template <class CharT, class Allocator>
+struct hash<std::basic_string<CharT, std::char_traits<CharT>, Allocator>>
+{
+  using argument_type = std::basic_string<CharT, std::char_traits<CharT>, Allocator>;
+  using result_type   = size_t;
+
+  template <hash_mode Mode = standard_t>
+  [[nodiscard]] static constexpr size_t operator() (argument_type const &str, uint64_t seed = 0) noexcept
+  {
+    return stdex::hash_range<argument_type, Mode>(str, seed);
+  }
+};
+
+template <class CharT>
+struct hash<std::basic_string_view<CharT, std::char_traits<CharT>>>
+{
+  using argument_type = std::basic_string_view<CharT, std::char_traits<CharT>>;
+  using result_type   = size_t;
+
+  template <hash_mode Mode = standard_t>
+  [[nodiscard]] static constexpr size_t operator() (argument_type sv, uint64_t seed = 0) noexcept
+  {
+    return stdex::hash_range<argument_type, Mode>(sv, seed);
   }
 };
 
 template <>
-struct hasher<std::nullptr_t>
+struct hash<std::nullptr_t>
 {
   using argument_type = std::nullptr_t;
   using result_type   = size_t;
 
   [[nodiscard]] static constexpr size_t operator() (std::nullptr_t) noexcept
   {
-    return static_cast<size_t>(stdex::hash(std::uintptr_t { 0 }));
+    return hash<std::uintptr_t> {}(0);
   }
 };
 
 template <class T>
-struct hasher<T *>
+struct hash<T *>
 {
   using argument_type = T *;
   using result_type   = size_t;
@@ -497,187 +564,31 @@ struct hasher<T *>
   [[nodiscard]] static size_t operator() (T *const ptr) noexcept
   {
     auto const address = reinterpret_cast<std::uintptr_t>(ptr);
-    return static_cast<size_t>(stdex::hash(address));
-  }
-};
-
-template <class CharT, class Traits, class Allocator>
-struct hasher<std::basic_string<CharT, Traits, Allocator>>
-{
-  using argument_type = std::basic_string<CharT, Traits, Allocator>;
-  using result_type   = size_t;
-
-  [[nodiscard]] static constexpr size_t operator() (argument_type const &str) noexcept
-  {
-    return static_cast<size_t>(stdex::hash_range(str));
-  }
-};
-
-template <class CharT, class Traits>
-struct hasher<std::basic_string_view<CharT, Traits>>
-{
-  using argument_type = std::basic_string_view<CharT, Traits>;
-  using result_type   = size_t;
-
-  [[nodiscard]] static constexpr size_t operator() (argument_type const &sv) noexcept
-  {
-    return static_cast<size_t>(stdex::hash_range(sv));
+    return hash<std::uintptr_t> {}(address);
   }
 };
 
 template <class T>
-struct hasher<std::shared_ptr<T>>
+struct hash<std::shared_ptr<T>>
 {
   using argument_type = std::shared_ptr<T>;
   using result_type   = size_t;
 
   [[nodiscard]] static size_t operator() (argument_type const &ptr) noexcept
   {
-    return hasher<T *> {}(ptr.get());
+    return hash<T *> {}(ptr.get());
   }
 };
 
 template <class T, class Deleter>
-struct hasher<std::unique_ptr<T, Deleter>>
+struct hash<std::unique_ptr<T, Deleter>>
 {
   using argument_type = std::unique_ptr<T, Deleter>;
   using result_type   = size_t;
 
-  [[nodiscard]] static constexpr size_t operator() (argument_type const &ptr) noexcept
+  [[nodiscard]] static size_t operator() (argument_type const &ptr) noexcept
   {
-    return hasher<T *> {}(ptr.get());
-  }
-};
-
-template <>
-struct hasher<std::error_code>
-{
-  using argument_type = std::error_code;
-  using result_type   = size_t;
-
-  [[nodiscard]] static size_t operator() (argument_type const &ec) noexcept
-  {
-    return static_cast<size_t>(stdex::hash(ec.value()));
-  }
-};
-
-template <>
-struct hasher<std::error_condition>
-{
-  using argument_type = std::error_condition;
-  using result_type   = size_t;
-
-  [[nodiscard]] static size_t operator() (argument_type const &ec) noexcept
-  {
-    return static_cast<size_t>(stdex::hash(ec.value()));
-  }
-};
-
-template <std::size_t N>
-struct hasher<std::bitset<N>>
-{
-  using argument_type = std::bitset<N>;
-  using result_type   = size_t;
-
-[[nodiscard]] static constexpr size_t operator() (argument_type const &bs) noexcept
-  {
-    if constexpr (N <= 64) {
-      return static_cast<size_t>(stdex::hash(static_cast<std::uint64_t>(bs.to_ullong())));
-    } else {
-      constexpr std::size_t chunk_count = (N + 63) / 64;
-      std::array<std::uint64_t, chunk_count> chunks {};
-      for (std::size_t i = 0; i < N; ++i) {
-        chunks[i / 64] |= static_cast<std::uint64_t>(bs[i]) << (i % 64);
-      }
-      return static_cast<size_t>(stdex::hash_range(chunks));
-    }
-  }
-};
-
-template <>
-struct hasher<std::type_index>
-{
-  using argument_type = std::type_index;
-  using result_type   = size_t;
-
-  [[nodiscard]] static size_t operator() (argument_type const &ti) noexcept
-  {
-    return static_cast<size_t>(stdex::hash(static_cast<std::uint64_t>(ti.hash_code())));
-  }
-};
-
-template <>
-struct hasher<std::thread::id>
-{
-  using argument_type = std::thread::id;
-  using result_type   = size_t;
-
-  [[nodiscard]] static size_t operator() (argument_type const &id) noexcept
-  {
-    return static_cast<size_t>(stdex::hash_bytes<std::byte>(&id, sizeof(id)));
-  }
-};
-
-template <class T>
-struct hasher<std::optional<T>>
-{
-  using argument_type = std::optional<T>;
-  using result_type   = size_t;
-
-  [[nodiscard]] static constexpr size_t operator() (argument_type const &opt) noexcept
-  {
-    if (!opt.has_value()) {
-      return static_cast<size_t>(stdex::hash(std::uint8_t { 0 }));
-    }
-    return static_cast<size_t>(stdex::hash(std::uint8_t { 1 }) ^ hasher<T> {}(*opt));
-  }
-};
-
-template <>
-struct hasher<std::monostate>
-{
-  using argument_type = std::monostate;
-  using result_type   = size_t;
-
-  [[nodiscard]] static constexpr size_t operator() (std::monostate) noexcept
-  {
-    return static_cast<size_t>(stdex::hash(std::uint8_t { 0 }));
-  }
-};
-
-template <class... Ts>
-struct hasher<std::variant<Ts...>>
-{
-  using argument_type = std::variant<Ts...>;
-  using result_type   = size_t;
-
-  [[nodiscard]] static constexpr size_t operator() (argument_type const &v) noexcept
-  {
-    auto const tag = static_cast<std::uint64_t>(v.index());
-    if (v.valueless_by_exception()) {
-      return static_cast<size_t>(stdex::hash(tag));
-    }
-    auto const value = std::visit([]<class U>(U const &item) -> std::uint64_t
-    {
-      return hasher<std::remove_cvref_t<U>> {}(item);
-    }, v);
-    return static_cast<size_t>(stdex::hash(tag) ^ value);
-  }
-};
-
-template <>
-struct hasher<std::vector<bool>>
-{
-  using argument_type = std::vector<bool>;
-  using result_type   = size_t;
-
-  [[nodiscard]] static constexpr size_t operator() (argument_type const &vb) noexcept
-  {
-    std::vector<std::uint8_t> bytes((vb.size() + 7) / 8, 0);
-    for (std::size_t i = 0; i < vb.size(); ++i) {
-      bytes[i >> 3] |= static_cast<std::uint8_t>(static_cast<bool>(vb[i])) << (i & 7U);
-    }
-    return static_cast<size_t>(stdex::hash_range(bytes));
+    return hash<T *> {}(ptr.get());
   }
 };
 } // namespace stdex
