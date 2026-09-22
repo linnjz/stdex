@@ -26,6 +26,14 @@
 #  include <arm_neon.h>
 #endif
 
+#if defined(__clang__)
+#  pragma clang diagnostic push
+#  pragma clang diagnostic ignored "-Wattributes"
+#elif defined(__GNUC__)
+#  pragma GCC diagnostic push
+#  pragma GCC diagnostic ignored "-Wattributes"
+#endif
+
 namespace stdex::unordered_flat_detail
 {
 /*
@@ -46,7 +54,7 @@ public:
 #else
   static constexpr bool is_simd_enabled = false;
 #endif
-
+  /*
   static constexpr group15 make_dummy_group() noexcept
   {
     group15 g {};
@@ -64,59 +72,9 @@ public:
 
     return g;
   }
+  */
 
 private:
-  /// Transient occupancy mark for slots whose fingerprint is not yet known.
-  /// It exists only while a table is built into a temporary storage, so the
-  /// storage's destructor can tell which slots hold live objects; it must be non-zero
-  /// and differ from the sentinel mark.  It is never a valid table state: the
-  /// caller must overwrite the whole group with real data (copying the source
-  /// groups does exactly that) before the storage is read.
-  static constexpr unsigned char slot_occupied_mark = 2;
-
-  /// Marks a slot occupied without knowing its hash.  Used while a table is
-  /// built into a temporary storage so the storage's backout can find the
-  /// live slots.  This is occupancy only, not a fingerprint: the caller must
-  /// overwrite the whole group with real data (copying the source groups does
-  /// that) before the storage is read, otherwise find would miss the element.
-  constexpr void set_occupied_mask(size_t slot_index) noexcept
-  {
-    assert(slot_index < capacity() && "slot index out of range");
-#if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (_M_IX86_FP >= 2) || \
-    ((defined(__ARM_NEON__) || defined(__ARM_NEON)) && !defined(__ARM_BIG_ENDIAN))
-    slot_fp_bytes_[slot_index] = slot_occupied_mark;
-#else
-    set_fingerprint_hash_impl(slot_index, slot_occupied_mark);
-#endif
-  }
-
-  /// Byte-wise equality, used by debug assertions to prove a group was fully
-  /// overwritten with real data instead of keeping transient occupancy marks.
-  constexpr bool equals(group15 const &other) const noexcept
-  {
-    if constexpr (is_simd_enabled) {
-      for (size_t i = 0; i < sizeof(slot_fp_bytes_) / sizeof(slot_fp_bytes_[0]); ++i) {
-        if (slot_fp_bytes_[i] != other.slot_fp_bytes_[i]) return false;
-      }
-      return true;
-    } else {
-      return slot_fp_words_[0] == other.slot_fp_words_[0] && slot_fp_words_[1] == other.slot_fp_words_[1];
-    }
-  }
-
-public:
-  class attorney
-  {
-    // clang-format off
-    template <class, class, class, class> friend class hash_table;
-    static constexpr void set_occupied_mask(group15 &g, size_t i) noexcept { g.set_occupied_mask(i); }
-    static constexpr bool equals(group15 const &a, group15 const &b) noexcept { return a.equals(b); }
-
-    // clang-format on
-  };
-
-private:
-  // clang-format off
 #if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (_M_IX86_FP >= 2)
   static constexpr uint32_t fingerprint_table[] = {
     0x08080808u,0x09090909u,0x02020202u,0x03030303u,0x04040404u,0x05050505u,
@@ -198,12 +156,11 @@ private:
     return fingerprint_table[static_cast<unsigned char>(hash)];
   }
 #endif
-  // clang-format on
 
 public:
   static constexpr size_t capacity() noexcept { return 15; }
 
-  [[msvc::forceinline, gnu::always_inline]] constexpr int fingerprint_mask(size_t hash) const
+  [[msvc::forceinline, gnu::always_inline]] constexpr int fingerprint_mask(size_t hash) const noexcept
   {
     if constexpr (is_simd_enabled) {
       if consteval {
@@ -272,7 +229,7 @@ public:
     }
   }
 
-  constexpr void reset(size_t slot_index)
+  constexpr void reset(size_t slot_index) noexcept
   {
     assert(slot_index < capacity() && "slot index out of range");
 #if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (_M_IX86_FP >= 2) || \
@@ -283,7 +240,7 @@ public:
 #endif
   }
 
-  static constexpr void reset(unsigned char *byte)
+  static constexpr void reset(unsigned char *byte) noexcept
   {
     if constexpr (is_simd_enabled) {
       *byte = slot_available_mark;
@@ -301,7 +258,7 @@ public:
     }
   }
 
-  [[msvc::forceinline, gnu::always_inline]] constexpr void set_fingerprint_hash(size_t slot_index, size_t hash)
+  [[msvc::forceinline, gnu::always_inline]] constexpr void set_fingerprint_hash(size_t slot_index, size_t hash) noexcept
   {
     assert(slot_index < capacity() && "slot index out of range");
 #if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (_M_IX86_FP >= 2) || \
@@ -360,6 +317,7 @@ public:
     }
   }
 
+  /*
   static bool is_overflow(unsigned char const *byte)
   {
     size_t pos = reinterpret_cast<uintptr_t>(byte) % sizeof(group15);
@@ -372,6 +330,7 @@ public:
       return ptr->is_overflow_by_hash(static_cast<size_t>(y));
     }
   }
+  */
 
   constexpr void set_sentinel_mark() noexcept
   {
@@ -383,7 +342,7 @@ public:
 #endif
   }
 
-  constexpr bool is_sentinel_by_slot(size_t slot_index) const
+  constexpr bool is_sentinel_by_slot(size_t slot_index) const noexcept
   {
     assert(slot_index < capacity() && "slot index out of range");
     if constexpr (is_simd_enabled) {
@@ -395,12 +354,14 @@ public:
     }
   }
 
+  /*
   static constexpr bool is_sentinel(unsigned char const *byte)
   {
     return *byte == slot_sentinel_mark;
   }
+  */
 
-  constexpr bool is_occupied_by_slot(size_t slot_index) const
+  constexpr bool is_occupied_by_slot(size_t slot_index) const noexcept
   {
     assert(slot_index < capacity() && "slot index out of range");
     if constexpr (is_simd_enabled) {
@@ -410,18 +371,20 @@ public:
     }
   }
 
+  /*
   static constexpr bool is_occupied(unsigned char const *byte)
   {
     return *byte != slot_available_mark;
   }
+  */
 
-  static constexpr int occupied_mask_excluding_sentinel(group15 const *curr, group15 const *sentinel_group)
+  static constexpr int occupied_mask_excluding_sentinel(group15 const *curr, group15 const *sentinel_group) noexcept
   {
-    ///< excluding the sentinel
+    // excluding the sentinel
     return curr->occupied_mask() & ~(static_cast<int>(curr == sentinel_group) << (capacity() - 1));
   }
 
-  [[msvc::forceinline, gnu::always_inline]] constexpr int available_mask() const
+  [[msvc::forceinline, gnu::always_inline]] constexpr int available_mask() const noexcept
   {
     if constexpr (is_simd_enabled) {
       if consteval {
@@ -445,7 +408,7 @@ public:
     }
   }
 
-  constexpr int occupied_mask() const
+  constexpr int occupied_mask() const noexcept
   {
     if constexpr (is_simd_enabled) {
       if consteval {
@@ -483,12 +446,10 @@ private:
 
   static int simde_mm_movemask_epi8(uint8x16_t input_vec)
   {
-    // clang-format off
     static constexpr uint8_t bit_weights[16] = {
       1 << 0, 1 << 1, 1 << 2, 1 << 3, 1 << 4, 1 << 5, 1 << 6, 1 << 7,
       1 << 0, 1 << 1, 1 << 2, 1 << 3, 1 << 4, 1 << 5, 1 << 6, 1 << 7,
     };
-    // clang-format on
 
     uint8x16_t weighted_values = vandq_u8(vld1q_u8(bit_weights), input_vec);
 
@@ -568,3 +529,9 @@ private:
   };
 };
 } // namespace stdex::unordered_flat_detail
+
+#if defined(__clang__)
+#  pragma clang diagnostic pop
+#elif defined(__GNUC__)
+#  pragma GCC diagnostic pop
+#endif
