@@ -109,7 +109,7 @@ public:
   {
   }
 
-  constexpr hash_table_iterator(const_iterator_cast_tag, hash_table_iterator<Traits, value_pointer, group_pointer, true> const &other)
+  constexpr hash_table_iterator(const_iterator_cast_tag, hash_table_iterator<Traits, value_pointer, group_pointer, true> const &other) noexcept
       : element_ptr_ { other.element_ptr_ }
       , group_ptr_ { other.group_ptr_ }
       , slot_index_ { other.slot_index_ }
@@ -165,6 +165,7 @@ private:
 
   constexpr reference dereference_() const noexcept
   {
+    assert(element_ptr_ != nullptr && "dereference: iterator must not be end()");
     if constexpr (IsConstant) {
       return Traits::to_const_reference(*element_address_());
     } else {
@@ -176,6 +177,7 @@ private:
 
   constexpr void increment_() noexcept
   {
+    assert(element_ptr_ != nullptr && group_ptr_ != nullptr && "increment: cannot advance end()");
     ++element_ptr_;
     ++slot_index_;
 
@@ -230,9 +232,6 @@ class hash_table_lazy_iterator;
 template <class Traits, class ValuePointer, class GroupPointer, bool IsConstant>
 class hash_table_lazy_iterator<hash_table_iterator<Traits, ValuePointer, GroupPointer, IsConstant>>
 {
-  struct stack_block;
-  struct heap_block;
-
   using iterator       = hash_table_iterator<Traits, ValuePointer, GroupPointer, IsConstant>;
   using const_iterator = hash_table_iterator<Traits, ValuePointer, GroupPointer, true>;
 
@@ -257,7 +256,7 @@ public:
   }
 
 private:
-  constexpr hash_table_lazy_iterator(const_iterator pos)
+  constexpr hash_table_lazy_iterator(const_iterator pos) noexcept
       : pos_(pos) { };
 
   template <class, class, class, class>

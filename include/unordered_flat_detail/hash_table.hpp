@@ -206,6 +206,8 @@ private:
   template <bool Move>
   static constexpr void transfer_same_layout_unchecked_(std::conditional_t<Move, hash_table &, hash_table const &> source, hash_table &dest)
   {
+    assert(source.group_count_() == dest.group_count_() && "same-layout transfer requires equal group counts");
+
     if constexpr (Move) destroy_source_elements_on_exit se { source };
 
     destroy_dest_elements_on_exit de { source, dest };
@@ -244,6 +246,8 @@ private:
   template <bool Move>
   static constexpr void transfer_with_rehash_unchecked_(std::conditional_t<Move, hash_table &, hash_table const &> source, hash_table &dest)
   {
+    assert(dest.size_ == 0 && "rehash transfer destination must be empty");
+
     if constexpr (Move) destroy_source_elements_on_exit e { source };
 
     source.for_each_occupied_slot_unchecked_([&dest](auto *occupied_ptr, auto *, unsigned)
@@ -275,7 +279,7 @@ private:
       transfer_same_layout_unchecked_<Move>(source, dest);
       return true;
     }
-    if (source.size() <= inline_capacity) { // 100% max load
+    if (source.size_ <= inline_capacity) { // 100% max load
       transfer_with_rehash_unchecked_<Move>(source, dest);
       return true;
     }
@@ -284,17 +288,17 @@ private:
 
 public:
   constexpr hash_table(hash_table const &other, allocator_type const &alloc)
-      : base { other.hash_function(), other.key_eq(), alloc }
+      : base { other.hasher_, other.key_eq_, alloc }
   {
     if (other.empty()) [[unlikely]]
       return;
 
     if constexpr (inline_capacity == 0) {
-      allocate_unchecked_(required_capacity_(other.size()));
+      allocate_unchecked_(required_capacity_(other.size_));
       transfer_to_heap_unchecked_<false>(other, *this);
     } else if (!transfer_to_stack_unchecked_<false>(other, *this)) {
       promote_to_heap_();
-      allocate_unchecked_(required_capacity_(other.size()));
+      allocate_unchecked_(required_capacity_(other.size_));
       transfer_with_rehash_unchecked_<false>(other, *this);
     }
   }
@@ -304,31 +308,31 @@ public:
     if (this == std::addressof(other)) [[unlikely]]
       return *this;
 
-    auto hasher = other.hash_function();
-    auto key_eq = other.key_eq();
+    auto hasher = other.hasher_;
+    auto key_eq = other.key_eq_;
 
     if (!empty()) destroy_elements_unchecked_();
 
     std::ranges::swap(this->hasher_, hasher);
     std::ranges::swap(this->key_eq_, key_eq);
 
-    bool const is_propagator = is_pocca_v && get_allocator() != other.get_allocator();
+    bool const is_propagator = is_pocca_v && this->alloc_ != other.alloc_;
     if (is_heap()) {
-      size_type const needed_capacity = required_capacity_(other.size());
+      size_type const needed_capacity = required_capacity_(other.size_);
       bool const is_need_reallocate   = is_propagator || needed_capacity > capacity_unchecked_();
 
       bool is_nullobj = this->heap_.elements_ptr_ == nullptr;
       if (!is_nullobj && is_need_reallocate) deallocate_unchecked_();
-      if (is_propagator) this->alloc_ = other.get_allocator();
+      if (is_propagator) this->alloc_ = other.alloc_;
       if (other.empty()) return *this;
       if (is_nullobj || is_need_reallocate) allocate_unchecked_(needed_capacity);
       
       transfer_to_heap_unchecked_<false>(other, *this);
     } else {
-      if (is_propagator) this->alloc_ = other.get_allocator();
+      if (is_propagator) this->alloc_ = other.alloc_;
       if (other.empty() || transfer_to_stack_unchecked_<false>(other, *this)) return *this;
       promote_to_heap_();
-      allocate_unchecked_(required_capacity_(other.size()));
+      allocate_unchecked_(required_capacity_(other.size_));
       transfer_with_rehash_unchecked_<false>(other, *this);
     }
     return *this;
@@ -337,6 +341,8 @@ public:
 private:
   constexpr void steal_heap_from_(hash_table &other) noexcept
   {
+    assert(is_heap() && other.is_heap() && "steal: both tables must be heap-resident");
+
     this->heap_              = other.heap_;
     this->group_index_shift_ = other.group_index_shift_;
     this->group_count_mask_  = other.group_count_mask_;
@@ -362,10 +368,10 @@ public:
       promote_to_heap_();
     }
 
-    if (allocators_equal_(get_allocator(), other.get_allocator())) {
+    if (allocators_equal_(this->alloc_, other.alloc_)) {
       steal_heap_from_(other);
     } else {
-      allocate_unchecked_(required_capacity_(other.size()));
+      allocate_unchecked_(required_capacity_(other.size_));
       transfer_with_rehash_unchecked_<true>(other, *this);
     }
   }
@@ -412,31 +418,31 @@ public:
     bool const is_this_stack = is_stack(), is_other_stack = other.is_stack();
     if (!is_this_stack && !is_other_stack) {
       if (this->heap_.elements_ptr_ != nullptr) deallocate_unchecked_();
-      if (is_pocma_v || allocators_equal_(get_allocator(), other.get_allocator())) {
+      if (is_pocma_v || allocators_equal_(this->alloc_, other.alloc_)) {
         if constexpr (is_pocma_v) this->alloc_ = std::move(other.alloc_);
         steal_heap_from_(other);
       } else {
-        allocate_unchecked_(required_capacity_(other.size()));
+        allocate_unchecked_(required_capacity_(other.size_));
         if (!other.empty()) transfer_with_rehash_unchecked_<true>(other, *this);
       }
     } else if (is_this_stack) {
       if constexpr (is_pocma_v) this->alloc_ = std::move(other.alloc_);
       if (other.empty() || transfer_to_stack_unchecked_<true>(other, *this)) return *this;
       promote_to_heap_();
-      if (is_pocma_v || allocators_equal_(get_allocator(), other.get_allocator())) {
+      if (is_pocma_v || allocators_equal_(this->alloc_, other.alloc_)) {
         steal_heap_from_(other);
       } else {
-        allocate_unchecked_(required_capacity_(other.size()));
+        allocate_unchecked_(required_capacity_(other.size_));
         if (!other.empty()) transfer_with_rehash_unchecked_<true>(other, *this);
       }
     } else /*!is_this_stack && is_other_stack*/ {
-      bool const is_propagator = is_pocma_v && !allocators_equal_(get_allocator(), other.get_allocator());
-      if (this->max_load_ >= other.size() && !is_propagator) {
+      bool const is_propagator = is_pocma_v && !allocators_equal_(this->alloc_, other.alloc_);
+      if (this->max_load_ >= other.size_ && !is_propagator) {
         if (!other.empty()) transfer_with_rehash_unchecked_<true>(other, *this);
       } else {
         if (this->heap_.elements_ptr_ != nullptr) deallocate_unchecked_();
         if constexpr (is_pocma_v) this->alloc_ = std::move(other.alloc_);
-        allocate_unchecked_(required_capacity_(other.size()));
+        allocate_unchecked_(required_capacity_(other.size_));
         if (!other.empty()) transfer_with_rehash_unchecked_<true>(other, *this);
       }
     }
@@ -472,7 +478,9 @@ private:
 
   constexpr void swap_heap_to_stack_(hash_table &other) noexcept(
       std::is_nothrow_swappable_v<value_type> &&
-      std::is_nothrow_swappable_v<group_type>)
+      std::is_nothrow_swappable_v<group_type> &&
+      (std::is_nothrow_move_constructible_v<value_type> ||
+       std::is_nothrow_copy_constructible_v<value_type>) )
   {
     auto const this_heap  = this->heap_;
     auto const this_shift = this->group_index_shift_;
@@ -581,6 +589,8 @@ private:
 
   static constexpr void force_rehash_(hash_table &source, hash_table &dest)
   {
+    assert(std::addressof(source) != std::addressof(dest) && "force_rehash: source and destination must be distinct objects");
+
     constexpr bool move_path = std::is_nothrow_move_constructible_v<value_type> ||
                                !std::is_copy_constructible_v<value_type>;
 
@@ -589,7 +599,7 @@ private:
     if (!source.empty()) {
       source.for_each_occupied_slot_unchecked_([&](value_type *occupied_ptr, group_type *, unsigned)
       {
-        auto hash = dest.hash_function()(Traits::key_fn(*occupied_ptr));
+        auto hash = dest.hasher_(Traits::key_fn(*occupied_ptr));
         if constexpr (move_path) {
           destroy_element_on_exit e { source, occupied_ptr };
           dest.emplace_at_available_slot_unchecked_(hash, std::move(*occupied_ptr));
@@ -637,11 +647,11 @@ private:
 public:
   constexpr void rehash(size_type count)
   {
-    size_type actual_demand_capacity = required_capacity_(size());
+    size_type actual_demand_capacity = required_capacity_(this->size_);
     if (actual_demand_capacity > count) count = actual_demand_capacity;
     if (count > 0) count = aligned_capacity_(count);
     if (count != capacity_unchecked_()) {
-      hash_table new_storage { get_allocator() };
+      hash_table new_storage { this->alloc_ };
       if constexpr (inline_capacity != 0) new_storage.promote_to_heap_();
       new_storage.allocate_unchecked_(count);
       force_rehash_(*this, new_storage);
@@ -652,32 +662,28 @@ public:
 
 private:
   template <class... Args>
-  [[msvc::forceinline, gnu::always_inline]] constexpr std::pair<iterator, bool> emplace_with_key_(
-      key_type const &key_val, Args &&...args)
+  constexpr std::pair<iterator, bool> emplace_with_key_(key_type const &key_val, Args &&...args)
   {
     iterator it;
-    if (auto hash = hash_function()(key_val); elements_address_() != nullptr) {
-      // Hit path costs exactly one find-equivalent walk: no available-slot
-      // bookkeeping, no overflow writes. Misses pay a second short walk to
-      // the first available slot; single-pass probing regressed Update
-      // (+53% str median over 5 repetitions), so this keeps Boost's tradeoff.
+    if (auto hash = this->hasher_(key_val); elements_address_() != nullptr) [[likely]] {
+      // Check for duplicates first
       if (it = find_fingerprint_slot_unchecked_(key_val, hash); it != end()) {
         return { it, false };
       }
 
-      // Max load reached: stack storage is promoted to heap, or the heap is expanded
-      if (size() >= this->max_load_) {
-        hash_table new_storage { get_allocator() };
+      if (this->size_ < this->max_load_) [[likely]] {
+        it = emplace_at_available_slot_unchecked_(hash, std::forward<Args>(args)...);
+      } else {
+        // Max load reached: stack storage is promoted to heap, or the heap is expanded
+        hash_table new_storage { this->alloc_ };
         if constexpr (inline_capacity != 0) new_storage.promote_to_heap_();
-        new_storage.allocate_unchecked_(required_capacity_for_growth_(size()));
+        new_storage.allocate_unchecked_(required_capacity_for_growth_(this->size_));
 
         it = new_storage.emplace_at_available_slot_unchecked_(hash, std::forward<Args>(args)...);
 
         // Note: force_rehash_ internally handles the case where source is promoted from stack to heap.
         // Do not promote *this early here, otherwise the elements pending migration in stack_ will be lost.
         force_rehash_(*this, new_storage);
-      } else {
-        it = emplace_at_available_slot_unchecked_(hash, std::forward<Args>(args)...);
       }
     } else {
       // elements_address_() == nullptr is true only when using heap storage and it has not been allocated yet
@@ -759,16 +765,16 @@ public:
   }
 
 public:
-  [[nodiscard, msvc::forceinline, gnu::always_inline]] constexpr iterator find(key_type const &key_val)
+  [[nodiscard]] constexpr iterator find(key_type const &key_val)
   {
     if (empty()) [[unlikely]] return end();
-    return find_fingerprint_slot_unchecked_(key_val, hash_function()(key_val));
+    return find_fingerprint_slot_unchecked_(key_val, this->hasher_(key_val));
   }
 
-  [[nodiscard, msvc::forceinline, gnu::always_inline]] constexpr const_iterator find(key_type const &key_val) const
+  [[nodiscard]] constexpr const_iterator find(key_type const &key_val) const
   {
     if (empty()) [[unlikely]] return end();
-    return find_fingerprint_slot_unchecked_(key_val, hash_function()(key_val));
+    return find_fingerprint_slot_unchecked_(key_val, this->hasher_(key_val));
   }
 
   [[nodiscard]] constexpr std::pair<iterator, iterator> equal_range(key_type const &key_val)
@@ -787,17 +793,17 @@ public:
   [[nodiscard]] constexpr bool contains(key_type const &key_val) const { return find(key_val) != end(); }
 
   template <class K> requires heterogeneous_key<K const &, hasher, key_equal, iterator, const_iterator>
-  [[nodiscard, msvc::forceinline, gnu::always_inline]] constexpr iterator find(K const &key_val)
+  [[nodiscard]] constexpr iterator find(K const &key_val)
   {
     if (empty()) [[unlikely]] return end();
-    return find_fingerprint_slot_unchecked_(key_val, hash_function()(key_val));
+    return find_fingerprint_slot_unchecked_(key_val, this->hasher_(key_val));
   }
 
   template <class K> requires heterogeneous_key<K const &, hasher, key_equal, iterator, const_iterator>
-  [[nodiscard, msvc::forceinline, gnu::always_inline]] constexpr const_iterator find(K const &key_val) const
+  [[nodiscard]] constexpr const_iterator find(K const &key_val) const
   {
     if (empty()) [[unlikely]] return end();
-    return find_fingerprint_slot_unchecked_(key_val, hash_function()(key_val));
+    return find_fingerprint_slot_unchecked_(key_val, this->hasher_(key_val));
   }
 
   template <class K> requires heterogeneous_key<K const &, hasher, key_equal, iterator, const_iterator>
@@ -828,6 +834,7 @@ public:
   }
   constexpr lazy_iterator erase(const_iterator position) noexcept
   {
+    assert(position != end() && "erase: position must be dereferenceable (not end())");
     auto element_ptr = position.element_address_();
     auto group_ptr   = position.group_address_();
     destroy_element_unchecked_(element_ptr);
@@ -847,13 +854,13 @@ public:
     }
     return victim;
   }
-  constexpr size_type erase(key_type const& key_val) noexcept
+  constexpr size_type erase(key_type const& key_val)
   {
     auto it = find(key_val);
     return it != end() ? (erase(it), 1) : 0;
   }
   template <class K> requires heterogeneous_key<K, hasher, key_equal, iterator, const_iterator>
-  constexpr size_type erase(K &&key_val) noexcept
+  constexpr size_type erase(K &&key_val)
   {
     auto it = find(key_val);
     return it != end() ? (erase(it), 1) : 0;
@@ -952,9 +959,23 @@ public:
 
     constexpr explicit operator bool() const noexcept { return has_value_; }
 
-    constexpr value_type &value() & noexcept { return value_; }
-    constexpr value_type const &value() const & noexcept { return value_; }
-    constexpr value_type &&value() && noexcept { return std::move(value_); }
+    constexpr value_type &value() & noexcept
+    {
+      assert(has_value_ && "node: empty node has no value");
+      return value_;
+    }
+
+    constexpr value_type const &value() const & noexcept
+    {
+      assert(has_value_ && "node: empty node has no value");
+      return value_;
+    }
+
+    constexpr value_type &&value() && noexcept
+    {
+      assert(has_value_ && "node: empty node has no value");
+      return std::move(value_);
+    }
 
     constexpr void reset() noexcept
     {
@@ -999,6 +1020,7 @@ public:
 
   constexpr node_type extract(const_iterator position)
   {
+    assert(position != end() && "extract: position must be dereferenceable (not end())");
     auto *element_ptr = position.element_address_();
     node_type node { std::move(*element_ptr) };
     erase_on_exit e { *this, position };
@@ -1037,10 +1059,10 @@ public:
   constexpr void merge(hash_table<Traits, H2, KE2, Allocator> &&other) { merge(other); }
 
 public:
-  friend bool operator== (hash_table const &a, hash_table const &b) noexcept
+  friend bool operator== (hash_table const &a, hash_table const &b)
   {
     if (std::addressof(a) == std::addressof(b)) return true;
-    if (a.size() != b.size()) return false;
+    if (a.size_ != b.size_) return false;
     // Fresh heap tables hold null storage; there is nothing to walk when empty.
     if (a.empty()) return true;
 
@@ -1060,7 +1082,7 @@ public:
     }
     return true;
   }
-  friend bool operator!= (hash_table const& a, hash_table const& b) noexcept { return !(a == b); }
+  friend bool operator!= (hash_table const& a, hash_table const& b) { return !(a == b); }
 
   // consteval auto freeze();
 };
