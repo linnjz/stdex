@@ -311,9 +311,34 @@ using UniqueMap = ufd::hash_table<
     std::equal_to<>,
     std::allocator<std::pair<int, std::unique_ptr<int>>>>;
 
+template <size_t N>
+using StdexIMap = ufd::hash_table<
+    ufd::ufmap_traits<int, int, N>,
+    stdex::hasher<int>,
+    std::equal_to<>,
+    std::allocator<std::pair<int, int>>>;
+
+template <size_t N>
+using StdexSMap = ufd::hash_table<
+    ufd::ufmap_traits<std::string, int, N>,
+    stdex::hasher<std::string>,
+    std::equal_to<>,
+    std::allocator<std::pair<std::string, int>>>;
+
+template <size_t N>
+using StdexISet = ufd::hash_table<
+    ufd::ufset_traits<int, N>,
+    stdex::hasher<int>,
+    std::equal_to<>,
+    std::allocator<int>>;
+
 // per hard constraint: set's iterator is const_iterator, map's must differ.
 static_assert(std::is_same_v<ISet<0>::iterator, ISet<0>::const_iterator>);
 static_assert(!std::is_same_v<IMap<0>::iterator, IMap<0>::const_iterator>);
+
+// stdex::hasher satisfies the table's Hasher concept (a static operator() also works when called on an object).
+static_assert(ufd::is_hasher_for<stdex::hasher<int>, int>);
+static_assert(ufd::is_hasher_for<stdex::hasher<std::string>, std::string>);
 
 // ==================================================================
 // 1. Basics: empty / single element / insert / find / count
@@ -1318,15 +1343,15 @@ constexpr bool constexpr_hash_mul()
   std::array<std::byte, 200> buffer {};
   for (std::size_t i = 0; i < buffer.size(); ++i) buffer[i] = static_cast<std::byte>(i * 7u + 1u);
 
-  auto const k1 = stdex::hash::hash<int>(12345);
-  auto const k2 = stdex::hash::hash<int>(54321);
-  auto const standard = stdex::hash::hash_range(buffer);
-  auto const micro    = stdex::hash::hash_range(buffer, 0u, stdex::hash::micro_t {});
-  auto const nano     = stdex::hash::hash_range(buffer, 0u, stdex::hash::nano_t {});
+  auto const k1 = stdex::hash<int>(12345);
+  auto const k2 = stdex::hash<int>(54321);
+  auto const standard = stdex::hash_range(buffer);
+  auto const micro    = stdex::hash_range(buffer, 0u, stdex::micro_t {});
+  auto const nano     = stdex::hash_range(buffer, 0u, stdex::nano_t {});
 
-  auto const product = stdex::hash::hash_detail::umul128(0x0123'4567'89AB'CDEFull, 0xFEDC'BA98'7654'3210ull);
+  auto const product = stdex::hash_detail::umul128(0x0123'4567'89AB'CDEFull, 0xFEDC'BA98'7654'3210ull);
   return k1 != k2 && standard != micro && standard != nano && micro != nano &&
-         product.high == stdex::hash::hash_detail::umulh(0x0123'4567'89AB'CDEFull, 0xFEDC'BA98'7654'3210ull);
+         product.high == stdex::hash_detail::umulh(0x0123'4567'89AB'CDEFull, 0xFEDC'BA98'7654'3210ull);
 }
 
 static_assert(constexpr_stack_access());
@@ -2480,6 +2505,143 @@ void test_const_find_and_node()
 }
 
 // ==================================================================
+// 42. stdex::hasher integration: scalar / range hash paths x heap / stack x public wrapper
+// ==================================================================
+void test_stdex_hasher_integration()
+{
+  SECTION("stdex::hasher integration");
+
+ // hash_function() agrees with a direct call: the table really uses stdex::hasher.
+  {
+    StdexIMap<0> t { stdex::hasher<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, int>> {} };
+    CHECK_EQ(t.hash_function()(42), stdex::hasher<int> {}(42));
+
+    StdexSMap<0> st { stdex::hasher<std::string> {}, std::equal_to<> {},
+                      std::allocator<std::pair<std::string, int>> {} };
+    std::string const hello { "hello" };
+    CHECK_EQ(st.hash_function()(hello), stdex::hasher<std::string> {}(hello));
+  }
+
+ // int heap table: CRUD + rehash + copy.
+  {
+    StdexIMap<0> t { stdex::hasher<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, int>> {} };
+    for (int i = 0; i < 200; ++i) t.emplace(i, i * 2);
+    CHECK_EQ(t.size(), 200u);
+    for (int i = 0; i < 200; ++i) {
+      auto it = t.find(i);
+      CHECK(it != t.end());
+      if (it != t.end()) CHECK_EQ(it->second, i * 2);
+    }
+
+    for (int i = 0; i < 200; i += 2) CHECK_EQ(t.erase(i), 1u);
+    CHECK_EQ(t.size(), 100u);
+    for (int i = 1; i < 200; i += 2) CHECK(t.contains(i));
+
+    t.rehash(500);
+    CHECK(t.capacity() >= 500u);
+    for (int i = 1; i < 200; i += 2) CHECK(t.contains(i));
+
+    StdexIMap<0> cpy(t, t.get_allocator());
+    CHECK(cpy == t);
+    CHECK_EQ(cpy.size(), 100u);
+  }
+
+ // int stack table: the 30th key triggers promotion once full; all elements stay usable.
+  {
+    StdexIMap<29> t { stdex::hasher<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, int>> {} };
+    for (int i = 0; i < 29; ++i) t.emplace(i, i);
+    CHECK(t.is_stack());
+    t.emplace(29, 29);
+    CHECK(t.is_heap());
+    CHECK_EQ(t.size(), 30u);
+    for (int i = 0; i < 30; ++i) CHECK(t.contains(i));
+  }
+
+ // string heap table: empty / short / long keys (> stripe, takes the lane loop).
+  {
+    StdexSMap<0> t { stdex::hasher<std::string> {}, std::equal_to<> {},
+                     std::allocator<std::pair<std::string, int>> {} };
+    t.emplace(std::string {}, 1);
+    CHECK_EQ(t.find(std::string {})->second, 1);
+
+    for (int i = 0; i < 50; ++i) t.emplace("key_" + std::to_string(i), i);
+    CHECK(t.contains(std::string { "key_7" }));
+    CHECK_EQ(t.find(std::string { "key_7" })->second, 7);
+
+    std::vector<std::string> long_keys;
+    for (int i = 0; i < 50; ++i) {
+      long_keys.push_back("long_" + std::to_string(i) + std::string(200, static_cast<char>('a' + i % 26)));
+      t.emplace(long_keys.back(), 1000 + i);
+    }
+    CHECK_EQ(t.size(), 101u);
+    for (int i = 0; i < 50; ++i) {
+      auto it = t.find(long_keys[static_cast<size_t>(i)]);
+      CHECK(it != t.end());
+      if (it != t.end()) CHECK_EQ(it->second, 1000 + i);
+    }
+
+    CHECK_EQ(t.erase(long_keys[0]), 1u);
+    CHECK(!t.contains(long_keys[0]));
+    t.rehash(t.capacity() * 2);
+    CHECK(t.contains(long_keys[1]));
+
+    int count = 0;
+    for (auto &&[k, v] : t) {
+      (void) k;
+      (void) v;
+      ++count;
+    }
+    CHECK_EQ(count, static_cast<int>(t.size()));
+  }
+
+ // string stack table and int set: smoke.
+  {
+    StdexSMap<29> t { stdex::hasher<std::string> {}, std::equal_to<> {},
+                      std::allocator<std::pair<std::string, int>> {} };
+    for (int i = 0; i < 29; ++i) t.emplace("s" + std::to_string(i), i);
+    CHECK(t.is_stack());
+    t.emplace("overflow", 999);
+    CHECK(t.is_heap());
+    CHECK(t.contains(std::string { "overflow" }));
+
+    StdexISet<0> s { stdex::hasher<int> {}, std::equal_to<> {}, std::allocator<int> {} };
+    for (int i = 0; i < 50; ++i) s.emplace(i);
+    CHECK_EQ(s.size(), 50u);
+    CHECK(s.contains(49));
+    CHECK_EQ(s.erase(49), 1u);
+    CHECK(!s.contains(49));
+  }
+
+ // public wrapper instantiated with stdex::hasher.
+  {
+    stdex::unordered_flat_map<int, int, 0, stdex::hasher<int>> m;
+    for (int i = 0; i < 50; ++i) m.emplace(i, i * 3);
+    CHECK_EQ(m.size(), 50u);
+    CHECK_EQ(m.at(7), 21);
+    m[7] = 70;
+    CHECK_EQ(m.at(7), 70);
+    CHECK_EQ(m.erase(7), 1u);
+
+    stdex::unordered_flat_map<std::string, int, 0, stdex::hasher<std::string>> sm;
+    sm.emplace("hello", 1);
+    sm.emplace(std::string(200, 'q'), 2);
+    CHECK_EQ(sm.size(), 2u);
+    CHECK_EQ(sm.at(std::string { "hello" }), 1);
+    CHECK(sm.contains(std::string(200, 'q')));
+
+    stdex::unordered_flat_set<int, 0, stdex::hasher<int>> s { 1, 2, 3 };
+    CHECK_EQ(s.size(), 3u);
+    CHECK(s.contains(2));
+
+    stdex::unordered_flat_set<std::string, 0, stdex::hasher<std::string>> ss;
+    ss.emplace("a");
+    ss.emplace(std::string(200, 'z'));
+    CHECK_EQ(ss.size(), 2u);
+    CHECK(ss.contains(std::string { "a" }));
+  }
+}
+
+// ==================================================================
 // main
 // ==================================================================
 int main()
@@ -2527,6 +2689,7 @@ int main()
   test_const_key_overloads();
   test_insert_overloads();
   test_const_find_and_node();
+  test_stdex_hasher_integration();
 
   std::println("\n===============================");
   std::println("PASS: {}   FAIL: {}", g_pass, g_fail);
@@ -2698,6 +2861,12 @@ Suggestion: rewrite the IMap<0>/IMap<29> insert-find-erase-rehash-copy path as
 --------------------------------------------------------------------------------
 [8] Integration and performance
 --------------------------------------------------------------------------------
-  - no integration case using stdex::hash::hash from hash.hpp as the Hasher.
-  - no CRUD performance comparison against boost::unordered_flat_map / std::unordered_map.
+  - covered by test_stdex_hasher_integration(): stdex::hasher integration:
+      * int (scalar path) / string (range path) x map/set x heap/stack;
+      * hash_function() agrees with a direct call;
+      * empty, short and long keys (> stripe, takes the lane loop);
+      * public unordered_flat_map/set instantiated with stdex::hasher.
+  - non-SIMD tests
+  - covered by tests/bench_hash_table.cpp: CRUD against boost / absl / std +
+    rehash + churn comparison (std as baseline, int/string, no set).
 */
