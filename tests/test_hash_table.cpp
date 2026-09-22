@@ -314,21 +314,21 @@ using UniqueMap = ufd::hash_table<
 template <size_t N>
 using StdexIMap = ufd::hash_table<
     ufd::ufmap_traits<int, int, N>,
-    stdex::hasher<int>,
+    stdex::hash<int>,
     std::equal_to<>,
     std::allocator<std::pair<int, int>>>;
 
 template <size_t N>
 using StdexSMap = ufd::hash_table<
     ufd::ufmap_traits<std::string, int, N>,
-    stdex::hasher<std::string>,
+    stdex::hash<std::string>,
     std::equal_to<>,
     std::allocator<std::pair<std::string, int>>>;
 
 template <size_t N>
 using StdexISet = ufd::hash_table<
     ufd::ufset_traits<int, N>,
-    stdex::hasher<int>,
+    stdex::hash<int>,
     std::equal_to<>,
     std::allocator<int>>;
 
@@ -336,9 +336,9 @@ using StdexISet = ufd::hash_table<
 static_assert(std::is_same_v<ISet<0>::iterator, ISet<0>::const_iterator>);
 static_assert(!std::is_same_v<IMap<0>::iterator, IMap<0>::const_iterator>);
 
-// stdex::hasher satisfies the table's Hasher concept (a static operator() also works when called on an object).
-static_assert(ufd::is_hasher_for<stdex::hasher<int>, int>);
-static_assert(ufd::is_hasher_for<stdex::hasher<std::string>, std::string>);
+// stdex::hash satisfies the table's Hasher concept (a static operator() also works when called on an object).
+static_assert(ufd::is_hasher_for<stdex::hash<int>, int>);
+static_assert(ufd::is_hasher_for<stdex::hash<std::string>, std::string>);
 
 // ==================================================================
 // 1. Basics: empty / single element / insert / find / count
@@ -1343,11 +1343,11 @@ constexpr bool constexpr_hash_mul()
   std::array<std::byte, 200> buffer {};
   for (std::size_t i = 0; i < buffer.size(); ++i) buffer[i] = static_cast<std::byte>(i * 7u + 1u);
 
-  auto const k1 = stdex::hash<int>(12345);
-  auto const k2 = stdex::hash<int>(54321);
+  auto const k1 = stdex::hash_value(12345);
+  auto const k2 = stdex::hash_value(54321);
   auto const standard = stdex::hash_range(buffer);
-  auto const micro    = stdex::hash_range(buffer, 0u, stdex::micro_t {});
-  auto const nano     = stdex::hash_range(buffer, 0u, stdex::nano_t {});
+  auto const micro    = stdex::hash_range<decltype(buffer), stdex::micro_t>(buffer, 0u);
+  auto const nano     = stdex::hash_range<decltype(buffer), stdex::nano_t>(buffer, 0u);
 
   auto const product = stdex::hash_detail::umul128(0x0123'4567'89AB'CDEFull, 0xFEDC'BA98'7654'3210ull);
   return k1 != k2 && standard != micro && standard != nano && micro != nano &&
@@ -1359,6 +1359,21 @@ static_assert(constexpr_promote_to_heap());
 static_assert(constexpr_heap_only());
 static_assert(constexpr_erase_and_reset());
 static_assert(constexpr_hash_mul());
+
+constexpr bool scalar_hash_reaches_high_bits()
+{
+  // group_index_ consumes high bits: adjacent small ints must already differ
+  // there, otherwise every key probes from group 0 (identity-hash collapse).
+  uint64_t prev = 0;
+  for (int i = 1; i <= 64; ++i) {
+    auto const hi = static_cast<uint64_t>(stdex::hash<int> {}(i)) >> 32;
+    if (hi == 0 || hi == prev) return false;
+    prev = hi;
+  }
+  return true;
+}
+
+static_assert(scalar_hash_reaches_high_bits());
 
 void test_constexpr()
 {
@@ -2144,7 +2159,7 @@ void test_flat_map_ctors()
   using Map   = stdex::unordered_flat_map<int, int>;
   using Alloc = std::allocator<std::pair<int, int>>;
   Alloc alloc;
-  std::hash<int> hash;
+  stdex::hash<int> hash;
   std::equal_to<int> equal;
   std::vector<std::pair<int, int>> v { { 1, 10 }, { 2, 20 }, { 3, 30 } };
 
@@ -2252,7 +2267,7 @@ void test_flat_set_ctors()
   using Set   = stdex::unordered_flat_set<int>;
   using Alloc = std::allocator<int>;
   Alloc alloc;
-  std::hash<int> hash;
+  stdex::hash<int> hash;
   std::equal_to<int> equal;
   std::vector<int> v { 1, 2, 3 };
 
@@ -2321,7 +2336,7 @@ void test_ctad_deduction()
   stdex::unordered_flat_map d2(v.begin(), v.end(), ma);
   static_assert(std::is_same_v<typename decltype(d2)::allocator_type, MapAlloc>);
   stdex::unordered_flat_map d3(v.begin(), v.end(), 10u, ma);
-  static_assert(std::is_same_v<typename decltype(d3)::hasher, std::hash<int>>);
+  static_assert(std::is_same_v<typename decltype(d3)::hasher, stdex::hash<int>>);
   stdex::unordered_flat_map d4(v.begin(), v.end(), 10u, h, ma);
   static_assert(std::is_same_v<typename decltype(d4)::hasher, std::hash<int>>);
 
@@ -2394,7 +2409,7 @@ void test_nonmember_swap_and_observers()
   CHECK_EQ(s2.size(), 1u);
   CHECK(s1.contains(2) && s2.contains(1));
 
-  CHECK_EQ(m1.hash_function()(1), std::hash<int> {}(1));
+  CHECK_EQ(m1.hash_function()(1), stdex::hash<int> {}(1));
   CHECK(m1.key_eq()(1, 1));
   CHECK(!m1.key_eq()(1, 2));
   std::allocator<std::pair<int, int>> const expected_map_alloc;
@@ -2505,26 +2520,26 @@ void test_const_find_and_node()
 }
 
 // ==================================================================
-// 42. stdex::hasher integration: scalar / range hash paths x heap / stack x public wrapper
+// 42. stdex::hash integration: scalar / range hash paths x heap / stack x public wrapper
 // ==================================================================
-void test_stdex_hasher_integration()
+void test_stdex_hash_integration()
 {
-  SECTION("stdex::hasher integration");
+  SECTION("stdex::hash integration");
 
- // hash_function() agrees with a direct call: the table really uses stdex::hasher.
+ // hash_function() agrees with a direct call: the table really uses stdex::hash.
   {
-    StdexIMap<0> t { stdex::hasher<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, int>> {} };
-    CHECK_EQ(t.hash_function()(42), stdex::hasher<int> {}(42));
+    StdexIMap<0> t { stdex::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, int>> {} };
+    CHECK_EQ(t.hash_function()(42), stdex::hash<int> {}(42));
 
-    StdexSMap<0> st { stdex::hasher<std::string> {}, std::equal_to<> {},
+    StdexSMap<0> st { stdex::hash<std::string> {}, std::equal_to<> {},
                       std::allocator<std::pair<std::string, int>> {} };
     std::string const hello { "hello" };
-    CHECK_EQ(st.hash_function()(hello), stdex::hasher<std::string> {}(hello));
+    CHECK_EQ(st.hash_function()(hello), stdex::hash<std::string> {}(hello));
   }
 
  // int heap table: CRUD + rehash + copy.
   {
-    StdexIMap<0> t { stdex::hasher<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, int>> {} };
+    StdexIMap<0> t { stdex::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, int>> {} };
     for (int i = 0; i < 200; ++i) t.emplace(i, i * 2);
     CHECK_EQ(t.size(), 200u);
     for (int i = 0; i < 200; ++i) {
@@ -2548,7 +2563,7 @@ void test_stdex_hasher_integration()
 
  // int stack table: the 30th key triggers promotion once full; all elements stay usable.
   {
-    StdexIMap<29> t { stdex::hasher<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, int>> {} };
+    StdexIMap<29> t { stdex::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, int>> {} };
     for (int i = 0; i < 29; ++i) t.emplace(i, i);
     CHECK(t.is_stack());
     t.emplace(29, 29);
@@ -2559,7 +2574,7 @@ void test_stdex_hasher_integration()
 
  // string heap table: empty / short / long keys (> stripe, takes the lane loop).
   {
-    StdexSMap<0> t { stdex::hasher<std::string> {}, std::equal_to<> {},
+    StdexSMap<0> t { stdex::hash<std::string> {}, std::equal_to<> {},
                      std::allocator<std::pair<std::string, int>> {} };
     t.emplace(std::string {}, 1);
     CHECK_EQ(t.find(std::string {})->second, 1);
@@ -2596,7 +2611,7 @@ void test_stdex_hasher_integration()
 
  // string stack table and int set: smoke.
   {
-    StdexSMap<29> t { stdex::hasher<std::string> {}, std::equal_to<> {},
+    StdexSMap<29> t { stdex::hash<std::string> {}, std::equal_to<> {},
                       std::allocator<std::pair<std::string, int>> {} };
     for (int i = 0; i < 29; ++i) t.emplace("s" + std::to_string(i), i);
     CHECK(t.is_stack());
@@ -2604,7 +2619,7 @@ void test_stdex_hasher_integration()
     CHECK(t.is_heap());
     CHECK(t.contains(std::string { "overflow" }));
 
-    StdexISet<0> s { stdex::hasher<int> {}, std::equal_to<> {}, std::allocator<int> {} };
+    StdexISet<0> s { stdex::hash<int> {}, std::equal_to<> {}, std::allocator<int> {} };
     for (int i = 0; i < 50; ++i) s.emplace(i);
     CHECK_EQ(s.size(), 50u);
     CHECK(s.contains(49));
@@ -2612,9 +2627,9 @@ void test_stdex_hasher_integration()
     CHECK(!s.contains(49));
   }
 
- // public wrapper instantiated with stdex::hasher.
+ // public wrapper instantiated with stdex::hash.
   {
-    stdex::unordered_flat_map<int, int, 0, stdex::hasher<int>> m;
+    stdex::unordered_flat_map<int, int, 0, stdex::hash<int>> m;
     for (int i = 0; i < 50; ++i) m.emplace(i, i * 3);
     CHECK_EQ(m.size(), 50u);
     CHECK_EQ(m.at(7), 21);
@@ -2622,18 +2637,18 @@ void test_stdex_hasher_integration()
     CHECK_EQ(m.at(7), 70);
     CHECK_EQ(m.erase(7), 1u);
 
-    stdex::unordered_flat_map<std::string, int, 0, stdex::hasher<std::string>> sm;
+    stdex::unordered_flat_map<std::string, int, 0, stdex::hash<std::string>> sm;
     sm.emplace("hello", 1);
     sm.emplace(std::string(200, 'q'), 2);
     CHECK_EQ(sm.size(), 2u);
     CHECK_EQ(sm.at(std::string { "hello" }), 1);
     CHECK(sm.contains(std::string(200, 'q')));
 
-    stdex::unordered_flat_set<int, 0, stdex::hasher<int>> s { 1, 2, 3 };
+    stdex::unordered_flat_set<int, 0, stdex::hash<int>> s { 1, 2, 3 };
     CHECK_EQ(s.size(), 3u);
     CHECK(s.contains(2));
 
-    stdex::unordered_flat_set<std::string, 0, stdex::hasher<std::string>> ss;
+    stdex::unordered_flat_set<std::string, 0, stdex::hash<std::string>> ss;
     ss.emplace("a");
     ss.emplace(std::string(200, 'z'));
     CHECK_EQ(ss.size(), 2u);
@@ -2689,7 +2704,7 @@ int main()
   test_const_key_overloads();
   test_insert_overloads();
   test_const_find_and_node();
-  test_stdex_hasher_integration();
+  test_stdex_hash_integration();
 
   std::println("\n===============================");
   std::println("PASS: {}   FAIL: {}", g_pass, g_fail);
@@ -2699,16 +2714,18 @@ int main()
 
 /*
 ================================================================================
-Unfinished tests -- gap ledger
+Coverage gap ledger -- gap ledger (mostly covered; kept as history)
 ================================================================================
-This file currently covers only runtime paths with regular types. Ranked by risk, branches / semantics with no
-test touching them yet, each with its location and a suggested test shape for follow-up coverage.
+This file now covers runtime paths, constexpr evaluation and allocator-aware branches. Ranked by risk:
+Lists branches / semantics once untouched by any test and how they were covered, for later review.
 
 --------------------------------------------------------------------------------
 [1] constexpr / consteval branches (highest priority)
 --------------------------------------------------------------------------------
-The project hard constraint is that every change must stay constexpr-evaluable, yet this file has no
-static_assert / constexpr evaluation cases; the if consteval branches below never ran:
+  - covered by test_constexpr() and in-file static_assert:
+    constexpr_stack_access / promote_to_heap / heap_only / erase_and_reset /
+    hash_mul (scalar hash_value, three hash_range modes, umul128/umulh), and
+    scalar_hash_reaches_high_bits：
   - consteval branch of allocate_unchecked_ at inline_storage.hpp:160
     (elements and groups allocated separately, instead of one merged block as at runtime
     calculate_storage_size_）
@@ -2739,8 +2756,9 @@ Suggestion: rewrite the IMap<0>/IMap<29> insert-find-erase-rehash-copy path as
 --------------------------------------------------------------------------------
 [3] Allocator-aware branches
 --------------------------------------------------------------------------------
- All existing types use std::allocator, always taking the is_always_equal == true fast path,
- the other half of the branches never ran:
+  - covered by test_allocator_aware(): custom allocator_probe
+    (is_always_equal=false with switchable propagate_*) asserting counts and propagation per branch,
+    plus bad_alloc rollback for rehash / stack growth. Original gap description follows:
   - is_pocca_v / is_pocma_v / is_pocs_v（hash_table.hpp:104-106）：
     copy assignment at hash_table.hpp:295, move assignment at 379/400/405, move construction at 345+390,
     swap 475-481。
@@ -2844,7 +2862,7 @@ Suggestion: rewrite the IMap<0>/IMap<29> insert-find-erase-rehash-copy path as
     explicit node construction / reset / rvalue value, plus set erase(key)/clear at runtime.
 
 --------------------------------------------------------------------------------
-[7] Completion
+[7] Completion (all 11 items below are covered by [8] public-wrapper tests; original description kept here)
 --------------------------------------------------------------------------------
 1. map/set rule-of-five and construction overloads: copy/move (+alloc) construction and assignment, explicit(alloc), 6 bucket, 8 range, 8 from_range -- zero coverage at the public wrapper layer (hash_table layer fully covered). Only ilist construction got covered incidentally (in erase_if/map-api tests).
 2. map/set operator= (copy/move/ilist): zero coverage.
@@ -2861,11 +2879,11 @@ Suggestion: rewrite the IMap<0>/IMap<29> insert-find-erase-rehash-copy path as
 --------------------------------------------------------------------------------
 [8] Integration and performance
 --------------------------------------------------------------------------------
-  - covered by test_stdex_hasher_integration(): stdex::hasher integration:
+  - covered by test_stdex_hash_integration(): stdex::hash integration:
       * int (scalar path) / string (range path) x map/set x heap/stack;
       * hash_function() agrees with a direct call;
       * empty, short and long keys (> stripe, takes the lane loop);
-      * public unordered_flat_map/set instantiated with stdex::hasher.
+      * public unordered_flat_map/set instantiated with stdex::hash.
   - non-SIMD tests
   - covered by tests/bench_hash_table.cpp: CRUD against boost / absl / std +
     rehash + churn comparison (std as baseline, int/string, no set).
