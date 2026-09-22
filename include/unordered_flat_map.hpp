@@ -16,13 +16,16 @@
 
 #pragma once
 
+#include <stdexcept> // std::out_of_range
+
 #include "ufmap_traits.hpp"
 #include "hash_table.hpp"
+#include "hash.hpp"
 
 namespace stdex
 {
 template <class KeyType, class ValueType, size_t N = 0,
-          class Hasher = std::hash<KeyType>,
+          class Hasher = stdex::hash<KeyType>,
           class KeyEqual = std::equal_to<KeyType>,
           class Allocator = std::allocator<std::pair<KeyType, ValueType>>>
 class unordered_flat_map : public unordered_flat_detail::hash_table<unordered_flat_detail::ufmap_traits<KeyType, ValueType, N>, 
@@ -486,7 +489,7 @@ public:
 
 // ---------- CTAD iterator-range ----------
 template <class Iter,
-          class Hash  = std::hash<unordered_flat_detail::guide_key_t<Iter>>,
+          class Hash  = stdex::hash<unordered_flat_detail::guide_key_t<Iter>>,
           class KeyEq = std::equal_to<unordered_flat_detail::guide_key_t<Iter>>,
           class Alloc = std::allocator<std::iter_value_t<Iter>>>
 requires std::input_iterator<Iter>
@@ -500,13 +503,13 @@ template <class Iter, class Alloc>
 requires std::input_iterator<Iter> && unordered_flat_detail::is_allocator<Alloc>
 unordered_flat_map(Iter, Iter, Alloc) -> 
 unordered_flat_map<unordered_flat_detail::guide_key_t<Iter>, unordered_flat_detail::guide_mapped_t<Iter>, 0,
-                   std::hash<unordered_flat_detail::guide_key_t<Iter>>, std::equal_to<unordered_flat_detail::guide_key_t<Iter>>, Alloc>;
+                   stdex::hash<unordered_flat_detail::guide_key_t<Iter>>, std::equal_to<unordered_flat_detail::guide_key_t<Iter>>, Alloc>;
 
 template <class Iter, class Alloc>
 requires std::input_iterator<Iter> && unordered_flat_detail::is_allocator<Alloc>
 unordered_flat_map(Iter, Iter, unordered_flat_detail::guide_size_type_t<Alloc>, Alloc) -> 
 unordered_flat_map<unordered_flat_detail::guide_key_t<Iter>, unordered_flat_detail::guide_mapped_t<Iter>, 0,
-                   std::hash<unordered_flat_detail::guide_key_t<Iter>>, std::equal_to<unordered_flat_detail::guide_key_t<Iter>>, Alloc>;
+                   stdex::hash<unordered_flat_detail::guide_key_t<Iter>>, std::equal_to<unordered_flat_detail::guide_key_t<Iter>>, Alloc>;
 
 template <class Iter, class Hash, class Alloc>
 requires std::input_iterator<Iter>
@@ -518,7 +521,7 @@ unordered_flat_map<unordered_flat_detail::guide_key_t<Iter>, unordered_flat_deta
 
 // ---------- CTAD initializer_list ----------
 template <class Key, class T,
-          class Hash  = std::hash<Key>,
+          class Hash  = stdex::hash<Key>,
           class KeyEq = std::equal_to<Key>,
           class Alloc = std::allocator<std::pair<Key, T>>>
 requires unordered_flat_detail::is_hasher_for<Hash, Key>
@@ -530,12 +533,12 @@ unordered_flat_map<Key, T, 0, Hash, KeyEq, Alloc>;
 template <class Key, class T, class Alloc>
 requires unordered_flat_detail::is_allocator<Alloc>
 unordered_flat_map(std::initializer_list<std::pair<Key, T>>, Alloc) -> 
-unordered_flat_map<Key, T, 0, std::hash<Key>, std::equal_to<Key>, Alloc>;
+unordered_flat_map<Key, T, 0, stdex::hash<Key>, std::equal_to<Key>, Alloc>;
 
 template <class Key, class T, class Alloc>
 requires unordered_flat_detail::is_allocator<Alloc>
 unordered_flat_map(std::initializer_list<std::pair<Key, T>>, unordered_flat_detail::guide_size_type_t<Alloc>, Alloc) -> 
-unordered_flat_map<Key, T, 0, std::hash<Key>, std::equal_to<Key>, Alloc>;
+unordered_flat_map<Key, T, 0, stdex::hash<Key>, std::equal_to<Key>, Alloc>;
 
 template <class Key, class T, class Hash, class Alloc>
 requires unordered_flat_detail::is_hasher_for<Hash, Key>
@@ -545,7 +548,7 @@ unordered_flat_map<Key, T, 0, Hash, std::equal_to<Key>, Alloc>;
 
 // ---------- CTAD from_range ----------
 template <std::ranges::input_range Rng,
-          class Hash  = std::hash<unordered_flat_detail::range_key_t<Rng>>,
+          class Hash  = stdex::hash<unordered_flat_detail::range_key_t<Rng>>,
           class KeyEq = std::equal_to<unordered_flat_detail::range_key_t<Rng>>,
           class Alloc = std::allocator<std::ranges::range_value_t<Rng>>>
 requires unordered_flat_detail::is_hasher_for<Hash, unordered_flat_detail::range_key_t<Rng>>
@@ -558,13 +561,13 @@ template <std::ranges::input_range Rng, class Alloc>
 requires unordered_flat_detail::is_allocator<Alloc>
 unordered_flat_map(std::from_range_t, Rng &&, Alloc) -> 
 unordered_flat_map<unordered_flat_detail::range_key_t<Rng>, unordered_flat_detail::range_mapped_t<Rng>, 0,
-                   std::hash<unordered_flat_detail::range_key_t<Rng>>, std::equal_to<unordered_flat_detail::range_key_t<Rng>>, Alloc>;
+                   stdex::hash<unordered_flat_detail::range_key_t<Rng>>, std::equal_to<unordered_flat_detail::range_key_t<Rng>>, Alloc>;
 
 template <std::ranges::input_range Rng, class Alloc>
 requires unordered_flat_detail::is_allocator<Alloc>
 unordered_flat_map(std::from_range_t, Rng &&, unordered_flat_detail::guide_size_type_t<Alloc>, Alloc) -> 
 unordered_flat_map<unordered_flat_detail::range_key_t<Rng>, unordered_flat_detail::range_mapped_t<Rng>, 0,
-                   std::hash<unordered_flat_detail::range_key_t<Rng>>, std::equal_to<unordered_flat_detail::range_key_t<Rng>>, Alloc>;
+                   stdex::hash<unordered_flat_detail::range_key_t<Rng>>, std::equal_to<unordered_flat_detail::range_key_t<Rng>>, Alloc>;
 
 template <std::ranges::input_range Rng, class Hash, class Alloc>
 requires unordered_flat_detail::is_hasher_for<Hash, unordered_flat_detail::range_key_t<Rng>>
@@ -601,7 +604,7 @@ erase_if(unordered_flat_map<KeyType, ValueType, N, Hasher, KeyEqual, Allocator> 
 #include <memory_resource>
 namespace stdex::pmr
 {
-template <class KeyType, class ValueType, size_t N = 0, class Hasher = std::hash<KeyType>, class KeyEqual = std::equal_to<KeyType>>
+template <class KeyType, class ValueType, size_t N = 0, class Hasher = stdex::hash<KeyType>, class KeyEqual = std::equal_to<KeyType>>
 using unordered_flat_map = stdex::unordered_flat_map<
     KeyType,
     ValueType,
