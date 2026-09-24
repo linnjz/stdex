@@ -9,6 +9,15 @@ if(NOT _stdex_benchmark_found)
     return()
 endif()
 
+FindVcpkgPackage(boost_unordered LINKAGE STATIC CONFIG QUIET)
+FindVcpkgPackage(absl LINKAGE STATIC CONFIG QUIET)
+
+if(NOT TARGET Boost::unordered OR NOT TARGET absl::flat_hash_map)
+    message(WARNING
+        "Skipping stdex benchmarks: Boost.Unordered or Abseil was not found.")
+    return()
+endif()
+
 function(stdex_add_bench target source)
     cmake_parse_arguments(PARSE_ARGV 2 ARG "OWN_MAIN" "" "INCLUDES;LIBS")
 
@@ -42,4 +51,9 @@ endfunction()
 # stable_radix_sort_bench.cpp provides its own BENCHMARK_MAIN().
 stdex_add_bench(bench_stable_radix_sort stable_radix_sort_bench.cpp
     OWN_MAIN
+)
+
+stdex_add_bench(bench_hash_table bench_hash_table.cpp
+    INCLUDES "${CMAKE_SOURCE_DIR}/include/unordered_flat_detail"
+    LIBS Boost::unordered absl::flat_hash_map
 )
