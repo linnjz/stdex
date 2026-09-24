@@ -170,11 +170,18 @@ public:
   constexpr ~hash_table() = default;
 
 private:
+  template <bool Move>
   struct destroy_source_elements_on_exit
   {
-    constexpr ~destroy_source_elements_on_exit() { holder_.destroy_elements_unchecked_(); }
+    constexpr ~destroy_source_elements_on_exit()
+    requires (Move)
+    {
+      holder_.destroy_elements_unchecked_();
+    }
 
-    hash_table &holder_;
+    constexpr ~destroy_source_elements_on_exit() requires (!Move) = default;
+
+    std::conditional_t<Move, hash_table &, hash_table const &> holder_;
   };
 
   /// Groups are bulk-copied only after every element transferred, so a throwing
@@ -208,7 +215,7 @@ private:
   {
     assert(source.group_count_() == dest.group_count_() && "same-layout transfer requires equal group counts");
 
-    if constexpr (Move) destroy_source_elements_on_exit se { source };
+    destroy_source_elements_on_exit<Move> se { source };
 
     destroy_dest_elements_on_exit de { source, dest };
 
@@ -248,7 +255,7 @@ private:
   {
     assert(dest.size_ == 0 && "rehash transfer destination must be empty");
 
-    if constexpr (Move) destroy_source_elements_on_exit e { source };
+    destroy_source_elements_on_exit<Move> e { source };
 
     source.for_each_occupied_slot_unchecked_([&dest](auto *occupied_ptr, auto *, unsigned)
     {
