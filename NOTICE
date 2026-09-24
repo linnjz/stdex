@@ -61,6 +61,12 @@ RapidHash -- include/hash.hpp
   SOFTWARE.
 
 ------------------------------------------------------------------------------
+fastmod -- include/fastmod.hpp
+  Copyright 2018 Daniel Lemire
+  Licensed under the Apache License, Version 2.0 (see the LICENSE file).
+  https://github.com/lemire/fastmod
+
+------------------------------------------------------------------------------
 Boost.Unordered -- include/unordered_flat_map.hpp,
                   include/unordered_flat_set.hpp,
                   include/unordered_flat_detail/
