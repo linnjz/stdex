@@ -29,51 +29,61 @@
 #elif defined(__GNUC__)
 #  pragma GCC diagnostic push
 #  pragma GCC diagnostic ignored "-Wattributes"
+#elif defined(_MSC_VER)
+#  pragma warning(push)
+#  pragma warning(disable : 5030)
 #endif
 
 namespace stdex
 {
 /// \pre d != 0
-[[nodiscard, msvc::forceinline, gnu::always_inline]] constexpr uint64_t computeM_u32(uint32_t const d) noexcept
+[[nodiscard, msvc::forceinline, gnu::always_inline]] 
+constexpr uint64_t computeM_u32(uint32_t const d) noexcept
 {
   return 0xFFFF'FFFF'FFFF'FFFFULL / d + 1;
 }
 
 /// \pre d != 0, M == computeM_u32(d)
-[[nodiscard, msvc::forceinline, gnu::always_inline]] constexpr uint32_t fastmod_u32(uint32_t const a, uint64_t const m, uint32_t const d) noexcept
+[[nodiscard, msvc::forceinline, gnu::always_inline]] 
+constexpr uint32_t fastmod_u32(uint32_t const a, uint64_t const m, uint32_t const d) noexcept
 {
   uint64_t const lowbits = m * a;
   return static_cast<uint32_t>(umulh(lowbits, d));
 }
 
 /// \pre d > 1, M == computeM_u32(d)
-[[nodiscard, msvc::forceinline, gnu::always_inline]] constexpr uint32_t fastdiv_u32(uint32_t const a, uint64_t const m) noexcept
+[[nodiscard, msvc::forceinline, gnu::always_inline]] 
+constexpr uint32_t fastdiv_u32(uint32_t const a, uint64_t const m) noexcept
 {
   return static_cast<uint32_t>(umulh(m, a));
 }
 
 /// \pre M == computeM_u32(d) for some d != 0
-[[nodiscard, msvc::forceinline, gnu::always_inline]] constexpr bool is_divisible(uint32_t const n, uint64_t const m) noexcept
+[[nodiscard, msvc::forceinline, gnu::always_inline]] 
+constexpr bool is_divisible(uint32_t const n, uint64_t const m) noexcept
 {
   return n * m <= m - 1;
 }
 
 /// \pre d != 0 && d != min()
-[[nodiscard, msvc::forceinline, gnu::always_inline]] constexpr uint64_t computeM_s32(int32_t d) noexcept
+[[nodiscard, msvc::forceinline, gnu::always_inline]] 
+constexpr uint64_t computeM_s32(int32_t d) noexcept
 {
   if (d < 0) d = -d;
   uint32_t const positive = static_cast<uint32_t>(d);
   return 0xFFFF'FFFF'FFFF'FFFFULL / positive + 1 + (((positive & (positive - 1)) == 0) ? 1 : 0);
 }
 
-[[nodiscard, msvc::forceinline, gnu::always_inline]] constexpr uint64_t mul128_s32(uint64_t const lowbits, int32_t const d) noexcept
+[[nodiscard, msvc::forceinline, gnu::always_inline]] 
+constexpr uint64_t mul128_s32(uint64_t const lowbits, int32_t const d) noexcept
 {
   if (d < 0) return umulh(lowbits, static_cast<uint64_t>(static_cast<int64_t>(d))) - lowbits;
   return umulh(lowbits, static_cast<uint64_t>(static_cast<uint32_t>(d)));
 }
 
 /// \pre positive_d == abs(d), M == computeM_s32(d)
-[[nodiscard, msvc::forceinline, gnu::always_inline]] constexpr int32_t fastmod_s32(int32_t const a, uint64_t const m, int32_t const positive_d) noexcept
+[[nodiscard, msvc::forceinline, gnu::always_inline]] 
+constexpr int32_t fastmod_s32(int32_t const a, uint64_t const m, int32_t const positive_d) noexcept
 {
   uint64_t const lowbits  = m * static_cast<uint64_t>(static_cast<int64_t>(a));
   int32_t const highbits  = static_cast<int32_t>(umulh(lowbits, static_cast<uint64_t>(static_cast<uint32_t>(positive_d))));
@@ -81,7 +91,8 @@ namespace stdex
 }
 
 /// \pre d not in {-1, 1, min()}, M == computeM_s32(d)
-[[nodiscard, msvc::forceinline, gnu::always_inline]] constexpr int32_t fastdiv_s32(int32_t const a, uint64_t const m, int32_t const d) noexcept
+[[nodiscard, msvc::forceinline, gnu::always_inline]] 
+constexpr int32_t fastdiv_s32(int32_t const a, uint64_t const m, int32_t const d) noexcept
 {
   uint64_t highbits = mul128_s32(m, a);
   highbits += (a < 0 ? 1U : 0U);
@@ -90,26 +101,30 @@ namespace stdex
 }
 
 /// \pre d != 0
-[[nodiscard, msvc::forceinline, gnu::always_inline]] constexpr uint128_t computeM_u64(uint64_t const d) noexcept
+[[nodiscard, msvc::forceinline, gnu::always_inline]] 
+constexpr uint128_t computeM_u64(uint64_t const d) noexcept
 {
   // ceil(2^128 / d) == floor((2^128 - 1) / d) + 1
   return add128(div128({ 0xFFFF'FFFF'FFFF'FFFFULL, 0xFFFF'FFFF'FFFF'FFFFULL }, d), 1);
 }
 
 /// \pre d != 0, M == computeM_u64(d)
-[[nodiscard, msvc::forceinline, gnu::always_inline]] constexpr uint64_t fastmod_u64(uint64_t const a, uint128_t const m, uint64_t const d) noexcept
+[[nodiscard, msvc::forceinline, gnu::always_inline]] 
+constexpr uint64_t fastmod_u64(uint64_t const a, uint128_t const m, uint64_t const d) noexcept
 {
   return mul128_u64_hi(mul128_u64_lo(m, a), d);
 }
 
 /// \pre d > 1, M == computeM_u64(d)
-[[nodiscard, msvc::forceinline, gnu::always_inline]] constexpr uint64_t fastdiv_u64(uint64_t const a, uint128_t const m) noexcept
+[[nodiscard, msvc::forceinline, gnu::always_inline]] 
+constexpr uint64_t fastdiv_u64(uint64_t const a, uint128_t const m) noexcept
 {
   return mul128_u64_hi(m, a);
 }
 
 /// \pre M == computeM_u64(d) for some d != 0
-[[nodiscard, msvc::forceinline, gnu::always_inline]] constexpr bool is_divisible_u64(uint64_t const n, uint128_t const m) noexcept
+[[nodiscard, msvc::forceinline, gnu::always_inline]] 
+constexpr bool is_divisible_u64(uint64_t const n, uint128_t const m) noexcept
 {
   uint128_t const product  = mul128_u64_lo(m, n);
   uint64_t const mdec_lo   = m.low - 1;
@@ -169,4 +184,6 @@ constexpr decltype(d) fastdiv(std::same_as<decltype(d)> auto const x) noexcept
 #  pragma clang diagnostic pop
 #elif defined(__GNUC__)
 #  pragma GCC diagnostic pop
+#elif defined(_MSC_VER)
+#  pragma warning(pop)
 #endif

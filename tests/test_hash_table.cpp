@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 LinnJz
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -863,7 +863,7 @@ void test_iteration()
   for (auto it = ct.cbegin(); it != ct.cend(); ++it) ++ccount;
   CHECK_EQ(ccount, 50);
 
- // range-for + structured bindings
+  // range-for + structured bindings
   int c2 = 0;
   for (auto &&[k, v] : t) {
     (void) k;
@@ -871,6 +871,67 @@ void test_iteration()
     ++c2;
   }
   CHECK_EQ(c2, 50);
+}
+
+void test_stack_heap_iteration()
+{
+  SECTION("stack + heap iteration");
+
+  // stack set: full-capacity traversal, count + sum
+  ISet<29> ss { std::hash<int> {}, std::equal_to<> {}, std::allocator<int> {} };
+  for (int i = 0; i < 29; ++i) ss.emplace(i);
+  CHECK(ss.is_stack());
+  int ssum = 0;
+  std::size_t sn = 0;
+  for (auto it = ss.begin(); it != ss.end(); ++it) {
+    ssum += *it;
+    ++sn;
+  }
+  CHECK_EQ(sn, 29u);
+  CHECK_EQ(ssum, 406);
+
+  // stack map: traversal sees every pair exactly once
+  IMap<29> sm { std::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, int>> {} };
+  for (int i = 0; i < 29; ++i) sm.emplace(i, i * 2);
+  CHECK(sm.is_stack());
+  int msum = 0;
+  std::size_t mn = 0;
+  for (auto it = sm.begin(); it != sm.end(); it++) {
+    msum += it->second;
+    ++mn;
+  }
+  CHECK_EQ(mn, 29u);
+  CHECK_EQ(msum, 812);
+
+  // heap set/map: same expectations after promotion past capacity
+  ISet<0> hs { std::hash<int> {}, std::equal_to<> {}, std::allocator<int> {} };
+  for (int i = 0; i < 50; ++i) hs.emplace(i);
+  CHECK(hs.is_heap());
+  int hsum = 0;
+  std::size_t hn = 0;
+  for (auto it = hs.begin(); it != hs.end(); ++it) {
+    hsum += *it;
+    ++hn;
+  }
+  CHECK_EQ(hn, 50u);
+  CHECK_EQ(hsum, 1225);
+
+  IMap<0> hm { std::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, int>> {} };
+  for (int i = 0; i < 50; ++i) hm.emplace(i, i);
+  int hmsum = 0;
+  std::size_t hmn = 0;
+  for (auto const &kv : hm) {
+    hmsum += kv.second;
+    ++hmn;
+  }
+  CHECK_EQ(hmn, 50u);
+  CHECK_EQ(hmsum, 1225);
+
+  // empty: begin == end on both paths
+  ISet<29> es { std::hash<int> {}, std::equal_to<> {}, std::allocator<int> {} };
+  CHECK(es.begin() == es.end());
+  ISet<0> eh { std::hash<int> {}, std::equal_to<> {}, std::allocator<int> {} };
+  CHECK(eh.begin() == eh.end());
 }
 
 // ==================================================================
@@ -1336,6 +1397,37 @@ constexpr bool constexpr_erase_and_reset()
   return m.empty() && m.is_stack();
 }
 
+constexpr bool constexpr_heap_iteration()
+{
+  CISet<0> s { constexpr_int_hash {}, std::equal_to<> {}, std::allocator<int> {} };
+  for (int i = 0; i < 40; ++i) s.emplace(i);
+  int sum = 0;
+  std::size_t n = 0;
+  for (auto it = s.begin(); it != s.end(); ++it) {
+    sum += *it;
+    ++n;
+  }
+  return n == 40u && sum == 780;
+}
+
+#if defined(__cpp_lib_start_lifetime) && __cpp_lib_start_lifetime >= 202603L
+// Reserved for C++26: stack iteration in constant evaluation needs
+// std::start_lifetime (see inline_storage.hpp demote_to_stack_/dissociate_).
+// Written now so the C++26 enablement is a one-line macro flip elsewhere.
+constexpr bool constexpr_stack_iteration()
+{
+  CISet<29> s { constexpr_int_hash {}, std::equal_to<> {}, std::allocator<int> {} };
+  for (int i = 0; i < 29; ++i) s.emplace(i);
+  int sum = 0;
+  std::size_t n = 0;
+  for (auto it = s.begin(); it != s.end(); ++it) {
+    sum += *it;
+    ++n;
+  }
+  return n == 29u && sum == 406;
+}
+#endif
+
 constexpr bool constexpr_hash_mul()
 {
  // short inputs (<=16B) skip the mode-dependent stripe loop; all three modes give the same result;
@@ -1354,10 +1446,14 @@ constexpr bool constexpr_hash_mul()
          product.high == stdex::umulh(0x0123'4567'89AB'CDEFull, 0xFEDC'BA98'7654'3210ull);
 }
 
+#if defined(__cpp_lib_start_lifetime) && __cpp_lib_start_lifetime >= 202603L
 static_assert(constexpr_stack_access());
 static_assert(constexpr_promote_to_heap());
-static_assert(constexpr_heap_only());
 static_assert(constexpr_erase_and_reset());
+static_assert(constexpr_stack_iteration());
+#endif
+static_assert(constexpr_heap_only());
+static_assert(constexpr_heap_iteration());
 static_assert(constexpr_hash_mul());
 
 constexpr bool scalar_hash_reaches_high_bits()
@@ -1382,6 +1478,7 @@ void test_constexpr()
   CHECK(constexpr_promote_to_heap());
   CHECK(constexpr_heap_only());
   CHECK(constexpr_erase_and_reset());
+  CHECK(constexpr_heap_iteration());
   CHECK(constexpr_hash_mul());
 }
 
@@ -2671,6 +2768,7 @@ int main()
   test_erase();
   test_rehash_reserve_clear_reset();
   test_iteration();
+  test_stack_heap_iteration();
   test_insert_variants();
   test_heterogeneous_lookup();
   test_introspection();
