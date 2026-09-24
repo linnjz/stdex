@@ -24,3 +24,9 @@ stdex_add_test(test_hybrid_alloc test_hybrid_alloc.cpp)
 # P2996-capable compiler (at_index dispatch cases already merged into
 # test_field_variant.cpp, no separate target needed).
 # stdex_add_test(test_field_variant test_field_variant.cpp)
+
+# Detail dir: public headers and this TU include sibling detail headers by
+# bare filename (upstream layout), so it must be on the include path.
+stdex_add_test(test_hash_table test_hash_table.cpp
+    INCLUDES "${CMAKE_SOURCE_DIR}/include/unordered_flat_detail"
+)
