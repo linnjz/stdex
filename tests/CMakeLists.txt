@@ -30,3 +30,7 @@ stdex_add_test(test_hybrid_alloc test_hybrid_alloc.cpp)
 stdex_add_test(test_hash_table test_hash_table.cpp
     INCLUDES "${CMAKE_SOURCE_DIR}/include/unordered_flat_detail"
 )
+
+# Extracted detail headers (bit_traits, byte_utils, int128) plus the fastmod
+# port standing on them; include/ alone suffices, no extra include dirs.
+stdex_add_test(test_fastmod test_fastmod.cpp)

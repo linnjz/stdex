@@ -16,42 +16,22 @@
 
 #pragma once
 
-#include <algorithm> // std::copy_n
 #include <array>     // std::array, std::to_array
-#include <bit>       // std::endian, std::byteswap, std::bit_cast
-#include <climits>   // CHAR_BIT
-#include <concepts>  // std::same_as, std::integral, std::floating_point
-#include <cstddef>   // std::size_t, size_t, std::byte, std::to_integer
-#include <cstdint>   // uint64_t, uint32_t, uint8_t
+#include <concepts>  // std::same_as
+#include <cstddef>   // std::size_t
+#include <cstdint>   // uint64_t
 #include <memory>    // std::shared_ptr, std::unique_ptr
 #include <ranges>    // std::ranges::contiguous_range, std::ranges::sized_range,
                      // std::ranges::range_value_t, std::ranges::data, std::ranges::size
 #include <span>      // std::span, std::as_bytes
 #include <string>
 #include <string_view>
-#include <type_traits> // std::remove_cvref_t, std::is_enum_v,
-                       // std::is_trivially_copyable_v, std::make_unsigned_t,
-                       // std::underlying_type_t, std::conditional_t,
-                       // std::remove_cv_t, std::is_same_v
-#include <utility>     // std::unreachable, std::to_underlying
+#include <type_traits> // std::remove_cvref_t, std::remove_cv_t, std::is_trivially_copyable_v
 
-#if defined(_MSC_VER)
-#  include <intrin.h>
-#  if defined(_M_X64) && !defined(_M_ARM64EC)
-#    pragma intrinsic(_umul128)
-#  endif
-#  if defined(_M_ARM64) || defined(_M_ARM64EC)
-#    pragma intrinsic(__umulh)
-#  endif
-#endif
-
-#if defined(__clang__)
-#  pragma clang diagnostic push
-#  pragma clang diagnostic ignored "-Wattributes"
-#elif defined(__GNUC__)
-#  pragma GCC diagnostic push
-#  pragma GCC diagnostic ignored "-Wattributes"
-#endif
+#include "bit_traits.hpp" // stdex::scalar_hashable, stdex::unsigned_equivalent_t, stdex::to_unsigned_bits
+#include "byte_utils.hpp" // stdex::byte_like, stdex::byte_value, stdex::read64_le,
+                          // stdex::read32_le, stdex::little_endian_array
+#include "int128.hpp" // stdex::umul128, stdex::umulh, stdex::mix, stdex::mum
 
 namespace stdex
 {
@@ -117,251 +97,18 @@ inline constexpr auto default_secret = std::to_array<uint64_t>({
     0xaa'aa'aa'aa'aa'aa'aa'aaULL,
 });
 
-static_assert(CHAR_BIT == 8, "stdexhash requires 8-bit bytes");
-static_assert(sizeof(uint32_t) == 4);
-static_assert(sizeof(uint64_t) == 8);
 static_assert(default_secret.size() == 8);
-
-template <typename T>
-concept byte_like = std::same_as<std::remove_cv_t<T>, std::byte> ||
-                    std::same_as<std::remove_cv_t<T>, char> ||
-                    std::same_as<std::remove_cv_t<T>, signed char> ||
-                    std::same_as<std::remove_cv_t<T>, unsigned char> ||
-                    std::same_as<std::remove_cv_t<T>, uint8_t>;
-
-template <typename T>
-concept scalar_hashable = std::integral<std::remove_cv_t<T>> ||
-                          std::is_enum_v<std::remove_cv_t<T>> ||
-                          std::floating_point<std::remove_cv_t<T>>;
 
 template <typename Range>
 concept contiguous_byte_range = std::ranges::contiguous_range<Range> &&
                                 std::ranges::sized_range<Range> &&
-                                hash_detail::byte_like<std::ranges::range_value_t<Range>>;
+                                ::stdex::byte_like<std::ranges::range_value_t<Range>>;
 
 template <typename Range>
 concept contiguous_object_range = std::ranges::contiguous_range<Range> &&
                                   std::ranges::sized_range<Range> &&
                                   std::is_trivially_copyable_v<std::ranges::range_value_t<Range>> &&
-                                  (!hash_detail::byte_like<std::ranges::range_value_t<Range>>);
-
-template <typename T>
-struct unsigned_equivalent;
-
-template <>
-struct unsigned_equivalent<bool>
-{
-  using type = uint8_t;
-};
-
-template <std::integral T>
-struct unsigned_equivalent<T>
-{
-  using type = std::make_unsigned_t<T>;
-};
-
-template <typename T>
-requires std::is_enum_v<T>
-struct unsigned_equivalent<T>
-{
-  using type = std::make_unsigned_t<std::underlying_type_t<T>>;
-};
-
-template <std::floating_point T>
-struct unsigned_equivalent<T>
-{
-  static_assert(sizeof(T) == 4 || sizeof(T) == 8, "stdexhash supports IEEE-width 32-bit and 64-bit floating types");
-  using type = std::conditional_t<sizeof(T) == 4, uint32_t, uint64_t>;
-};
-
-template <typename T>
-using unsigned_equivalent_t = typename unsigned_equivalent<std::remove_cv_t<T>>::type;
-
-struct uint128_t
-{
-  uint64_t low;
-  uint64_t high;
-
-  friend constexpr bool operator== (uint128_t, uint128_t) noexcept = default;
-};
-
-/*
-// Although this version is logically clear, it generates a relatively large number of instructions, so it will not be adopted.
-[[nodiscard, msvc::forceinline, gnu::always_inline]] 
-constexpr uint128_t umul128_portable(uint64_t const lhs, uint64_t const rhs) noexcept
-{
-  uint64_t const lhs_low  = static_cast<uint32_t>(lhs);
-  uint64_t const lhs_high = lhs >> 32U;
-  uint64_t const rhs_low  = static_cast<uint32_t>(rhs);
-  uint64_t const rhs_high = rhs >> 32U;
-
-  uint64_t const low_product  = lhs_low * rhs_low;
-  uint64_t const middle1      = lhs_high * rhs_low;
-  uint64_t const middle2      = rhs_high * lhs_low;
-  uint64_t const high_product = lhs_high * rhs_high;
-  uint64_t const carry_base   = low_product + (middle1 << 32U);
-  uint64_t const carry1       = carry_base < low_product ? 1U : 0U;
-  uint64_t const low          = carry_base + (middle2 << 32U);
-  uint64_t const carry2       = low < carry_base ? 1U : 0U;
-  uint64_t const high         = high_product + (middle1 >> 32U) + (middle2 >> 32U) + carry1 + carry2;
-  return { low, high };
-}
-*/
-
-[[nodiscard, msvc::forceinline, gnu::always_inline]]
-constexpr uint128_t umul128_portable(uint64_t const lhs, uint64_t const rhs) noexcept
-{
-  // Split into 32-bit half-words: x = x_low + x_high * 2^32
-  uint64_t const lhs_low  = static_cast<uint32_t>(lhs);
-  uint64_t const lhs_high = lhs >> 32U;
-  uint64_t const rhs_low  = static_cast<uint32_t>(rhs);
-  uint64_t const rhs_high = rhs >> 32U;
-
-  // Four 32x32 -> 64 partial products
-  uint64_t const low_product  = lhs_low * rhs_low;   // Contributes to bits [0, 64)
-  uint64_t const cross1       = lhs_low * rhs_high;  // Contributes to bits [32, 96)
-  uint64_t const cross2       = lhs_high * rhs_low;  // Contributes to bits [32, 96)
-  uint64_t const high_product = lhs_high * rhs_high; // Contributes to bits [64, 128)
-
-  // Start the high 64 bits from high_product, then accumulate the high 32 bits of the cross terms.
-  uint64_t high = high_product;
-  high += cross1 >> 32U;
-  high += cross2 >> 32U;
-
-  // Start the low 64 bits from low_product, and add in the low 32 bits of the cross terms shifted left by 32.
-  // The middle carry is carried naturally by a 64-bit temporary:
-  // the part of middle above 2^32 is the carry.
-  uint64_t const middle = (low_product >> 32U) + static_cast<uint32_t>(cross1) + static_cast<uint32_t>(cross2);
-
-  uint64_t const low = (middle << 32U) + static_cast<uint32_t>(low_product);
-  high += middle >> 32U;
-
-  return { low, high };
-}
-
-[[nodiscard, msvc::forceinline, gnu::always_inline]] constexpr uint64_t umulh_portable(uint64_t const lhs, uint64_t const rhs) noexcept
-{
-  return umul128_portable(lhs, rhs).high;
-}
-
-[[nodiscard, msvc::forceinline, gnu::always_inline]] constexpr uint128_t umul128(uint64_t const lhs, uint64_t const rhs) noexcept
-{
-#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_ARM64) || defined(_M_ARM64EC))
-  if consteval {
-    return umul128_portable(lhs, rhs);
-  } else {
-#  if defined(_M_X64) && !defined(_M_ARM64EC)
-    uint64_t high {};
-    uint64_t const low = _umul128(lhs, rhs, &high);
-    return { low, high };
-#  else
-    return { lhs * rhs, __umulh(lhs, rhs) };
-#  endif
-  }
-#elif defined(__SIZEOF_INT128__)
-  auto const product = static_cast<__uint128_t>(lhs) * static_cast<__uint128_t>(rhs);
-  return { static_cast<uint64_t>(product), static_cast<uint64_t>(product >> 64U) };
-#else
-  return umul128_portable(lhs, rhs);
-#endif
-}
-
-[[nodiscard, msvc::forceinline, gnu::always_inline]] constexpr uint64_t umulh(uint64_t const lhs, uint64_t const rhs) noexcept
-{
-#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_ARM64) || defined(_M_ARM64EC))
-  if consteval {
-    return umulh_portable(lhs, rhs);
-  } else {
-#  if defined(_M_X64) && !defined(_M_ARM64EC)
-    uint64_t high {};
-    (void) _umul128(lhs, rhs, &high);
-    return high;
-#  else
-    return __umulh(lhs, rhs);
-#  endif
-  }
-#elif defined(__SIZEOF_INT128__)
-  return static_cast<uint64_t>((static_cast<__uint128_t>(lhs) * static_cast<__uint128_t>(rhs)) >> 64U);
-#else
-  return umulh_portable(lhs, rhs);
-#endif
-}
-
-[[nodiscard, msvc::forceinline, gnu::always_inline]] constexpr uint64_t mix(uint64_t const lhs, uint64_t const rhs) noexcept
-{
-  auto const [low, high] = umul128(lhs, rhs);
-  return low ^ high;
-}
-
-[[msvc::forceinline, gnu::always_inline]] constexpr void mum(uint64_t &lhs, uint64_t &rhs) noexcept
-{
-  auto const product = umul128(lhs, rhs);
-  lhs                = product.low;
-  rhs                = product.high;
-}
-
-template <scalar_hashable T>
-[[nodiscard]] constexpr unsigned_equivalent_t<T> to_unsigned_bits(T const value) noexcept
-{
-  if constexpr (std::floating_point<std::remove_cv_t<T>>) {
-    return std::bit_cast<unsigned_equivalent_t<T>>(value);
-  } else if constexpr (std::is_enum_v<std::remove_cv_t<T>>) {
-    return static_cast<unsigned_equivalent_t<T>>(std::to_underlying(value));
-  } else {
-    return static_cast<unsigned_equivalent_t<T>>(value);
-  }
-}
-
-template <byte_like T>
-[[nodiscard]] constexpr uint8_t byte_value(T const value) noexcept
-{
-  if constexpr (std::same_as<std::remove_cv_t<T>, std::byte>) {
-    return std::to_integer<uint8_t>(value);
-  } else {
-    return static_cast<uint8_t>(value);
-  }
-}
-
-template <byte_like Byte>
-[[nodiscard, msvc::forceinline, gnu::always_inline]] constexpr uint64_t read64_le(std::span<Byte const> const input, size_t const offset) noexcept
-{
-  std::array<Byte, 8> buf;
-  std::copy_n(input.begin() + offset, buf.size(), buf.begin());
-  if constexpr (std::endian::native == std::endian::big) {
-    return std::byteswap(std::bit_cast<uint64_t>(buf));
-  } else if constexpr (std::endian::native == std::endian::little) {
-    return std::bit_cast<uint64_t>(buf);
-  } else {
-    std::unreachable();
-  }
-}
-
-template <byte_like Byte>
-[[nodiscard, msvc::forceinline, gnu::always_inline]] constexpr uint32_t read32_le(std::span<Byte const> const input, size_t const offset) noexcept
-{
-  std::array<Byte, 4> buf;
-  std::copy_n(input.begin() + offset, buf.size(), buf.begin());
-
-  if constexpr (std::endian::native == std::endian::big) {
-    return std::byteswap(std::bit_cast<uint32_t>(buf));
-  } else if constexpr (std::endian::native == std::endian::little) {
-    return std::bit_cast<uint32_t>(buf);
-  } else {
-    std::unreachable();
-  }
-}
-
-template <std::unsigned_integral UInt>
-[[nodiscard]] constexpr auto little_endian_array(UInt const value) noexcept
-{
-  if constexpr (std::endian::native == std::endian::big) {
-    return std::bit_cast<std::array<std::byte, sizeof(UInt)>>(std::byteswap(value));
-  } else if constexpr (std::endian::native == std::endian::little) {
-    return std::bit_cast<std::array<std::byte, sizeof(UInt)>>(value);
-  } else {
-    std::unreachable();
-  }
-}
+                                  (!::stdex::byte_like<std::ranges::range_value_t<Range>>);
 
 template <byte_like Byte, hash_mode Mode>
 [[nodiscard]] constexpr uint64_t hash_bytes_impl(Mode, std::span<Byte const> const input, uint64_t seed, std::array<uint64_t, 8> const &secret) noexcept
@@ -442,14 +189,14 @@ template <byte_like Byte, hash_mode Mode>
 }
 } // namespace hash_detail
 
-template <hash_detail::byte_like Byte, hash_mode Mode = standard_t>
+template <byte_like Byte, hash_mode Mode = standard_t>
 [[nodiscard]] constexpr uint64_t hash_bytes(std::span<Byte const> const input, uint64_t const seed = 0) noexcept
 {
   [[assume(input.data() != nullptr)]];
   return hash_detail::hash_bytes_impl(Mode {}, input, seed, hash_detail::default_secret);
 }
 
-template <hash_detail::byte_like Byte, hash_mode Mode = standard_t>
+template <byte_like Byte, hash_mode Mode = standard_t>
 [[nodiscard]] constexpr uint64_t hash_bytes(std::span<Byte const> const input, uint64_t const seed, std::array<uint64_t, 8> const &secret) noexcept
 {
   [[assume(input.data() != nullptr)]];
@@ -484,10 +231,10 @@ template <hash_mode Mode = standard_t>
   return hash_bytes<char, Mode>(std::span<char const> { text.data(), text.size() }, seed);
 }
 
-template <hash_detail::scalar_hashable T, hash_mode Mode = standard_t>
+template <scalar_hashable T, hash_mode Mode = standard_t>
 [[nodiscard]] constexpr uint64_t hash_value(T const value, uint64_t const seed = 0) noexcept
 {
-  auto const bytes = hash_detail::little_endian_array(hash_detail::to_unsigned_bits(value));
+  auto const bytes = little_endian_array(to_unsigned_bits(value));
   using byte_type  = std::remove_cv_t<decltype(bytes)>;
   return hash_range<byte_type, Mode>(bytes, seed);
 }
@@ -495,19 +242,19 @@ template <hash_detail::scalar_hashable T, hash_mode Mode = standard_t>
 template <class T>
 struct hash;
 
-template <hash_detail::scalar_hashable T>
+template <scalar_hashable T>
 struct hash<T>
 {
   using argument_type = T;
   using result_type   = size_t;
 
   [[nodiscard]] static constexpr size_t operator() (argument_type value) noexcept
-  requires (hash_detail::scalar_hashable<T>)
+  requires (scalar_hashable<T>)
   {
     if constexpr (sizeof(void *) == 8) {
-      return hash_detail::mix(hash_detail::to_unsigned_bits(static_cast<uint64_t>(value)), 0x9E'37'79'B9'7F'4A'7C'15ull);
+      return mix(to_unsigned_bits(static_cast<uint64_t>(value)), 0x9E'37'79'B9'7F'4A'7C'15ull);
     } else {
-      uint64_t product = hash_detail::to_unsigned_bits(static_cast<uint64_t>(value)) * 0xE8'17'FB'2Du;
+      uint64_t product = to_unsigned_bits(static_cast<uint64_t>(value)) * 0xE8'17'FB'2Du;
 #if defined(__MSVC_RUNTIME_CHECKS)
       return static_cast<uint32_t>(product & UINT32_MAX) ^ static_cast<uint32_t>(product >> 32);
 #else
@@ -592,9 +339,3 @@ struct hash<std::unique_ptr<T, Deleter>>
   }
 };
 } // namespace stdex
-
-#if defined(__clang__)
-#  pragma clang diagnostic pop
-#elif defined(__GNUC__)
-#  pragma GCC diagnostic pop
-#endif

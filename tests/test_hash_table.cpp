@@ -1349,9 +1349,9 @@ constexpr bool constexpr_hash_mul()
   auto const micro    = stdex::hash_range<decltype(buffer), stdex::micro_t>(buffer, 0u);
   auto const nano     = stdex::hash_range<decltype(buffer), stdex::nano_t>(buffer, 0u);
 
-  auto const product = stdex::hash_detail::umul128(0x0123'4567'89AB'CDEFull, 0xFEDC'BA98'7654'3210ull);
+  auto const product = stdex::umul128(0x0123'4567'89AB'CDEFull, 0xFEDC'BA98'7654'3210ull);
   return k1 != k2 && standard != micro && standard != nano && micro != nano &&
-         product.high == stdex::hash_detail::umulh(0x0123'4567'89AB'CDEFull, 0xFEDC'BA98'7654'3210ull);
+         product.high == stdex::umulh(0x0123'4567'89AB'CDEFull, 0xFEDC'BA98'7654'3210ull);
 }
 
 static_assert(constexpr_stack_access());
