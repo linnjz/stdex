@@ -34,3 +34,5 @@ stdex_add_test(test_hash_table test_hash_table.cpp
 # Extracted detail headers (bit_traits, byte_utils, int128) plus the fastmod
 # port standing on them; include/ alone suffices, no extra include dirs.
 stdex_add_test(test_fastmod test_fastmod.cpp)
+
+stdex_add_test(test_uninitialized_algorithms test_uninitialized_algorithms.cpp)
