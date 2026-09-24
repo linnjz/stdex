@@ -35,6 +35,9 @@
 #elif defined(__GNUC__)
 #  pragma GCC diagnostic push
 #  pragma GCC diagnostic ignored "-Wattributes"
+#elif defined(_MSC_VER)
+#  pragma warning(push)
+#  pragma warning(disable : 5030)
 #endif
 
 namespace stdex
@@ -86,12 +89,14 @@ constexpr uint128_t umul128_portable(uint64_t const lhs, uint64_t const rhs) noe
   return { low, high };
 }
 
-[[nodiscard, msvc::forceinline, gnu::always_inline]] constexpr uint64_t umulh_portable(uint64_t const lhs, uint64_t const rhs) noexcept
+[[nodiscard, msvc::forceinline, gnu::always_inline]] 
+constexpr uint64_t umulh_portable(uint64_t const lhs, uint64_t const rhs) noexcept
 {
   return umul128_portable(lhs, rhs).high;
 }
 
-[[nodiscard, msvc::forceinline, gnu::always_inline]] constexpr uint128_t umul128(uint64_t const lhs, uint64_t const rhs) noexcept
+[[nodiscard, msvc::forceinline, gnu::always_inline]] 
+constexpr uint128_t umul128(uint64_t const lhs, uint64_t const rhs) noexcept
 {
 #if defined(_MSC_VER) && !defined(__clang__) && (defined(_M_X64) || defined(_M_ARM64) || defined(_M_ARM64EC))
   if consteval {
@@ -113,7 +118,8 @@ constexpr uint128_t umul128_portable(uint64_t const lhs, uint64_t const rhs) noe
 #endif
 }
 
-[[nodiscard, msvc::forceinline, gnu::always_inline]] constexpr uint64_t umulh(uint64_t const lhs, uint64_t const rhs) noexcept
+[[nodiscard, msvc::forceinline, gnu::always_inline]] 
+constexpr uint64_t umulh(uint64_t const lhs, uint64_t const rhs) noexcept
 {
 #if defined(_MSC_VER) && !defined(__clang__) && (defined(_M_X64) || defined(_M_ARM64) || defined(_M_ARM64EC))
   if consteval {
@@ -142,7 +148,8 @@ constexpr uint128_t add128_portable(uint128_t const value, uint64_t const addend
   return { sum_lo, value.high + carry };
 }
 
-[[nodiscard, msvc::forceinline, gnu::always_inline]] constexpr uint128_t add128(uint128_t const value, uint64_t const addend) noexcept
+[[nodiscard, msvc::forceinline, gnu::always_inline]] 
+constexpr uint128_t add128(uint128_t const value, uint64_t const addend) noexcept
 {
 #if defined(_MSC_VER) && !defined(__clang__) && defined(_M_X64) && !defined(_M_ARM64EC)
   if consteval {
@@ -183,7 +190,8 @@ constexpr uint128_t div128_portable(uint128_t const dividend, uint64_t const div
 }
 
 /// \pre divisor != 0
-[[nodiscard, msvc::forceinline, gnu::always_inline]] constexpr uint128_t div128(uint128_t const dividend, uint64_t const divisor) noexcept
+[[nodiscard, msvc::forceinline, gnu::always_inline]] 
+constexpr uint128_t div128(uint128_t const dividend, uint64_t const divisor) noexcept
 {
 #if defined(_MSC_VER) && !defined(__clang__) && defined(_M_X64) && !defined(_M_ARM64EC)
   if consteval {
@@ -229,13 +237,15 @@ constexpr uint64_t mul128_u64_hi(uint128_t const value, uint64_t const multiplie
   return add128({ top_lo, top_hi }, bottom_hi).high;
 }
 
-[[nodiscard, msvc::forceinline, gnu::always_inline]] constexpr uint64_t mix(uint64_t const lhs, uint64_t const rhs) noexcept
+[[nodiscard, msvc::forceinline, gnu::always_inline]] 
+constexpr uint64_t mix(uint64_t const lhs, uint64_t const rhs) noexcept
 {
   auto const [low, high] = umul128(lhs, rhs);
   return low ^ high;
 }
 
-[[msvc::forceinline, gnu::always_inline]] constexpr void mum(uint64_t &lhs, uint64_t &rhs) noexcept
+[[msvc::forceinline, gnu::always_inline]] 
+constexpr void mum(uint64_t &lhs, uint64_t &rhs) noexcept
 {
   auto const product = umul128(lhs, rhs);
   lhs                = product.low;
@@ -247,4 +257,6 @@ constexpr uint64_t mul128_u64_hi(uint128_t const value, uint64_t const multiplie
 #  pragma clang diagnostic pop
 #elif defined(__GNUC__)
 #  pragma GCC diagnostic pop
+#elif defined(_MSC_VER)
+#  pragma warning(pop)
 #endif

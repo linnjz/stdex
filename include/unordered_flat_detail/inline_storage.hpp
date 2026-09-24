@@ -90,8 +90,8 @@ struct inline_storage : public Traits
       std::construct_at(&heap_);
       storage_mode_ = storage_mode::heap;
     } else {
-#if __cplusplus >= 202603L
-      ::new (static_cast<void *>(&stack_)) stack_block;
+#if defined(__cpp_lib_start_lifetime) && __cpp_lib_start_lifetime >= 202603L
+      std::start_lifetime(stack_);
 #else
       std::construct_at(&stack_);
 #endif
@@ -239,10 +239,11 @@ struct inline_storage : public Traits
   [[nodiscard]] constexpr value_type *elements_address_() const noexcept
   {
     if (is_heap()) return std::to_address(heap_.elements_ptr_);
-    if constexpr (inline_capacity > 0) {
+    if constexpr (inline_capacity != 0) {
       return const_cast<value_type *>(static_cast<value_type const *>(stack_.elements_));
+    } else {
+      return nullptr;
     }
-    return nullptr;
   }
 
   [[nodiscard]] constexpr group_type *groups_address_() const noexcept
@@ -250,18 +251,19 @@ struct inline_storage : public Traits
     if (is_heap()) return std::to_address(heap_.groups_ptr_);
     if constexpr (inline_capacity != 0) {
       return const_cast<group_type *>(static_cast<group_type const *>(stack_.groups_));
+    } else {
+      return nullptr;
     }
-    return nullptr;
   }
 
   static constexpr void initial_group_array_(group_type *groups_ptr, size_type group_count) noexcept
   {
     if consteval {
-      // reset() after construct_at zeroes every byte through a member write;
-      // MSVC's constant evaluator needs that write (not just value-init) to
-      // consider the union member live before available_mask reads it.
+      // Allocated storage yields no live objects; construct each group before
+      // the member write. Strict evaluators (clang) reject the bare write;
+      // MSVC's lenient one lets it through either way.
       for (size_type i = 0; i < group_count; ++i) {
-        std::construct_at(groups_ptr + i);
+        std::construct_at(groups_ptr + i); // necessary
         groups_ptr[i].reset();
       }
     } else {
@@ -329,19 +331,21 @@ struct inline_storage : public Traits
   {
     if constexpr (inline_capacity != 0) {
       std::destroy_at(&heap_);
-#if __cplusplus >= 202603L
-      ::new (static_cast<void *>(&stack_)) stack_block;
+#if defined(__cpp_lib_start_lifetime) && __cpp_lib_start_lifetime >= 202603L
+      std::start_lifetime(stack_);
 #else
-      std::construct_at(&stack_);
+      if consteval {
+        throw "stdex: stack storage requires std::start_lifetime for constant evaluation";
+      } else {
+        std::construct_at(&stack_);
+      }
 #endif
-
+      initial_group_array_(stack_.groups_, (inline_capacity + 1) / group_size_());
       storage_mode_      = storage_mode::stack;
       group_index_shift_ = static_cast<uint8_t>(group_index_shift_by_(inline_capacity));
       group_count_mask_  = (inline_capacity + 1) / group_size_() - 1;
       size_              = 0;
       max_load_          = inline_capacity;
-
-      initial_group_array_(stack_.groups_, group_count_());
     }
   }
 
@@ -371,21 +375,23 @@ struct inline_storage : public Traits
       size_               = 0;
       max_load_           = initial_max_load_(0);
     } else {
-#if __cplusplus >= 202603L
-      ::new (static_cast<void *>(&stack_)) stack_block;
+#if defined(__cpp_lib_start_lifetime) && __cpp_lib_start_lifetime >= 202603L
+      std::start_lifetime(stack_);
 #else
-      std::construct_at(&stack_);
+      if consteval {
+        throw "stdex: stack storage requires std::start_lifetime for constant evaluation";
+      } else {
+        std::construct_at(&stack_);
+      }
 #endif
-
+      // Only the group bytes are initialized: empty slots hold no live element
+      // (elements_ stays raw storage and is constructed on insert).
+      initial_group_array_(stack_.groups_, (inline_capacity + 1) / group_size_());
       storage_mode_      = storage_mode::stack;
       group_index_shift_ = static_cast<uint8_t>(group_index_shift_by_(inline_capacity));
       group_count_mask_  = (inline_capacity + 1) / group_size_() - 1;
       size_              = 0;
       max_load_          = inline_capacity;
-
-      // Only the group bytes are initialized: empty slots hold no live element
-      // (elements_ stays raw storage and is constructed on insert).
-      initial_group_array_(stack_.groups_, group_count_());
     }
   }
 
@@ -395,6 +401,9 @@ struct inline_storage : public Traits
 #elif defined(__GNUC__)
 #  pragma GCC diagnostic push
 #  pragma GCC diagnostic ignored "-Wattributes"
+#elif defined(_MSC_VER)
+#  pragma warning(push)
+#  pragma warning(disable : 5030)
 #endif
 
   template <class Fn>
@@ -415,7 +424,6 @@ struct inline_storage : public Traits
       int occupied_mask = group_type::occupied_mask_excluding_sentinel(group_ptr, sentinel_group);
       while (occupied_mask) {
         unsigned const slot_index = countr_zero_unchecked_(static_cast<unsigned>(occupied_mask));
-        [[assume(slot_index < group_type::capacity())]];
         fn(elements_ptr + group_index * group_size_() + slot_index, group_ptr, slot_index);
         occupied_mask &= occupied_mask - 1;
       }
@@ -457,7 +465,6 @@ struct inline_storage : public Traits
       group_type *const group_ptr = groups_ptr + position;
       if (int const avail_mask = group_ptr->available_mask()) [[likely]] {
         unsigned const slot_index = countr_zero_unchecked_(static_cast<unsigned>(avail_mask));
-        [[assume(slot_index < group_type::capacity())]];
         value_type *const element_ptr = elements_ptr + position * group_size_() + slot_index;
         construct_element_unchecked_(element_ptr, std::forward<Args>(args)...);
         group_ptr->set_fingerprint_hash(slot_index, hash);
@@ -492,7 +499,6 @@ struct inline_storage : public Traits
           }
           do {
             unsigned const slot_index = countr_zero_unchecked_(static_cast<unsigned>(fingerprint_mask));
-            [[assume(slot_index < group_type::capacity())]];
             if (key_eq_(key_val, Traits::key_fn(element_ptr[slot_index]))) [[likely]] {
               return iterator { element_ptr + slot_index, group_ptr, slot_index };
             }
@@ -508,7 +514,8 @@ struct inline_storage : public Traits
   }
 
   template <class T>
-  [[nodiscard, msvc::forceinline, gnu::always_inline]] static constexpr int countr_zero_unchecked_(T value) noexcept
+  [[nodiscard, msvc::forceinline, gnu::always_inline]] 
+  static constexpr int countr_zero_unchecked_(T value) noexcept
   {
     static_assert(std::is_integral_v<T> && std::is_unsigned_v<T>, "T must be an unsigned integer type");
 
@@ -542,7 +549,10 @@ struct inline_storage : public Traits
 #  pragma clang diagnostic pop
 #elif defined(__GNUC__)
 #  pragma GCC diagnostic pop
+#elif defined(_MSC_VER)
+#  pragma warning(pop)
 #endif
+
 
   struct alignas(16) heap_block
   {
@@ -553,14 +563,18 @@ struct inline_storage : public Traits
   template <typename T, std::size_t N> struct storage_for { using type = T[N]; };
   template <typename T> struct storage_for<T, 0> { using type = char; };
 
-  /// The arrays are raw storage: the default constructor deliberately starts no
-  /// member lifetime, so elements are constructed on demand and only the group
-  /// bytes are initialized.  (A defaulted constructor would be deleted because
-  /// value_type is not trivially default constructible.)
+  /// Raw storage on purpose: the constructor starts no member lifetime, so
+  /// elements are constructed on demand.  Per-element storage unions were
+  /// rejected: &slot[i].value is a single-object pointer without array
+  /// provenance, so constexpr pointer arithmetic (and hence a random-access
+  /// iterator) is impossible without retouching construction, destruction,
+  /// addressing and iteration project-wide; stack constant evaluation stays
+  /// gated on std::start_lifetime instead.  groups_ needs no union: as POD it
+  /// is never implicitly constructed here.
   struct alignas(16) stack_block
   {
     union { typename storage_for<value_type, inline_capacity>::type elements_; };
-    union { typename storage_for<group_type, (inline_capacity + 1) / group_type::capacity()>::type groups_; };
+    typename storage_for<group_type, (inline_capacity + 1) / group_type::capacity()>::type groups_;
     constexpr stack_block() noexcept {}
     constexpr ~stack_block() noexcept {}
   };

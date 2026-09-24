@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 LinnJz
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -26,6 +26,9 @@
 #elif defined(__GNUC__)
 #  pragma GCC diagnostic push
 #  pragma GCC diagnostic ignored "-Wattributes"
+#elif defined(_MSC_VER)
+#  pragma warning(push)
+#  pragma warning(disable : 5030)
 #endif
 
 namespace stdex::unordered_flat_detail
@@ -47,21 +50,24 @@ template <class KeyT, class Ret, class WithKey, class WithoutKey, class... Args>
 
 template <class KeyT, class Ret, class WithKey, class WithoutKey, class Arg>
 requires std::is_same_v<KeyT, std::remove_cvref_t<Arg>>
-[[msvc::forceinline, gnu::always_inline]] constexpr Ret try_key_extraction_impl(extract_key_priority_tag1, WithKey with_key, WithoutKey, Arg &&arg)
+[[msvc::forceinline, gnu::always_inline]]
+constexpr Ret try_key_extraction_impl(extract_key_priority_tag1, WithKey with_key, WithoutKey, Arg &&arg)
 {
   return with_key(arg, std::forward<Arg>(arg));
 }
 
 template <class KeyT, class Ret, class WithKey, class WithoutKey, class Arg>
 requires requires { typename Arg::first_type; } && std::is_same_v<std::remove_cv_t<typename Arg::first_type>, KeyT>
-[[msvc::forceinline, gnu::always_inline]] constexpr Ret try_key_extraction_impl(extract_key_priority_tag1, WithKey with_key, WithoutKey, Arg &&arg)
+[[msvc::forceinline, gnu::always_inline]] 
+constexpr Ret try_key_extraction_impl(extract_key_priority_tag1, WithKey with_key, WithoutKey, Arg &&arg)
 {
   return with_key(arg.first, std::forward<Arg>(arg));
 }
 
 template <class KeyT, class Ret, class WithKey, class WithoutKey, class Arg1, class Arg2>
 requires std::is_same_v<KeyT, std::remove_cvref_t<Arg1>>
-[[msvc::forceinline, gnu::always_inline]] constexpr Ret try_key_extraction_impl(extract_key_priority_tag1, WithKey with_key, WithoutKey, Arg1 &&arg1, Arg2 &&arg2)
+[[msvc::forceinline, gnu::always_inline]] 
+constexpr Ret try_key_extraction_impl(extract_key_priority_tag1, WithKey with_key, WithoutKey, Arg1 &&arg1, Arg2 &&arg2)
 {
   return with_key(arg1, std::forward<Arg1>(arg1), std::forward<Arg2>(arg2));
 }
@@ -71,7 +77,8 @@ requires std::is_same_v<std::remove_cvref_t<PiecewiseConstruct>, std::piecewise_
          requires { typename std::tuple_size<std::remove_cvref_t<Tuple1>>::type; } &&
           (std::tuple_size_v<std::remove_cvref_t<Tuple1>> == 1) &&
           std::is_same_v<std::remove_cvref_t<typename std::tuple_element<0, std::remove_cvref_t<Tuple1>>::type>, KeyT>
-[[msvc::forceinline, gnu::always_inline]] constexpr Ret try_key_extraction_impl(extract_key_priority_tag1, WithKey with_key, WithoutKey, PiecewiseConstruct &&pc, Tuple1 &&tuple1, Tuple2 &&tuple2)
+[[msvc::forceinline, gnu::always_inline]] 
+constexpr Ret try_key_extraction_impl(extract_key_priority_tag1, WithKey with_key, WithoutKey, PiecewiseConstruct &&pc, Tuple1 &&tuple1, Tuple2 &&tuple2)
 {
   return with_key(std::get<0>(tuple1), std::forward<PiecewiseConstruct>(pc), std::forward<Tuple1>(tuple1), std::forward<Tuple2>(tuple2));
 }
@@ -89,4 +96,6 @@ try_key_extraction(WithKey with_key, WithoutKey without_key, Args &&...args)
 #  pragma clang diagnostic pop
 #elif defined(__GNUC__)
 #  pragma GCC diagnostic pop
+#elif defined(_MSC_VER)
+#  pragma warning(pop)
 #endif
