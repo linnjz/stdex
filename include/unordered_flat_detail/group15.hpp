@@ -19,6 +19,7 @@
 #include <cassert> // assert
 #include <cstdint> // size_t
 #include <memory>  // std::construct_at
+#include <type_traits> // std::is_constant_evaluated
 
 #if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (_M_IX86_FP >= 2)
 #  include <emmintrin.h>
@@ -163,13 +164,14 @@ private:
 public:
   static constexpr size_t capacity() noexcept { return 15; }
 
+  [[nodiscard]]
 #if !defined(DEBUG) && !defined(_DEBUG)
-  [[nodiscard, msvc::forceinline, gnu::always_inline]]
-#endif 
+  [[msvc::forceinline, gnu::always_inline]]
+#endif
   constexpr int fingerprint_mask(size_t hash) const noexcept
   {
     if constexpr (is_simd_enabled) {
-      if consteval {
+      if (std::is_constant_evaluated()) {
         auto fp  = get_fingerprint_byte(hash);
         int mask = 0;
         for (size_t i = 0; i < capacity(); ++i) {
@@ -221,7 +223,7 @@ public:
   constexpr void reset() noexcept
   {
     if constexpr (is_simd_enabled) {
-      if consteval {
+      if (std::is_constant_evaluated()) {
         for (size_t i = 0; i < (sizeof(slot_fp_bytes_) / sizeof(slot_fp_bytes_[0])); ++i) slot_fp_bytes_[i] = 0;
       } else {
 #if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (_M_IX86_FP >= 2)
@@ -251,7 +253,7 @@ public:
     if constexpr (is_simd_enabled) {
       *byte = slot_available_mark;
     } else {
-      if consteval {
+      if (std::is_constant_evaluated()) {
         // The scalar layout spreads one slot over several 16-bit lanes, so
         // clearing it needs the enclosing group; deriving that group from a
         // bare address requires pointer->integer, which is not a constant
@@ -264,8 +266,9 @@ public:
     }
   }
 
+  [[nodiscard]]
 #if !defined(DEBUG) && !defined(_DEBUG)
-  [[nodiscard, msvc::forceinline, gnu::always_inline]]
+  [[msvc::forceinline, gnu::always_inline]]
 #endif
   constexpr void set_fingerprint_hash(size_t slot_index, size_t hash) noexcept
   {
@@ -278,15 +281,16 @@ public:
 #endif
   }
 
+  [[nodiscard]]
 #if !defined(DEBUG) && !defined(_DEBUG)
-  [[nodiscard, msvc::forceinline, gnu::always_inline]]
+  [[msvc::forceinline, gnu::always_inline]]
 #endif
   constexpr void set_overflow_mark(size_t hash) noexcept
   {
     if constexpr (is_simd_enabled) {
       overflow() |= static_cast<unsigned char>(1u << (hash % 8));
     } else {
-      if consteval {
+      if (std::is_constant_evaluated()) {
         // Scalar layout: the overflow flag of lane j = hash % 8 lives at bit 15
         // of the j-th 16-bit lane, i.e. bit 15 + 16 * (j % 4) of word j / 4.
         auto const lane = uint64_t(0x80'00u) << (16 * (hash % 4));
@@ -300,8 +304,9 @@ public:
     }
   }
 
+  [[nodiscard]]
 #if !defined(DEBUG) && !defined(_DEBUG)
-  [[nodiscard, msvc::forceinline, gnu::always_inline]]
+  [[msvc::forceinline, gnu::always_inline]]
 #endif
   constexpr bool is_overflow_by_hash(size_t hash) const noexcept
   {
@@ -309,7 +314,7 @@ public:
       constexpr unsigned char shift[] = { 1, 2, 4, 8, 16, 32, 64, 128 };
       return (overflow() & shift[hash % 8]) != 0;
     } else {
-      if consteval {
+      if (std::is_constant_evaluated()) {
         auto const lane = uint64_t(0x80'00u) << (16 * (hash % 4));
         return (((hash % 8) < 4 ? slot_fp_words_[0] : slot_fp_words_[1]) & lane) != 0;
       } else {
@@ -323,7 +328,7 @@ public:
     if constexpr (is_simd_enabled) {
       return is_overflow_by_hash(static_cast<size_t>(slot_fp_bytes_[slot_index]));
     } else {
-      if consteval {
+      if (std::is_constant_evaluated()) {
         auto const lane = uint64_t(0x80'00u) << (16 * (slot_index % 4));
         return (((slot_index % 8) < 4 ? slot_fp_words_[0] : slot_fp_words_[1]) & lane) != 0;
       } else {
@@ -399,13 +404,14 @@ public:
     return curr->occupied_mask() & ~(static_cast<int>(curr == sentinel_group) << (capacity() - 1));
   }
 
+  [[nodiscard]]
 #if !defined(DEBUG) && !defined(_DEBUG)
-  [[nodiscard, msvc::forceinline, gnu::always_inline]]
-#endif 
+  [[msvc::forceinline, gnu::always_inline]]
+#endif
   constexpr int available_mask() const noexcept
   {
     if constexpr (is_simd_enabled) {
-      if consteval {
+      if (std::is_constant_evaluated()) {
         int mask = 0;
         for (size_t i = 0; i < capacity(); ++i) {
           if (slot_fp_bytes_[i] == slot_available_mark) mask |= (1 << i);
@@ -429,7 +435,7 @@ public:
   constexpr int occupied_mask() const noexcept
   {
     if constexpr (is_simd_enabled) {
-      if consteval {
+      if (std::is_constant_evaluated()) {
         int mask = 0;
         for (size_t i = 0; i < capacity(); ++i) {
           if (slot_fp_bytes_[i] != slot_available_mark) mask |= (1 << i);

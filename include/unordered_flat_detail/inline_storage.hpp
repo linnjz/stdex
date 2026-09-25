@@ -62,7 +62,10 @@ struct inline_storage : public Traits
   using group_pointer_traits = std::pointer_traits<group_pointer>;
 
   using const_iterator = hash_table_iterator<Traits, pointer, group_pointer, true>;
-  using iterator       = std::conditional_t<std::is_same_v<key_type, value_type>, const_iterator, hash_table_iterator<Traits, pointer, group_pointer, false>>;
+  using iterator       = std::conditional_t<
+    std::is_same_v<key_type, value_type>, 
+    const_iterator, 
+    hash_table_iterator<Traits, pointer, group_pointer, false>>;
   using lazy_iterator  = hash_table_lazy_iterator<iterator>;
 
   using Traits::inline_capacity;
@@ -83,7 +86,7 @@ struct inline_storage : public Traits
   struct alignas(16) heap_block;
   struct alignas(16) stack_block;
 
-  constexpr inline_storage(allocator_type const &alloc) noexcept
+  explicit constexpr inline_storage(allocator_type const &alloc) noexcept
       : alloc_ { alloc }
   {
     if constexpr (inline_capacity == 0) {
@@ -109,7 +112,7 @@ struct inline_storage : public Traits
       , key_eq_ { std::forward<K>(key_eq) }
       , alloc_ { std::forward<Al>(alloc) }
   {
-    dissociate_();
+    initialize_storage_();
   }
 
   constexpr ~inline_storage() noexcept { dispose_(); }
@@ -142,11 +145,15 @@ struct inline_storage : public Traits
 
   constexpr void destroy_element_unchecked_(value_type *element_ptr) noexcept
   {
-    if (is_heap()) {
-      allocator_traits::destroy(alloc_, element_ptr);
-    } else {
-      std::destroy_at(element_ptr);
+    if constexpr (!std::is_trivially_destructible_v<value_type>) {
+      if (is_heap()) {
+        allocator_traits::destroy(alloc_, element_ptr);
+      } else {
+        std::destroy_at(element_ptr);
+      }
     }
+    // Don't decrement by yourself, leave it to the outside to handle, to avoid the overhead
+    // of repeatedly calling the decrement instruction in destroy_elements_unchecked_.
   }
 
   constexpr void destroy_elements_unchecked_() noexcept
@@ -177,11 +184,12 @@ struct inline_storage : public Traits
 
   constexpr void allocate_unchecked_(size_type capacity)
   {
+    assert(is_heap() && "allocate_unchecked_() requires heap mode");
     group_index_shift_ = static_cast<uint8_t>(group_index_shift_by_(capacity));
     group_count_mask_  = group_count_by_(static_cast<size_type>(group_index_shift_)) - 1; // Power of 2 alignment
     max_load_          = initial_max_load_(capacity_unchecked_());                        // Depends on group_count
 
-    if consteval {
+    if (std::is_constant_evaluated()) {
       auto elements_ptr = allocator_traits::allocate(alloc_, capacity_unchecked_());
       auto groups_alloc = group_allocator_type { alloc_ };
       auto groups_ptr   = group_allocator_traits::allocate(groups_alloc, group_count_());
@@ -205,7 +213,8 @@ struct inline_storage : public Traits
 
   constexpr void deallocate_unchecked_() noexcept
   {
-    if consteval {
+    assert(is_heap() && "deallocate_unchecked_() requires heap allocation");
+    if (std::is_constant_evaluated()) {
       auto groups_alloc = group_allocator_type { alloc_ };
       allocator_traits::deallocate(alloc_, heap_.elements_ptr_, group_count_() * group_size_() - 1);
       group_allocator_traits::deallocate(groups_alloc, heap_.groups_ptr_, group_count_());
@@ -258,7 +267,7 @@ struct inline_storage : public Traits
 
   static constexpr void initial_group_array_(group_type *groups_ptr, size_type group_count) noexcept
   {
-    if consteval {
+    if (std::is_constant_evaluated()) {
       // Allocated storage yields no live objects; construct each group before
       // the member write. Strict evaluators (clang) reject the bare write;
       // MSVC's lenient one lets it through either way.
@@ -334,7 +343,7 @@ struct inline_storage : public Traits
 #if defined(__cpp_lib_start_lifetime) && __cpp_lib_start_lifetime >= 202603L
       std::start_lifetime(stack_);
 #else
-      if consteval {
+      if (std::is_constant_evaluated()) {
         throw "stdex: stack storage requires std::start_lifetime for constant evaluation";
       } else {
         std::construct_at(&stack_);
@@ -358,11 +367,13 @@ struct inline_storage : public Traits
 
   constexpr void dispose_() noexcept
   {
-    if (!empty()) destroy_elements_unchecked_();
+    if constexpr (!std::is_trivially_destructible_v<value_type>) {
+      if (!empty()) destroy_elements_unchecked_();
+    }
     if (is_heap() && elements_address_()) deallocate_unchecked_();
   }
 
-  constexpr void dissociate_() noexcept
+  constexpr void initialize_storage_() noexcept
   {
     if constexpr (inline_capacity == 0) {
       std::construct_at(&heap_);
@@ -378,7 +389,7 @@ struct inline_storage : public Traits
 #if defined(__cpp_lib_start_lifetime) && __cpp_lib_start_lifetime >= 202603L
       std::start_lifetime(stack_);
 #else
-      if consteval {
+      if (std::is_constant_evaluated()) {
         throw "stdex: stack storage requires std::start_lifetime for constant evaluation";
       } else {
         std::construct_at(&stack_);
@@ -416,8 +427,13 @@ struct inline_storage : public Traits
   {
     value_type *const elements_ptr = elements_address_();
     group_type *const groups_ptr   = groups_address_();
+#if __has_cpp_attribute(assume) >= 202207L
     [[assume(elements_ptr != nullptr)]];
     [[assume(groups_ptr != nullptr)]];
+#else
+    assert(elements_ptr != nullptr && groups_ptr != nullptr && 
+          "elements_address_() and groups_address_() must return non-null pointers");
+#endif
 
     group_type *const sentinel_group = groups_ptr + group_count_() - 1;
 
@@ -461,8 +477,13 @@ struct inline_storage : public Traits
   {
     value_type *const elements_ptr = elements_address_();
     group_type *const groups_ptr   = groups_address_();
+#if __has_cpp_attribute(assume) >= 202207L
     [[assume(elements_ptr != nullptr)]];
     [[assume(groups_ptr != nullptr)]];
+#else
+    assert(elements_ptr != nullptr && groups_ptr != nullptr && 
+          "elements_address_() and groups_address_() must return non-null pointers");
+#endif
 
     for (prober_type prober(group_index_(hash));; prober.next(group_count_mask_)) {
       size_type position    = prober.position();
@@ -480,15 +501,21 @@ struct inline_storage : public Traits
   }
 
   template <class K>
+  [[nodiscard]]
 #if !defined(DEBUG) && !defined(_DEBUG)
-  [[nodiscard, msvc::forceinline, gnu::always_inline]]
+  [[msvc::forceinline, gnu::always_inline]]
 #endif
   constexpr iterator find_fingerprint_slot_unchecked_(K const &key_val, size_type hash) const
   {
     value_type *const elements_ptr = elements_address_();
     group_type *const groups_ptr   = groups_address_();
+#if __has_cpp_attribute(assume) >= 202207L
     [[assume(elements_ptr != nullptr)]];
     [[assume(groups_ptr != nullptr)]];
+#else
+    assert(elements_ptr != nullptr && groups_ptr != nullptr && 
+          "elements_address_() and groups_address_() must return non-null pointers");
+#endif
 
     prober_type prober(group_index_(hash));
     do [[likely]] {
@@ -496,7 +523,7 @@ struct inline_storage : public Traits
         group_type *const group_ptr = groups_ptr + position;
         if (int fingerprint_mask = group_ptr->fingerprint_mask(hash)) {
           value_type *const element_ptr = elements_ptr + position * group_size_();
-          if not consteval {
+          if (!std::is_constant_evaluated()) {
 #if defined(_MSC_VER)
             _mm_prefetch(static_cast<char const *>(static_cast<void const *>(element_ptr)), _MM_HINT_T0);
 #elif defined(__GNUC__) || defined(__clang__)
@@ -520,14 +547,15 @@ struct inline_storage : public Traits
   }
 
   template <class T>
+  [[nodiscard]]
 #if !defined(DEBUG) && !defined(_DEBUG)
-  [[nodiscard, msvc::forceinline, gnu::always_inline]]
+  [[msvc::forceinline, gnu::always_inline]]
 #endif
   static constexpr int countr_zero_unchecked_(T value) noexcept
   {
     static_assert(std::is_integral_v<T> && std::is_unsigned_v<T>, "T must be an unsigned integer type");
 
-    if consteval {
+    if (std::is_constant_evaluated()) {
       return std::countr_zero(value);
     } else {
 #if defined(_MSC_VER)

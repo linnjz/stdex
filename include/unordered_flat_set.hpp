@@ -16,8 +16,10 @@
 
 #pragma once
 
-#include "ufset_traits.hpp"
-#include "hash_table.hpp"
+#include <version>
+
+#include "unordered_flat_detail/ufset_traits.hpp"
+#include "unordered_flat_detail/hash_table.hpp"
 #include "hash.hpp"
 
 namespace stdex
@@ -239,6 +241,7 @@ public:
     this->insert(first, last);
   }
 
+#ifdef __cpp_lib_containers_ranges
   // ---------- from_range constructor ----------
   template <unordered_flat_detail::container_compatible_range<value_type> Rng>
   constexpr unordered_flat_set(std::from_range_t, Rng &&rng)
@@ -301,6 +304,7 @@ public:
     if (bucket_count > 0) this->reserve(bucket_count);
     this->insert_range(std::forward<Rng>(rng));
   }
+#endif // __cpp_lib_containers_ranges
 
   // ---------- initializer_list constructor ----------
   constexpr unordered_flat_set(std::initializer_list<value_type> ilist)
@@ -422,6 +426,7 @@ requires unordered_flat_detail::is_hasher_for<Hash, Key>
 unordered_flat_set(std::initializer_list<Key>, unordered_flat_detail::guide_size_type_t<Alloc>, Hash, Alloc) -> 
 unordered_flat_set<Key, 0, Hash, std::equal_to<Key>, Alloc>;
 
+#ifdef __cpp_lib_containers_ranges
 // ---------- CTAD from_range ----------
 template <std::ranges::input_range Rng,
           class Hash  = stdex::hash<std::ranges::range_value_t<Rng>>,
@@ -448,6 +453,7 @@ requires unordered_flat_detail::is_hasher_for<Hash, std::ranges::range_value_t<R
       && unordered_flat_detail::is_allocator<Alloc>
 unordered_flat_set(std::from_range_t, Rng &&, unordered_flat_detail::guide_size_type_t<Alloc>, Hash, Alloc) ->
 unordered_flat_set<std::ranges::range_value_t<Rng>, 0, Hash, std::equal_to<std::ranges::range_value_t<Rng>>, Alloc>;
+#endif // __cpp_lib_containers_ranges
 
 // ---------- non-member swap ----------
 template <class KeyType, size_t N, class Hasher, class KeyEqual, class Allocator>
