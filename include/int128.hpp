@@ -58,7 +58,9 @@ struct uint128_t
   }
 };
 
+#if !defined(DEBUG) && !defined(_DEBUG)
 [[nodiscard, msvc::forceinline, gnu::always_inline]]
+#endif
 constexpr uint128_t umul128_portable(uint64_t const lhs, uint64_t const rhs) noexcept
 {
   // Split into 32-bit half-words: x = x_low + x_high * 2^32
@@ -89,13 +91,17 @@ constexpr uint128_t umul128_portable(uint64_t const lhs, uint64_t const rhs) noe
   return { low, high };
 }
 
-[[nodiscard, msvc::forceinline, gnu::always_inline]] 
+#if !defined(DEBUG) && !defined(_DEBUG)
+[[nodiscard, msvc::forceinline, gnu::always_inline]]
+#endif
 constexpr uint64_t umulh_portable(uint64_t const lhs, uint64_t const rhs) noexcept
 {
   return umul128_portable(lhs, rhs).high;
 }
 
-[[nodiscard, msvc::forceinline, gnu::always_inline]] 
+#if !defined(DEBUG) && !defined(_DEBUG)
+[[nodiscard, msvc::forceinline, gnu::always_inline]]
+#endif
 constexpr uint128_t umul128(uint64_t const lhs, uint64_t const rhs) noexcept
 {
 #if defined(_MSC_VER) && !defined(__clang__) && (defined(_M_X64) || defined(_M_ARM64) || defined(_M_ARM64EC))
@@ -118,7 +124,9 @@ constexpr uint128_t umul128(uint64_t const lhs, uint64_t const rhs) noexcept
 #endif
 }
 
-[[nodiscard, msvc::forceinline, gnu::always_inline]] 
+#if !defined(DEBUG) && !defined(_DEBUG)
+[[nodiscard, msvc::forceinline, gnu::always_inline]]
+#endif
 constexpr uint64_t umulh(uint64_t const lhs, uint64_t const rhs) noexcept
 {
 #if defined(_MSC_VER) && !defined(__clang__) && (defined(_M_X64) || defined(_M_ARM64) || defined(_M_ARM64EC))
@@ -140,7 +148,9 @@ constexpr uint64_t umulh(uint64_t const lhs, uint64_t const rhs) noexcept
 #endif
 }
 
+#if !defined(DEBUG) && !defined(_DEBUG)
 [[nodiscard, msvc::forceinline, gnu::always_inline]]
+#endif
 constexpr uint128_t add128_portable(uint128_t const value, uint64_t const addend) noexcept
 {
   uint64_t const sum_lo = value.low + addend;
@@ -148,7 +158,9 @@ constexpr uint128_t add128_portable(uint128_t const value, uint64_t const addend
   return { sum_lo, value.high + carry };
 }
 
-[[nodiscard, msvc::forceinline, gnu::always_inline]] 
+#if !defined(DEBUG) && !defined(_DEBUG)
+[[nodiscard, msvc::forceinline, gnu::always_inline]]
+#endif
 constexpr uint128_t add128(uint128_t const value, uint64_t const addend) noexcept
 {
 #if defined(_MSC_VER) && !defined(__clang__) && defined(_M_X64) && !defined(_M_ARM64EC)
@@ -166,7 +178,9 @@ constexpr uint128_t add128(uint128_t const value, uint64_t const addend) noexcep
 }
 
 /// \pre divisor != 0
+#if !defined(DEBUG) && !defined(_DEBUG)
 [[nodiscard, msvc::forceinline, gnu::always_inline]]
+#endif
 constexpr uint128_t div128_portable(uint128_t const dividend, uint64_t const divisor) noexcept
 {
   // Binary long division: quotient_high is exact, quotient_low is built bit by bit.
@@ -190,7 +204,9 @@ constexpr uint128_t div128_portable(uint128_t const dividend, uint64_t const div
 }
 
 /// \pre divisor != 0
-[[nodiscard, msvc::forceinline, gnu::always_inline]] 
+#if !defined(DEBUG) && !defined(_DEBUG)
+[[nodiscard, msvc::forceinline, gnu::always_inline]]
+#endif
 constexpr uint128_t div128(uint128_t const dividend, uint64_t const divisor) noexcept
 {
 #if defined(_MSC_VER) && !defined(__clang__) && defined(_M_X64) && !defined(_M_ARM64EC)
@@ -218,7 +234,9 @@ constexpr uint128_t div128(uint128_t const dividend, uint64_t const divisor) noe
 #endif
 }
 
+#if !defined(DEBUG) && !defined(_DEBUG)
 [[nodiscard, msvc::forceinline, gnu::always_inline]]
+#endif
 constexpr uint128_t mul128_u64_lo(uint128_t const value, uint64_t const multiplier) noexcept
 {
   // Low 128 bits of the 192-bit product: high half overflow beyond bit 128 is discarded.
@@ -227,7 +245,9 @@ constexpr uint128_t mul128_u64_lo(uint128_t const value, uint64_t const multipli
   return { product_lo, product_hi };
 }
 
+#if !defined(DEBUG) && !defined(_DEBUG)
 [[nodiscard, msvc::forceinline, gnu::always_inline]]
+#endif
 constexpr uint64_t mul128_u64_hi(uint128_t const value, uint64_t const multiplier) noexcept
 {
   // High 64 bits of the 192-bit product, via split halves rejoined with add128.
@@ -237,14 +257,18 @@ constexpr uint64_t mul128_u64_hi(uint128_t const value, uint64_t const multiplie
   return add128({ top_lo, top_hi }, bottom_hi).high;
 }
 
-[[nodiscard, msvc::forceinline, gnu::always_inline]] 
+#if !defined(DEBUG) && !defined(_DEBUG)
+[[nodiscard, msvc::forceinline, gnu::always_inline]]
+#endif
 constexpr uint64_t mix(uint64_t const lhs, uint64_t const rhs) noexcept
 {
   auto const [low, high] = umul128(lhs, rhs);
   return low ^ high;
 }
 
-[[msvc::forceinline, gnu::always_inline]] 
+#if !defined(DEBUG) && !defined(_DEBUG)
+[[nodiscard, msvc::forceinline, gnu::always_inline]]
+#endif
 constexpr void mum(uint64_t &lhs, uint64_t &rhs) noexcept
 {
   auto const product = umul128(lhs, rhs);

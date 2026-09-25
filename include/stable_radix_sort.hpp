@@ -41,6 +41,7 @@
 #  include <omp.h> // omp_get_max_threads、omp_get_thread_num、omp_in_parallel
 #endif
 
+#include "bit_traits.hpp" // unsigned_of_bits_t, highest_one_bit_index
 #include "hybrid_alloc.hpp" // HYBRID_ALIGNED_ALLOC_THRESHOLD、hybrid_free
 
 #pragma push_macro("RADIX_SORT_RESTRICT")
@@ -287,25 +288,6 @@ struct is_reverse_iterator<std::reverse_iterator<Iter>> : std::true_type
 template <typename T>
 inline constexpr bool is_reverse_iterator_v = is_reverse_iterator<T>::value;
 
-#if defined(__SIZEOF_INT128__)
-using uint128_t = unsigned __int128;
-#endif
-
-// clang-format off
-template <std::size_t Bits>
-using uint_bits_t = std::conditional_t<
-    Bits <= 8, std::uint8_t,
-    std::conditional_t<Bits <= 16, std::uint16_t,
-    std::conditional_t<Bits <= 32, std::uint32_t,
-    std::conditional_t<Bits <= 64, std::uint64_t,
-#ifdef __SIZEOF_INT128__
-    std::conditional_t<Bits <= 128, uint128_t, void>
-#else
-    void
-#endif
-    >>>>;
-// clang-format on
-
 // Allocator concepts and RAII
 template <typename Alloc>
 concept standard_allocator = requires (Alloc a, typename std::allocator_traits<Alloc>::size_type n) {
@@ -516,7 +498,7 @@ struct sign_bit_traits
 {
   static_assert(std::is_arithmetic_v<T>, "arithmetic type required");
   using type                             = T;
-  using uint_t                           = uint_bits_t<sizeof(T) * CHAR_BIT>;
+  using uint_t                           = unsigned_of_bits_t<sizeof(T) * CHAR_BIT>;
   static constexpr size_t sign_bit_index = (sizeof(T) * CHAR_BIT) - 1;
   static constexpr uint_t all_bit_mask   = ~uint_t(0);
   static constexpr uint_t sign_bit_mask  = all_bit_mask << sign_bit_index;
@@ -634,13 +616,7 @@ struct radix_uint_projection_fn
         if constexpr (nans_pos_handling == radix_nans_pos_handling::at_first) base += 1U;
         return base;
       } else {
-#if defined(__GNUC__)
-        __builtin_unreachable();
-#elif defined(_MSC_VER)
-        __assume(false);
-#else
-        std::abort();
-#endif
+        static_assert(std::is_arithmetic_v<Arithmetic>, "transform() requires an arithmetic type");
       }
     }
 
@@ -681,45 +657,10 @@ RADIX_SORT_ALWAYS_INLINE
   } else if constexpr (RadixTraits::sort_order == radix_sort_order::descending) {
     return ((~x) >> RadixTraits::bits_per_pass * pass) & RadixTraits::radix_mask;
   } else {
-#if defined(__GNUC__)
-    __builtin_unreachable();
-#elif defined(_MSC_VER)
-    __assume(false);
-#else
-    std::abort();
-#endif
+    static_assert(RadixTraits::sort_order == radix_sort_order::ascending || 
+                  RadixTraits::sort_order == radix_sort_order::descending, 
+                  "unsupported radix_sort_order");
   }
-}
-
-/// Returns the most significant set bit index of an arithmetic value.
-/// Used to skip radix passes whose higher-order bits are all zero.
-/// For floating-point, evaluates the IEEE 754 bit representation.
-template <typename T>
-#if !defined(DEBUG) && !defined(_DEBUG)
-RADIX_SORT_ALWAYS_INLINE
-#endif
-    constexpr auto highest_one_bit_index(T value) noexcept -> size_t
-{
-  static_assert(std::is_arithmetic_v<T>, "T must be arithmetic");
-  using uint_t = uint_bits_t<sizeof(T) * CHAR_BIT>;
-
-  uint_t bits;
-  if constexpr (std::is_integral_v<T>) {
-    // Preserve two's complement bit pattern
-    bits = static_cast<uint_t>(value);
-  } else if constexpr (std::is_floating_point_v<T>) {
-    bits = std::bit_cast<uint_t>(value);
-  } else {
-#if defined(__GNUC__)
-    __builtin_unreachable();
-#elif defined(_MSC_VER)
-    __assume(false);
-#else
-    std::abort();
-#endif
-  }
-
-  return std::bit_width(static_cast<uint_t>(bits | uint_t(1))) - 1;
 }
 
 ///< Radix parallel computing utils

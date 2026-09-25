@@ -40,10 +40,6 @@
 
 namespace stdex
 {
-static_assert(CHAR_BIT == 8, "stdexhash requires 8-bit bytes");
-static_assert(sizeof(uint32_t) == 4);
-static_assert(sizeof(uint64_t) == 8);
-
 template <typename T>
 concept byte_like = std::same_as<std::remove_cv_t<T>, std::byte> ||
                     std::same_as<std::remove_cv_t<T>, char> ||
@@ -62,7 +58,10 @@ template <byte_like T>
 }
 
 template <byte_like Byte>
-[[nodiscard, msvc::forceinline, gnu::always_inline]] constexpr uint64_t read64_le(std::span<Byte const> const input, size_t const offset) noexcept
+#if !defined(DEBUG) && !defined(_DEBUG)
+[[nodiscard, msvc::forceinline, gnu::always_inline]]
+#endif
+constexpr uint64_t read64_le(std::span<Byte const> const input, size_t const offset) noexcept
 {
   std::array<Byte, 8> buf;
   std::copy_n(input.begin() + offset, buf.size(), buf.begin());
@@ -76,7 +75,10 @@ template <byte_like Byte>
 }
 
 template <byte_like Byte>
-[[nodiscard, msvc::forceinline, gnu::always_inline]] constexpr uint32_t read32_le(std::span<Byte const> const input, size_t const offset) noexcept
+#if !defined(DEBUG) && !defined(_DEBUG)
+[[nodiscard, msvc::forceinline, gnu::always_inline]]
+#endif
+constexpr uint32_t read32_le(std::span<Byte const> const input, size_t const offset) noexcept
 {
   std::array<Byte, 4> buf;
   std::copy_n(input.begin() + offset, buf.size(), buf.begin());
