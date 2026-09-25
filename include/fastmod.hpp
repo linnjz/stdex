@@ -44,8 +44,9 @@ constexpr uint64_t computeM_u32(uint32_t const d) noexcept
 }
 
 /// \pre d != 0, M == computeM_u32(d)
+[[nodiscard]]
 #if !defined(DEBUG) && !defined(_DEBUG)
-[[nodiscard, msvc::forceinline, gnu::always_inline]]
+[[msvc::forceinline, gnu::always_inline]]
 #endif
 constexpr uint32_t fastmod_u32(uint32_t const a, uint64_t const m, uint32_t const d) noexcept
 {
@@ -54,8 +55,9 @@ constexpr uint32_t fastmod_u32(uint32_t const a, uint64_t const m, uint32_t cons
 }
 
 /// \pre d > 1, M == computeM_u32(d)
+[[nodiscard]]
 #if !defined(DEBUG) && !defined(_DEBUG)
-[[nodiscard, msvc::forceinline, gnu::always_inline]]
+[[msvc::forceinline, gnu::always_inline]]
 #endif
 constexpr uint32_t fastdiv_u32(uint32_t const a, uint64_t const m) noexcept
 {
@@ -63,8 +65,9 @@ constexpr uint32_t fastdiv_u32(uint32_t const a, uint64_t const m) noexcept
 }
 
 /// \pre M == computeM_u32(d) for some d != 0
+[[nodiscard]]
 #if !defined(DEBUG) && !defined(_DEBUG)
-[[nodiscard, msvc::forceinline, gnu::always_inline]]
+[[msvc::forceinline, gnu::always_inline]]
 #endif
 constexpr bool is_divisible(uint32_t const n, uint64_t const m) noexcept
 {
@@ -72,8 +75,10 @@ constexpr bool is_divisible(uint32_t const n, uint64_t const m) noexcept
 }
 
 /// \pre d != 0 && d != min()
+
+[[nodiscard]]
 #if !defined(DEBUG) && !defined(_DEBUG)
-[[nodiscard, msvc::forceinline, gnu::always_inline]]
+[[msvc::forceinline, gnu::always_inline]]
 #endif
 constexpr uint64_t computeM_s32(int32_t d) noexcept
 {
@@ -82,8 +87,9 @@ constexpr uint64_t computeM_s32(int32_t d) noexcept
   return 0xFFFF'FFFF'FFFF'FFFFULL / positive + 1 + (((positive & (positive - 1)) == 0) ? 1 : 0);
 }
 
+[[nodiscard]]
 #if !defined(DEBUG) && !defined(_DEBUG)
-[[nodiscard, msvc::forceinline, gnu::always_inline]]
+[[msvc::forceinline, gnu::always_inline]]
 #endif
 constexpr uint64_t mul128_s32(uint64_t const lowbits, int32_t const d) noexcept
 {
@@ -92,8 +98,9 @@ constexpr uint64_t mul128_s32(uint64_t const lowbits, int32_t const d) noexcept
 }
 
 /// \pre positive_d == abs(d), M == computeM_s32(d)
+[[nodiscard]]
 #if !defined(DEBUG) && !defined(_DEBUG)
-[[nodiscard, msvc::forceinline, gnu::always_inline]]
+[[msvc::forceinline, gnu::always_inline]]
 #endif
 constexpr int32_t fastmod_s32(int32_t const a, uint64_t const m, int32_t const positive_d) noexcept
 {
@@ -103,8 +110,9 @@ constexpr int32_t fastmod_s32(int32_t const a, uint64_t const m, int32_t const p
 }
 
 /// \pre d not in {-1, 1, min()}, M == computeM_s32(d)
+[[nodiscard]]
 #if !defined(DEBUG) && !defined(_DEBUG)
-[[nodiscard, msvc::forceinline, gnu::always_inline]]
+[[msvc::forceinline, gnu::always_inline]]
 #endif
 constexpr int32_t fastdiv_s32(int32_t const a, uint64_t const m, int32_t const d) noexcept
 {
@@ -115,8 +123,9 @@ constexpr int32_t fastdiv_s32(int32_t const a, uint64_t const m, int32_t const d
 }
 
 /// \pre d != 0
+[[nodiscard]]
 #if !defined(DEBUG) && !defined(_DEBUG)
-[[nodiscard, msvc::forceinline, gnu::always_inline]]
+[[msvc::forceinline, gnu::always_inline]]
 #endif
 constexpr uint128_t computeM_u64(uint64_t const d) noexcept
 {
@@ -125,8 +134,9 @@ constexpr uint128_t computeM_u64(uint64_t const d) noexcept
 }
 
 /// \pre d != 0, M == computeM_u64(d)
+[[nodiscard]]
 #if !defined(DEBUG) && !defined(_DEBUG)
-[[nodiscard, msvc::forceinline, gnu::always_inline]]
+[[msvc::forceinline, gnu::always_inline]]
 #endif
 constexpr uint64_t fastmod_u64(uint64_t const a, uint128_t const m, uint64_t const d) noexcept
 {
@@ -134,8 +144,9 @@ constexpr uint64_t fastmod_u64(uint64_t const a, uint128_t const m, uint64_t con
 }
 
 /// \pre d > 1, M == computeM_u64(d)
+[[nodiscard]]
 #if !defined(DEBUG) && !defined(_DEBUG)
-[[nodiscard, msvc::forceinline, gnu::always_inline]]
+[[msvc::forceinline, gnu::always_inline]]
 #endif
 constexpr uint64_t fastdiv_u64(uint64_t const a, uint128_t const m) noexcept
 {
@@ -143,8 +154,9 @@ constexpr uint64_t fastdiv_u64(uint64_t const a, uint128_t const m) noexcept
 }
 
 /// \pre M == computeM_u64(d) for some d != 0
+[[nodiscard]]
 #if !defined(DEBUG) && !defined(_DEBUG)
-[[nodiscard, msvc::forceinline, gnu::always_inline]]
+[[msvc::forceinline, gnu::always_inline]]
 #endif
 constexpr bool is_divisible_u64(uint64_t const n, uint128_t const m) noexcept
 {
@@ -159,8 +171,9 @@ concept fastmod_divisor = std::same_as<T, uint32_t> || std::same_as<T, int32_t> 
 
 /// \pre d != 0
 template <fastmod_divisor auto d>
+[[nodiscard]]
 #if !defined(DEBUG) && !defined(_DEBUG)
-[[nodiscard, msvc::forceinline, gnu::always_inline]]
+[[msvc::forceinline, gnu::always_inline]]
 #endif
 constexpr decltype(d) fastmod(std::same_as<decltype(d)> auto const x) noexcept
 {
@@ -186,8 +199,9 @@ constexpr decltype(d) fastmod(std::same_as<decltype(d)> auto const x) noexcept
 
 /// \pre d != 0
 template <fastmod_divisor auto d>
+[[nodiscard]]
 #if !defined(DEBUG) && !defined(_DEBUG)
-[[nodiscard, msvc::forceinline, gnu::always_inline]]
+[[msvc::forceinline, gnu::always_inline]]
 #endif
 constexpr decltype(d) fastdiv(std::same_as<decltype(d)> auto const x) noexcept
 {
@@ -206,8 +220,9 @@ constexpr decltype(d) fastdiv(std::same_as<decltype(d)> auto const x) noexcept
 }
 
 template <fastmod_divisor T>
+[[nodiscard]]
 #if !defined(DEBUG) && !defined(_DEBUG)
-[[nodiscard, msvc::forceinline, gnu::always_inline]]
+[[msvc::forceinline, gnu::always_inline]]
 #endif
 constexpr T fastmod(T const x, T const d) noexcept
 {
@@ -222,8 +237,9 @@ constexpr T fastmod(T const x, T const d) noexcept
 }
 
 template <fastmod_divisor T>
+[[nodiscard]]
 #if !defined(DEBUG) && !defined(_DEBUG)
-[[nodiscard, msvc::forceinline, gnu::always_inline]]
+[[msvc::forceinline, gnu::always_inline]]
 #endif
 constexpr T fastdiv(T const x, T const d) noexcept
 {

@@ -219,7 +219,7 @@ private:
 
     destroy_dest_elements_on_exit de { source, dest };
 
-    auto transfer_elements = [](std::conditional_t<Move, hash_table &, hash_table const &> source, hash_table &dest) static constexpr
+    auto transfer_elements = [&]() constexpr
     {
       auto *dest_elements   = dest.elements_address_();
       auto *source_elements = source.elements_address_();
@@ -236,14 +236,14 @@ private:
     };
 
     if constexpr (std::is_trivially_copy_constructible_v<value_type> && (std::is_same_v<allocator_type, std::allocator<value_type>> || !requires (allocator_type &a, value_type *p, value_type const &v) { a.construct(p, v); })) {
-      if consteval {
-        transfer_elements(source, dest);
+      if (std::is_constant_evaluated()) {
+        transfer_elements();
       } else {
         std::memcpy(dest.elements_address_(), source.elements_address_(), source.capacity() * sizeof(value_type));
         dest.size_ = source.size_;
       }
     } else {
-      transfer_elements(source, dest);
+      transfer_elements();
     }
     de.dismiss();
 
@@ -323,7 +323,7 @@ public:
     std::ranges::swap(this->hasher_, hasher);
     std::ranges::swap(this->key_eq_, key_eq);
 
-    bool const is_propagator = is_pocca_v && this->alloc_ != other.alloc_;
+    bool const is_propagator = is_pocca_v && !allocators_equal_(this->alloc_, other.alloc_);
     if (is_heap()) {
       size_type const needed_capacity = required_capacity_(other.size_);
       bool const is_need_reallocate   = is_propagator || needed_capacity > capacity_unchecked_();

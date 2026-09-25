@@ -112,8 +112,9 @@ requires (std::is_arithmetic_v<T> || std::is_enum_v<T>)
 
 template <class T>
 requires (std::is_arithmetic_v<T> || std::is_enum_v<T>)
+[[nodiscard]]
 #if !defined(DEBUG) && !defined(_DEBUG)
-[[nodiscard, msvc::forceinline, gnu::always_inline]]
+[[msvc::forceinline, gnu::always_inline]]
 #endif
 constexpr size_t highest_one_bit_index(T const value) noexcept
 {

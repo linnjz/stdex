@@ -26,6 +26,7 @@
 #include <string_view>   // std::basic_string_view, std::hash<basic_string_view>
 #include <type_traits>   // std::is_pointer_v, std::integral_constant, std::bool_constant
 #include <utility>       // std::index_sequence, std::make_index_sequence, std::move, std::forward
+#include <version>
 
 namespace std
 {
@@ -185,6 +186,7 @@ public:
     basic_fixed_string_detail::fixed_string_copy<charT>(data_, std::move(begin), std::move(end));
   }
 
+#ifdef __cpp_lib_containers_ranges
   template <std::ranges::input_range R>
   requires std::convertible_to<std::ranges::range_reference_t<R>, charT>
   constexpr basic_fixed_string(std::from_range_t /*unused*/, R &&r)
@@ -192,6 +194,7 @@ public:
     auto &&range = std::forward<R>(r);
     basic_fixed_string_detail::fixed_string_copy<charT>(data_, std::ranges::begin(range), std::ranges::end(range));
   }
+#endif // __cpp_lib_containers_ranges
 
   // iterator support
   constexpr const_iterator begin() const noexcept { return data_; }
@@ -341,8 +344,10 @@ basic_fixed_string(CharT, Rest...) -> basic_fixed_string<CharT, 1 + sizeof...(Re
 template <typename charT, size_t N>
 basic_fixed_string(charT const (&str)[N]) -> basic_fixed_string<charT, N - 1>;
 
+#ifdef __cpp_lib_containers_ranges
 template <typename CharT, size_t N>
 basic_fixed_string(std::from_range_t, std::array<CharT, N>) -> basic_fixed_string<CharT, N>;
+#endif // __cpp_lib_containers_ranges
 
 // specialized algorithms
 template <class charT, size_t N>

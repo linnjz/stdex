@@ -41,20 +41,20 @@ static_assert(sizeof(uint32_t) == 4, "hash requires 32-bit uint32_t");
 static_assert(sizeof(uint64_t) == 8, "hash requires 64-bit uint64_t");
 
 // clang-format off
-struct standard_t{};
-struct micro_t{};
-struct nano_t{};
+struct hash_standard_t{};
+struct hash_micro_t{};
+struct hash_nano_t{};
 
-inline constexpr standard_t standard {};
-inline constexpr micro_t micro {};
-inline constexpr nano_t nano {};
+inline constexpr hash_standard_t hash_standard {};
+inline constexpr hash_micro_t hash_micro {};
+inline constexpr hash_nano_t hash_nano {};
 // clang-format on
 
 template <class T>
 concept hash_mode =
-    std::same_as<std::remove_cvref_t<T>, standard_t> ||
-    std::same_as<std::remove_cvref_t<T>, micro_t> ||
-    std::same_as<std::remove_cvref_t<T>, nano_t>;
+    std::same_as<std::remove_cvref_t<T>, hash_standard_t> ||
+    std::same_as<std::remove_cvref_t<T>, hash_micro_t> ||
+    std::same_as<std::remove_cvref_t<T>, hash_nano_t>;
 
 namespace hash_detail
 {
@@ -62,7 +62,7 @@ template <hash_mode Mode>
 struct mode_traits;
 
 template <>
-struct mode_traits<standard_t>
+struct mode_traits<hash_standard_t>
 {
   static constexpr size_t stripe     = 112;
   static constexpr size_t lane_count = 7;
@@ -72,7 +72,7 @@ struct mode_traits<standard_t>
 };
 
 template <>
-struct mode_traits<micro_t>
+struct mode_traits<hash_micro_t>
 {
   static constexpr size_t stripe     = 80;
   static constexpr size_t lane_count = 5;
@@ -82,7 +82,7 @@ struct mode_traits<micro_t>
 };
 
 template <>
-struct mode_traits<nano_t>
+struct mode_traits<hash_nano_t>
 {
   static constexpr size_t stripe     = 48;
   static constexpr size_t lane_count = 3;
@@ -199,35 +199,32 @@ template <byte_like Byte, hash_mode Mode>
 }
 } // namespace hash_detail
 
-template <byte_like Byte, hash_mode Mode = standard_t>
+template <byte_like Byte, hash_mode Mode = hash_standard_t>
 [[nodiscard]] constexpr uint64_t hash_bytes(std::span<Byte const> const input, uint64_t const seed = 0) noexcept
 {
-  [[assume(input.data() != nullptr)]];
   return hash_detail::hash_bytes_impl(Mode {}, input, seed, hash_detail::default_secret);
 }
 
-template <byte_like Byte, hash_mode Mode = standard_t>
+template <byte_like Byte, hash_mode Mode = hash_standard_t>
 [[nodiscard]] constexpr uint64_t hash_bytes(std::span<Byte const> const input, uint64_t const seed, std::array<uint64_t, 8> const &secret) noexcept
 {
-  [[assume(input.data() != nullptr)]];
   return hash_detail::hash_bytes_impl(Mode {}, input, seed, secret);
 }
 
-template <hash_mode Mode = standard_t>
+template <hash_mode Mode = hash_standard_t>
 [[nodiscard]] constexpr uint64_t hash_bytes(void const *const data, size_t const size, uint64_t const seed = 0) noexcept
 {
-  [[assume(data != nullptr)]];
   return hash_bytes<std::byte, Mode>(std::span<std::byte const> { static_cast<std::byte const *>(data), size }, seed);
 }
 
-template <hash_detail::contiguous_byte_range Range, hash_mode Mode = standard_t>
+template <hash_detail::contiguous_byte_range Range, hash_mode Mode = hash_standard_t>
 [[nodiscard]] constexpr uint64_t hash_range(Range const &range, uint64_t seed = 0) noexcept
 {
   using byte_type = std::remove_cv_t<std::ranges::range_value_t<Range>>;
   return hash_bytes<byte_type, Mode>(std::span<byte_type const> { std::ranges::data(range), std::ranges::size(range) }, seed);
 }
 
-template <hash_detail::contiguous_object_range Range, hash_mode Mode = standard_t>
+template <hash_detail::contiguous_object_range Range, hash_mode Mode = hash_standard_t>
 [[nodiscard]] constexpr uint64_t hash_range(Range const &range, uint64_t seed = 0) noexcept
 {
   using value_type   = std::remove_cv_t<std::ranges::range_value_t<Range>>;
@@ -235,13 +232,13 @@ template <hash_detail::contiguous_object_range Range, hash_mode Mode = standard_
   return hash_bytes<std::byte, Mode>(std::as_bytes(objects), seed);
 }
 
-template <hash_mode Mode = standard_t>
+template <hash_mode Mode = hash_standard_t>
 [[nodiscard]] constexpr uint64_t hash_value(std::string_view text, uint64_t seed = 0) noexcept
 {
   return hash_bytes<char, Mode>(std::span<char const> { text.data(), text.size() }, seed);
 }
 
-template <hash_detail::scalar_hashable T, hash_mode Mode = standard_t>
+template <hash_detail::scalar_hashable T, hash_mode Mode = hash_standard_t>
 [[nodiscard]] constexpr uint64_t hash_value(T const value, uint64_t const seed = 0) noexcept
 {
   auto const bytes = little_endian_array(to_unsigned(value));
@@ -258,7 +255,7 @@ struct hash<T>
   using argument_type = T;
   using result_type   = size_t;
 
-  [[nodiscard]] static constexpr size_t operator() (argument_type value) noexcept
+  [[nodiscard]] constexpr size_t operator() (argument_type value) const noexcept
   requires (hash_detail::scalar_hashable<T>)
   {
     if constexpr (sizeof(void *) == 8) {
@@ -280,8 +277,8 @@ struct hash<std::basic_string<CharT, std::char_traits<CharT>, Allocator>>
   using argument_type = std::basic_string<CharT, std::char_traits<CharT>, Allocator>;
   using result_type   = size_t;
 
-  template <hash_mode Mode = standard_t>
-  [[nodiscard]] static constexpr size_t operator() (argument_type const &str, uint64_t seed = 0) noexcept
+  template <hash_mode Mode = hash_standard_t>
+  [[nodiscard]] constexpr size_t operator() (argument_type const &str, uint64_t seed = 0) const noexcept
   {
     return stdex::hash_range<argument_type, Mode>(str, seed);
   }
@@ -293,8 +290,8 @@ struct hash<std::basic_string_view<CharT, std::char_traits<CharT>>>
   using argument_type = std::basic_string_view<CharT, std::char_traits<CharT>>;
   using result_type   = size_t;
 
-  template <hash_mode Mode = standard_t>
-  [[nodiscard]] static constexpr size_t operator() (argument_type sv, uint64_t seed = 0) noexcept
+  template <hash_mode Mode = hash_standard_t>
+  [[nodiscard]] constexpr size_t operator() (argument_type sv, uint64_t seed = 0) const noexcept
   {
     return stdex::hash_range<argument_type, Mode>(sv, seed);
   }
@@ -306,7 +303,7 @@ struct hash<std::nullptr_t>
   using argument_type = std::nullptr_t;
   using result_type   = size_t;
 
-  [[nodiscard]] static constexpr size_t operator() (std::nullptr_t) noexcept
+  [[nodiscard]] constexpr size_t operator() (std::nullptr_t) const noexcept
   {
     return hash<std::uintptr_t> {}(0);
   }
@@ -318,7 +315,7 @@ struct hash<T *>
   using argument_type = T *;
   using result_type   = size_t;
 
-  [[nodiscard]] static size_t operator() (T *const ptr) noexcept
+  [[nodiscard]] size_t operator() (T *const ptr) const noexcept
   {
     auto const address = reinterpret_cast<std::uintptr_t>(ptr);
     return hash<std::uintptr_t> {}(address);
@@ -331,7 +328,7 @@ struct hash<std::shared_ptr<T>>
   using argument_type = std::shared_ptr<T>;
   using result_type   = size_t;
 
-  [[nodiscard]] static size_t operator() (argument_type const &ptr) noexcept
+  [[nodiscard]] size_t operator() (argument_type const &ptr) const noexcept
   {
     return hash<T *> {}(ptr.get());
   }
@@ -343,7 +340,7 @@ struct hash<std::unique_ptr<T, Deleter>>
   using argument_type = std::unique_ptr<T, Deleter>;
   using result_type   = size_t;
 
-  [[nodiscard]] static size_t operator() (argument_type const &ptr) noexcept
+  [[nodiscard]] size_t operator() (argument_type const &ptr) const noexcept
   {
     return hash<T *> {}(ptr.get());
   }
