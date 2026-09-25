@@ -44,7 +44,9 @@ constexpr uint64_t computeM_u32(uint32_t const d) noexcept
 }
 
 /// \pre d != 0, M == computeM_u32(d)
-[[nodiscard, msvc::forceinline, gnu::always_inline]] 
+#if !defined(DEBUG) && !defined(_DEBUG)
+[[nodiscard, msvc::forceinline, gnu::always_inline]]
+#endif
 constexpr uint32_t fastmod_u32(uint32_t const a, uint64_t const m, uint32_t const d) noexcept
 {
   uint64_t const lowbits = m * a;
@@ -52,21 +54,27 @@ constexpr uint32_t fastmod_u32(uint32_t const a, uint64_t const m, uint32_t cons
 }
 
 /// \pre d > 1, M == computeM_u32(d)
-[[nodiscard, msvc::forceinline, gnu::always_inline]] 
+#if !defined(DEBUG) && !defined(_DEBUG)
+[[nodiscard, msvc::forceinline, gnu::always_inline]]
+#endif
 constexpr uint32_t fastdiv_u32(uint32_t const a, uint64_t const m) noexcept
 {
   return static_cast<uint32_t>(umulh(m, a));
 }
 
 /// \pre M == computeM_u32(d) for some d != 0
-[[nodiscard, msvc::forceinline, gnu::always_inline]] 
+#if !defined(DEBUG) && !defined(_DEBUG)
+[[nodiscard, msvc::forceinline, gnu::always_inline]]
+#endif
 constexpr bool is_divisible(uint32_t const n, uint64_t const m) noexcept
 {
   return n * m <= m - 1;
 }
 
 /// \pre d != 0 && d != min()
-[[nodiscard, msvc::forceinline, gnu::always_inline]] 
+#if !defined(DEBUG) && !defined(_DEBUG)
+[[nodiscard, msvc::forceinline, gnu::always_inline]]
+#endif
 constexpr uint64_t computeM_s32(int32_t d) noexcept
 {
   if (d < 0) d = -d;
@@ -74,7 +82,9 @@ constexpr uint64_t computeM_s32(int32_t d) noexcept
   return 0xFFFF'FFFF'FFFF'FFFFULL / positive + 1 + (((positive & (positive - 1)) == 0) ? 1 : 0);
 }
 
-[[nodiscard, msvc::forceinline, gnu::always_inline]] 
+#if !defined(DEBUG) && !defined(_DEBUG)
+[[nodiscard, msvc::forceinline, gnu::always_inline]]
+#endif
 constexpr uint64_t mul128_s32(uint64_t const lowbits, int32_t const d) noexcept
 {
   if (d < 0) return umulh(lowbits, static_cast<uint64_t>(static_cast<int64_t>(d))) - lowbits;
@@ -82,7 +92,9 @@ constexpr uint64_t mul128_s32(uint64_t const lowbits, int32_t const d) noexcept
 }
 
 /// \pre positive_d == abs(d), M == computeM_s32(d)
-[[nodiscard, msvc::forceinline, gnu::always_inline]] 
+#if !defined(DEBUG) && !defined(_DEBUG)
+[[nodiscard, msvc::forceinline, gnu::always_inline]]
+#endif
 constexpr int32_t fastmod_s32(int32_t const a, uint64_t const m, int32_t const positive_d) noexcept
 {
   uint64_t const lowbits  = m * static_cast<uint64_t>(static_cast<int64_t>(a));
@@ -91,7 +103,9 @@ constexpr int32_t fastmod_s32(int32_t const a, uint64_t const m, int32_t const p
 }
 
 /// \pre d not in {-1, 1, min()}, M == computeM_s32(d)
-[[nodiscard, msvc::forceinline, gnu::always_inline]] 
+#if !defined(DEBUG) && !defined(_DEBUG)
+[[nodiscard, msvc::forceinline, gnu::always_inline]]
+#endif
 constexpr int32_t fastdiv_s32(int32_t const a, uint64_t const m, int32_t const d) noexcept
 {
   uint64_t highbits = mul128_s32(m, a);
@@ -101,7 +115,9 @@ constexpr int32_t fastdiv_s32(int32_t const a, uint64_t const m, int32_t const d
 }
 
 /// \pre d != 0
-[[nodiscard, msvc::forceinline, gnu::always_inline]] 
+#if !defined(DEBUG) && !defined(_DEBUG)
+[[nodiscard, msvc::forceinline, gnu::always_inline]]
+#endif
 constexpr uint128_t computeM_u64(uint64_t const d) noexcept
 {
   // ceil(2^128 / d) == floor((2^128 - 1) / d) + 1
@@ -109,21 +125,27 @@ constexpr uint128_t computeM_u64(uint64_t const d) noexcept
 }
 
 /// \pre d != 0, M == computeM_u64(d)
-[[nodiscard, msvc::forceinline, gnu::always_inline]] 
+#if !defined(DEBUG) && !defined(_DEBUG)
+[[nodiscard, msvc::forceinline, gnu::always_inline]]
+#endif
 constexpr uint64_t fastmod_u64(uint64_t const a, uint128_t const m, uint64_t const d) noexcept
 {
   return mul128_u64_hi(mul128_u64_lo(m, a), d);
 }
 
 /// \pre d > 1, M == computeM_u64(d)
-[[nodiscard, msvc::forceinline, gnu::always_inline]] 
+#if !defined(DEBUG) && !defined(_DEBUG)
+[[nodiscard, msvc::forceinline, gnu::always_inline]]
+#endif
 constexpr uint64_t fastdiv_u64(uint64_t const a, uint128_t const m) noexcept
 {
   return mul128_u64_hi(m, a);
 }
 
 /// \pre M == computeM_u64(d) for some d != 0
-[[nodiscard, msvc::forceinline, gnu::always_inline]] 
+#if !defined(DEBUG) && !defined(_DEBUG)
+[[nodiscard, msvc::forceinline, gnu::always_inline]]
+#endif
 constexpr bool is_divisible_u64(uint64_t const n, uint128_t const m) noexcept
 {
   uint128_t const product  = mul128_u64_lo(m, n);
@@ -137,7 +159,9 @@ concept fastmod_divisor = std::same_as<T, uint32_t> || std::same_as<T, int32_t> 
 
 /// \pre d != 0
 template <fastmod_divisor auto d>
+#if !defined(DEBUG) && !defined(_DEBUG)
 [[nodiscard, msvc::forceinline, gnu::always_inline]]
+#endif
 constexpr decltype(d) fastmod(std::same_as<decltype(d)> auto const x) noexcept
 {
   static_assert(d != 0);
@@ -162,7 +186,9 @@ constexpr decltype(d) fastmod(std::same_as<decltype(d)> auto const x) noexcept
 
 /// \pre d != 0
 template <fastmod_divisor auto d>
+#if !defined(DEBUG) && !defined(_DEBUG)
 [[nodiscard, msvc::forceinline, gnu::always_inline]]
+#endif
 constexpr decltype(d) fastdiv(std::same_as<decltype(d)> auto const x) noexcept
 {
   static_assert(d != 0);
@@ -176,6 +202,37 @@ constexpr decltype(d) fastdiv(std::same_as<decltype(d)> auto const x) noexcept
   } else {
     constexpr uint64_t m = computeM_u32(d);
     return fastdiv_u32(x, m);
+  }
+}
+
+template <fastmod_divisor T>
+#if !defined(DEBUG) && !defined(_DEBUG)
+[[nodiscard, msvc::forceinline, gnu::always_inline]]
+#endif
+constexpr T fastmod(T const x, T const d) noexcept
+{
+  if constexpr (std::same_as<T, uint64_t>) {
+    return fastmod_u64(x, computeM_u64(d), d);
+  } else if constexpr (std::same_as<T, int32_t>) {
+    uint64_t const m = computeM_s32(d);
+    return fastmod_s32(x, m, d < 0 ? -d : d);
+  } else {
+    return fastmod_u32(x, computeM_u32(d), d);
+  }
+}
+
+template <fastmod_divisor T>
+#if !defined(DEBUG) && !defined(_DEBUG)
+[[nodiscard, msvc::forceinline, gnu::always_inline]]
+#endif
+constexpr T fastdiv(T const x, T const d) noexcept
+{
+  if constexpr (std::same_as<T, uint64_t>) {
+    return fastdiv_u64(x, computeM_u64(d));
+  } else if constexpr (std::same_as<T, int32_t>) {
+    return fastdiv_s32(x, computeM_s32(d), d);
+  } else {
+    return fastdiv_u32(x, computeM_u32(d));
   }
 }
 } // namespace stdex

@@ -408,7 +408,9 @@ struct inline_storage : public Traits
 
   template <class Fn>
   requires std::is_invocable_v<Fn &, value_type *, group_type *, unsigned>
-  [[msvc::forceinline, gnu::always_inline]] 
+#if !defined(DEBUG) && !defined(_DEBUG)
+  [[msvc::forceinline, gnu::always_inline]]
+#endif
   constexpr void for_each_occupied_slot_unchecked_(Fn &&fn) const
       noexcept(std::is_nothrow_invocable_v<Fn &, value_type *, group_type *, unsigned>)
   {
@@ -449,7 +451,9 @@ struct inline_storage : public Traits
   using prober_type = triangular_probing;
 
   template <class... Args>
-  [[msvc::forceinline, gnu::always_inline]] 
+#if !defined(DEBUG) && !defined(_DEBUG)
+  [[msvc::forceinline, gnu::always_inline]]
+#endif
   constexpr iterator emplace_at_available_slot_unchecked_(size_type hash, Args &&...args) noexcept(noexcept(
       std::declval<inline_storage &>().construct_element_unchecked_(
           std::declval<value_type *>(),
@@ -476,7 +480,9 @@ struct inline_storage : public Traits
   }
 
   template <class K>
-  [[msvc::forceinline, gnu::always_inline]] 
+#if !defined(DEBUG) && !defined(_DEBUG)
+  [[nodiscard, msvc::forceinline, gnu::always_inline]]
+#endif
   constexpr iterator find_fingerprint_slot_unchecked_(K const &key_val, size_type hash) const
   {
     value_type *const elements_ptr = elements_address_();
@@ -514,7 +520,9 @@ struct inline_storage : public Traits
   }
 
   template <class T>
-  [[nodiscard, msvc::forceinline, gnu::always_inline]] 
+#if !defined(DEBUG) && !defined(_DEBUG)
+  [[nodiscard, msvc::forceinline, gnu::always_inline]]
+#endif
   static constexpr int countr_zero_unchecked_(T value) noexcept
   {
     static_assert(std::is_integral_v<T> && std::is_unsigned_v<T>, "T must be an unsigned integer type");

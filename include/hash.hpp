@@ -28,13 +28,18 @@
 #include <string_view>
 #include <type_traits> // std::remove_cvref_t, std::remove_cv_t, std::is_trivially_copyable_v
 
-#include "bit_traits.hpp" // stdex::scalar_hashable, stdex::unsigned_equivalent_t, stdex::to_unsigned_bits
+#include "bit_traits.hpp" // stdex::unsigned_equivalent_t, stdex::to_unsigned
 #include "byte_utils.hpp" // stdex::byte_like, stdex::byte_value, stdex::read64_le,
                           // stdex::read32_le, stdex::little_endian_array
 #include "int128.hpp" // stdex::umul128, stdex::umulh, stdex::mix, stdex::mum
 
 namespace stdex
 {
+
+static_assert(CHAR_BIT == 8, "hash requires 8-bit bytes");
+static_assert(sizeof(uint32_t) == 4, "hash requires 32-bit uint32_t");
+static_assert(sizeof(uint64_t) == 8, "hash requires 64-bit uint64_t");
+
 // clang-format off
 struct standard_t{};
 struct micro_t{};
@@ -99,16 +104,21 @@ inline constexpr auto default_secret = std::to_array<uint64_t>({
 
 static_assert(default_secret.size() == 8);
 
+template <typename T>
+concept scalar_hashable = std::integral<std::remove_cv_t<T>> ||
+                          std::is_enum_v<std::remove_cv_t<T>> ||
+                          std::floating_point<std::remove_cv_t<T>>;
+
 template <typename Range>
 concept contiguous_byte_range = std::ranges::contiguous_range<Range> &&
                                 std::ranges::sized_range<Range> &&
-                                ::stdex::byte_like<std::ranges::range_value_t<Range>>;
+                                byte_like<std::ranges::range_value_t<Range>>;
 
 template <typename Range>
 concept contiguous_object_range = std::ranges::contiguous_range<Range> &&
                                   std::ranges::sized_range<Range> &&
                                   std::is_trivially_copyable_v<std::ranges::range_value_t<Range>> &&
-                                  (!::stdex::byte_like<std::ranges::range_value_t<Range>>);
+                                  (!byte_like<std::ranges::range_value_t<Range>>);
 
 template <byte_like Byte, hash_mode Mode>
 [[nodiscard]] constexpr uint64_t hash_bytes_impl(Mode, std::span<Byte const> const input, uint64_t seed, std::array<uint64_t, 8> const &secret) noexcept
@@ -231,10 +241,10 @@ template <hash_mode Mode = standard_t>
   return hash_bytes<char, Mode>(std::span<char const> { text.data(), text.size() }, seed);
 }
 
-template <scalar_hashable T, hash_mode Mode = standard_t>
+template <hash_detail::scalar_hashable T, hash_mode Mode = standard_t>
 [[nodiscard]] constexpr uint64_t hash_value(T const value, uint64_t const seed = 0) noexcept
 {
-  auto const bytes = little_endian_array(to_unsigned_bits(value));
+  auto const bytes = little_endian_array(to_unsigned(value));
   using byte_type  = std::remove_cv_t<decltype(bytes)>;
   return hash_range<byte_type, Mode>(bytes, seed);
 }
@@ -242,19 +252,19 @@ template <scalar_hashable T, hash_mode Mode = standard_t>
 template <class T>
 struct hash;
 
-template <scalar_hashable T>
+template <hash_detail::scalar_hashable T>
 struct hash<T>
 {
   using argument_type = T;
   using result_type   = size_t;
 
   [[nodiscard]] static constexpr size_t operator() (argument_type value) noexcept
-  requires (scalar_hashable<T>)
+  requires (hash_detail::scalar_hashable<T>)
   {
     if constexpr (sizeof(void *) == 8) {
-      return mix(to_unsigned_bits(static_cast<uint64_t>(value)), 0x9E'37'79'B9'7F'4A'7C'15ull);
+      return mix(static_cast<uint64_t>(to_unsigned(value)), 0x9E'37'79'B9'7F'4A'7C'15ull);
     } else {
-      uint64_t product = to_unsigned_bits(static_cast<uint64_t>(value)) * 0xE8'17'FB'2Du;
+      uint64_t product = static_cast<uint64_t>(to_unsigned(value)) * 0xE8'17'FB'2Du;
 #if defined(__MSVC_RUNTIME_CHECKS)
       return static_cast<uint32_t>(product & UINT32_MAX) ^ static_cast<uint32_t>(product >> 32);
 #else

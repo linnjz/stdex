@@ -43,7 +43,8 @@ struct extract_key_priority_tag1 : extract_key_priority_tag0 {};
 // clang-format on
 
 template <class KeyT, class Ret, class WithKey, class WithoutKey, class... Args>
-[[msvc::forceinline, gnu::always_inline]] constexpr Ret try_key_extraction_impl(extract_key_priority_tag0, WithKey, WithoutKey without_key, Args &&...args)
+[[msvc::forceinline, gnu::always_inline]] 
+constexpr Ret try_key_extraction_impl(extract_key_priority_tag0, WithKey, WithoutKey without_key, Args &&...args)
 {
   return without_key(std::forward<Args>(args)...);
 }
@@ -84,7 +85,8 @@ constexpr Ret try_key_extraction_impl(extract_key_priority_tag1, WithKey with_ke
 }
 
 template <class KeyT, class WithKey, class WithoutKey, class... Args>
-[[msvc::forceinline, gnu::always_inline]] constexpr decltype(std::declval<WithoutKey>()(std::declval<Args>()...))
+[[msvc::forceinline, gnu::always_inline]] 
+constexpr decltype(std::declval<WithoutKey>()(std::declval<Args>()...))
 try_key_extraction(WithKey with_key, WithoutKey without_key, Args &&...args)
 {
   using Ret = decltype(without_key(std::forward<Args>(args)...));
