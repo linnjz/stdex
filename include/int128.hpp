@@ -18,6 +18,7 @@
 
 #include <cstdint> // uint64_t
 #include <compare> // std::strong_ordering
+#include <type_traits> // std::is_constant_evaluated
 
 #if defined(_MSC_VER)
 #  include <intrin.h>
@@ -58,8 +59,9 @@ struct uint128_t
   }
 };
 
+[[nodiscard]]
 #if !defined(DEBUG) && !defined(_DEBUG)
-[[nodiscard, msvc::forceinline, gnu::always_inline]]
+[[msvc::forceinline, gnu::always_inline]]
 #endif
 constexpr uint128_t umul128_portable(uint64_t const lhs, uint64_t const rhs) noexcept
 {
@@ -91,21 +93,23 @@ constexpr uint128_t umul128_portable(uint64_t const lhs, uint64_t const rhs) noe
   return { low, high };
 }
 
+[[nodiscard]]
 #if !defined(DEBUG) && !defined(_DEBUG)
-[[nodiscard, msvc::forceinline, gnu::always_inline]]
+[[msvc::forceinline, gnu::always_inline]]
 #endif
 constexpr uint64_t umulh_portable(uint64_t const lhs, uint64_t const rhs) noexcept
 {
   return umul128_portable(lhs, rhs).high;
 }
 
+[[nodiscard]]
 #if !defined(DEBUG) && !defined(_DEBUG)
-[[nodiscard, msvc::forceinline, gnu::always_inline]]
+[[msvc::forceinline, gnu::always_inline]]
 #endif
 constexpr uint128_t umul128(uint64_t const lhs, uint64_t const rhs) noexcept
 {
 #if defined(_MSC_VER) && !defined(__clang__) && (defined(_M_X64) || defined(_M_ARM64) || defined(_M_ARM64EC))
-  if consteval {
+  if (std::is_constant_evaluated()) {
     return umul128_portable(lhs, rhs);
   } else {
 #  if defined(_M_X64) && !defined(_M_ARM64EC)
@@ -124,13 +128,14 @@ constexpr uint128_t umul128(uint64_t const lhs, uint64_t const rhs) noexcept
 #endif
 }
 
+[[nodiscard]]
 #if !defined(DEBUG) && !defined(_DEBUG)
-[[nodiscard, msvc::forceinline, gnu::always_inline]]
+[[msvc::forceinline, gnu::always_inline]]
 #endif
 constexpr uint64_t umulh(uint64_t const lhs, uint64_t const rhs) noexcept
 {
 #if defined(_MSC_VER) && !defined(__clang__) && (defined(_M_X64) || defined(_M_ARM64) || defined(_M_ARM64EC))
-  if consteval {
+  if (std::is_constant_evaluated()) {
     return umulh_portable(lhs, rhs);
   } else {
 #  if defined(_M_X64) && !defined(_M_ARM64EC)
@@ -148,8 +153,9 @@ constexpr uint64_t umulh(uint64_t const lhs, uint64_t const rhs) noexcept
 #endif
 }
 
+[[nodiscard]]
 #if !defined(DEBUG) && !defined(_DEBUG)
-[[nodiscard, msvc::forceinline, gnu::always_inline]]
+[[msvc::forceinline, gnu::always_inline]]
 #endif
 constexpr uint128_t add128_portable(uint128_t const value, uint64_t const addend) noexcept
 {
@@ -158,13 +164,14 @@ constexpr uint128_t add128_portable(uint128_t const value, uint64_t const addend
   return { sum_lo, value.high + carry };
 }
 
+[[nodiscard]]
 #if !defined(DEBUG) && !defined(_DEBUG)
-[[nodiscard, msvc::forceinline, gnu::always_inline]]
+[[msvc::forceinline, gnu::always_inline]]
 #endif
 constexpr uint128_t add128(uint128_t const value, uint64_t const addend) noexcept
 {
 #if defined(_MSC_VER) && !defined(__clang__) && defined(_M_X64) && !defined(_M_ARM64EC)
-  if consteval {
+  if (std::is_constant_evaluated()) {
     return add128_portable(value, addend);
   } else {
     uint128_t sum {};
@@ -178,8 +185,9 @@ constexpr uint128_t add128(uint128_t const value, uint64_t const addend) noexcep
 }
 
 /// \pre divisor != 0
+[[nodiscard]]
 #if !defined(DEBUG) && !defined(_DEBUG)
-[[nodiscard, msvc::forceinline, gnu::always_inline]]
+[[msvc::forceinline, gnu::always_inline]]
 #endif
 constexpr uint128_t div128_portable(uint128_t const dividend, uint64_t const divisor) noexcept
 {
@@ -204,13 +212,14 @@ constexpr uint128_t div128_portable(uint128_t const dividend, uint64_t const div
 }
 
 /// \pre divisor != 0
+[[nodiscard]]
 #if !defined(DEBUG) && !defined(_DEBUG)
-[[nodiscard, msvc::forceinline, gnu::always_inline]]
+[[msvc::forceinline, gnu::always_inline]]
 #endif
 constexpr uint128_t div128(uint128_t const dividend, uint64_t const divisor) noexcept
 {
 #if defined(_MSC_VER) && !defined(__clang__) && defined(_M_X64) && !defined(_M_ARM64EC)
-  if consteval {
+  if (std::is_constant_evaluated()) {
     return div128_portable(dividend, divisor);
   } else {
     // remainder_high < divisor by construction, so the 64-bit quotient cannot overflow.
@@ -222,7 +231,7 @@ constexpr uint128_t div128(uint128_t const dividend, uint64_t const divisor) noe
     return quotient;
   }
 #elif defined(__SIZEOF_INT128__)
-  if consteval {
+  if (std::is_constant_evaluated()) {
     return div128_portable(dividend, divisor);
   } else {
     auto const wide = (static_cast<__uint128_t>(dividend.high) << 64U) | dividend.low;
@@ -234,8 +243,9 @@ constexpr uint128_t div128(uint128_t const dividend, uint64_t const divisor) noe
 #endif
 }
 
+[[nodiscard]]
 #if !defined(DEBUG) && !defined(_DEBUG)
-[[nodiscard, msvc::forceinline, gnu::always_inline]]
+[[msvc::forceinline, gnu::always_inline]]
 #endif
 constexpr uint128_t mul128_u64_lo(uint128_t const value, uint64_t const multiplier) noexcept
 {
@@ -245,8 +255,9 @@ constexpr uint128_t mul128_u64_lo(uint128_t const value, uint64_t const multipli
   return { product_lo, product_hi };
 }
 
+[[nodiscard]]
 #if !defined(DEBUG) && !defined(_DEBUG)
-[[nodiscard, msvc::forceinline, gnu::always_inline]]
+[[msvc::forceinline, gnu::always_inline]]
 #endif
 constexpr uint64_t mul128_u64_hi(uint128_t const value, uint64_t const multiplier) noexcept
 {
@@ -257,8 +268,9 @@ constexpr uint64_t mul128_u64_hi(uint128_t const value, uint64_t const multiplie
   return add128({ top_lo, top_hi }, bottom_hi).high;
 }
 
+[[nodiscard]]
 #if !defined(DEBUG) && !defined(_DEBUG)
-[[nodiscard, msvc::forceinline, gnu::always_inline]]
+[[msvc::forceinline, gnu::always_inline]]
 #endif
 constexpr uint64_t mix(uint64_t const lhs, uint64_t const rhs) noexcept
 {
@@ -266,8 +278,9 @@ constexpr uint64_t mix(uint64_t const lhs, uint64_t const rhs) noexcept
   return low ^ high;
 }
 
+[[nodiscard]]
 #if !defined(DEBUG) && !defined(_DEBUG)
-[[nodiscard, msvc::forceinline, gnu::always_inline]]
+[[msvc::forceinline, gnu::always_inline]]
 #endif
 constexpr void mum(uint64_t &lhs, uint64_t &rhs) noexcept
 {
