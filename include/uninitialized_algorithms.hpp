@@ -20,7 +20,8 @@
 #include <bit>         // std::bit_cast
 #include <cassert>     // assert
 #include <concepts>    // std::constructible_from
-#include <cstddef>     // size_t
+#include <cstddef>     // size_t, std::byte
+#include <cstdint>     // std::uint8_t, ...
 #include <cstring>     // std::memcpy, std::memset
 #include <iterator>    // std::contiguous_iterator, std::iter_difference_t, std::iter_value_t,
 #include <memory>      // std::to_address, std::construct_at, std::destroy
@@ -214,6 +215,74 @@ auto invoke_memcpy(InIt first, InSent last, OutIt dest_first, OutSent dest_last)
 
   return { first + static_cast<std::iter_difference_t<InIt>>(n),
            dest_first + static_cast<std::iter_difference_t<OutIt>>(n) };
+}
+
+template <class T>
+struct is_byte_like : std::bool_constant<std::is_same_v<std::remove_cv_t<T>, char> ||
+                         std::is_same_v<std::remove_cv_t<T>, signed char> ||
+                         std::is_same_v<std::remove_cv_t<T>, unsigned char> ||
+                         std::is_same_v<std::remove_cv_t<T>, char8_t> ||
+                         std::is_same_v<std::remove_cv_t<T>, std::byte> ||
+                         std::is_same_v<std::remove_cv_t<T>, bool>>
+{
+};
+
+template <class OutIt, class T, bool = iterator_is_contiguous<OutIt>>
+constexpr bool fill_memset_is_safe = std::conjunction_v<std::is_scalar<T>, 
+    is_byte_like<unwrap_enum_t<std::iter_value_t<OutIt>>>,
+    std::negation<std::is_volatile<std::remove_reference_t<std::iter_reference_t<OutIt>>>>,
+    std::is_assignable<std::iter_reference_t<OutIt>, T const &>>;
+
+template <class OutIt, class T>
+constexpr bool fill_memset_is_safe<OutIt, T, false> = false;
+
+template <class OutIt, class T, bool = iterator_is_contiguous<OutIt>>
+constexpr bool fill_zero_memset_is_safe = std::conjunction_v<std::is_scalar<T>, 
+    std::is_scalar<std::iter_value_t<OutIt>>,
+    std::negation<std::is_member_pointer<std::iter_value_t<OutIt>>>,
+    std::negation<std::is_volatile<std::remove_reference_t<std::iter_reference_t<OutIt>>>>,
+    std::is_assignable<std::iter_reference_t<OutIt>, T const &>>;
+
+template <class OutIt, class T>
+constexpr bool fill_zero_memset_is_safe<OutIt, T, false> = false;
+
+template <class T>
+[[nodiscard]] constexpr bool is_all_bits_zero(T const &val) noexcept
+{
+  static_assert(std::is_scalar_v<T> && !std::is_member_pointer_v<T>);
+  if constexpr (std::is_null_pointer_v<T>) {
+    return true;
+  } else if constexpr (std::is_integral_v<T> || std::is_pointer_v<T>) {
+    return val == T {};
+  } else if constexpr (sizeof(T) == 1) {
+    return std::bit_cast<std::uint8_t>(val) == 0;
+  } else if constexpr (sizeof(T) == 2) {
+    return std::bit_cast<std::uint16_t>(val) == 0;
+  } else if constexpr (sizeof(T) == 4) {
+    return std::bit_cast<std::uint32_t>(val) == 0;
+  } else if constexpr (sizeof(T) == 8) {
+    return std::bit_cast<std::uint64_t>(val) == 0;
+  } else {
+    return std::bit_cast<std::array<unsigned char, sizeof(T)>>(val) ==
+           std::bit_cast<std::array<unsigned char, sizeof(T)>>(T{});
+  }
+}
+
+template <class OutIt, class T>
+void invoke_memset(OutIt dest_first, T const &val, size_t count)
+{
+  using value_type = std::iter_value_t<OutIt>;
+  static_assert(sizeof(value_type) == sizeof(unsigned char));
+  value_type dest_val = val;
+  std::memset(static_cast<void *>(to_address_unwrap(dest_first)),
+              static_cast<unsigned char>(dest_val), count);
+}
+
+template <class OutIt>
+void invoke_zero_memset(OutIt dest_first, size_t count)
+{
+  std::memset(static_cast<void *>(to_address_unwrap(dest_first)),
+              0, count * sizeof(std::iter_value_t<OutIt>));
 }
 } // namespace uninitialized_detail
 
@@ -589,6 +658,133 @@ constexpr auto uninitialized_copy_n(InIt first, std::iter_difference_t<InIt> cou
     backout.emplace_back(*first);
   }
   return { std::move(first), backout.release() };
+}
+
+template <std::forward_iterator OutIt, std::sentinel_for<OutIt> OutSent, class T>
+requires std::constructible_from<std::iter_value_t<OutIt>, T const &>
+constexpr OutIt uninitialized_fill(OutIt dest_first, OutSent dest_last, T const &val)
+{
+  constexpr bool sized      = std::sized_sentinel_for<OutSent, OutIt>;
+  constexpr bool memset_ok  = sized && uninitialized_detail::fill_memset_is_safe<OutIt, T>;
+  constexpr bool zero_ok    = sized && uninitialized_detail::fill_zero_memset_is_safe<OutIt, T>;
+
+  if constexpr (memset_ok) {
+    if (!std::is_constant_evaluated()) {
+      auto const n = static_cast<size_t>(dest_last - dest_first);
+      uninitialized_detail::invoke_memset(dest_first, val, n);
+      return dest_first + static_cast<std::iter_difference_t<OutIt>>(n);
+    }
+  } else if constexpr (zero_ok) {
+    if (!std::is_constant_evaluated() && uninitialized_detail::is_all_bits_zero(val)) {
+      auto const n = static_cast<size_t>(dest_last - dest_first);
+      uninitialized_detail::invoke_zero_memset(dest_first, n);
+      return dest_first + static_cast<std::iter_difference_t<OutIt>>(n);
+    }
+  }
+
+  uninitialized_backout<OutIt> backout { std::move(dest_first) };
+  while (backout.last() != dest_last) {
+    backout.emplace_back(val);
+  }
+  return backout.release();
+}
+
+template <std::contiguous_iterator OutIt, std::sentinel_for<OutIt> OutSent, class T, class Allocator>
+requires std::constructible_from<std::iter_value_t<OutIt>, T const &> &&
+         std::same_as<typename std::allocator_traits<Allocator>::value_type, std::iter_value_t<OutIt>> &&
+         std::convertible_to<OutIt, typename std::allocator_traits<Allocator>::pointer>
+constexpr OutIt uninitialized_fill(OutIt dest_first, OutSent dest_last, T const &val, Allocator &alloc)
+{
+  constexpr bool sized     = std::sized_sentinel_for<OutSent, OutIt>;
+  constexpr bool use_alloc = uninitialized_detail::has_custom_construct<Allocator,
+                               typename std::allocator_traits<Allocator>::value_type *, T const &>;
+  constexpr bool memset_ok = sized && uninitialized_detail::fill_memset_is_safe<OutIt, T> && !use_alloc;
+  constexpr bool zero_ok   = sized && uninitialized_detail::fill_zero_memset_is_safe<OutIt, T> && !use_alloc;
+
+  if constexpr (memset_ok) {
+    if (!std::is_constant_evaluated()) {
+      auto const n = static_cast<size_t>(dest_last - dest_first);
+      uninitialized_detail::invoke_memset(dest_first, val, n);
+      return dest_first + static_cast<std::iter_difference_t<OutIt>>(n);
+    }
+  } else if constexpr (zero_ok) {
+    if (!std::is_constant_evaluated() && uninitialized_detail::is_all_bits_zero(val)) {
+      auto const n = static_cast<size_t>(dest_last - dest_first);
+      uninitialized_detail::invoke_zero_memset(dest_first, n);
+      return dest_first + static_cast<std::iter_difference_t<OutIt>>(n);
+    }
+  }
+
+  uninitialized_backout_al<Allocator> backout { dest_first, alloc };
+  while (backout.last() != dest_last) {
+    backout.emplace_back(val);
+  }
+  return backout.release();
+}
+
+template <std::forward_iterator OutIt, class T>
+requires std::constructible_from<std::iter_value_t<OutIt>, T const &>
+constexpr OutIt uninitialized_fill_n(OutIt dest_first, std::iter_difference_t<OutIt> count, T const &val)
+{
+  if (count <= 0) {
+    return dest_first;
+  }
+
+  constexpr bool memset_ok = uninitialized_detail::fill_memset_is_safe<OutIt, T>;
+  constexpr bool zero_ok   = uninitialized_detail::fill_zero_memset_is_safe<OutIt, T>;
+
+  if constexpr (memset_ok) {
+    if (!std::is_constant_evaluated()) {
+      uninitialized_detail::invoke_memset(dest_first, val, static_cast<size_t>(count));
+      return dest_first + count;
+    }
+  } else if constexpr (zero_ok) {
+    if (!std::is_constant_evaluated() && uninitialized_detail::is_all_bits_zero(val)) {
+      uninitialized_detail::invoke_zero_memset(dest_first, static_cast<size_t>(count));
+      return dest_first + count;
+    }
+  }
+
+  uninitialized_backout<OutIt> backout { std::move(dest_first) };
+  for (; count > 0; --count) {
+    backout.emplace_back(val);
+  }
+  return backout.release();
+}
+
+template <std::contiguous_iterator OutIt, class T, class Allocator>
+requires std::constructible_from<std::iter_value_t<OutIt>, T const &> &&
+         std::same_as<typename std::allocator_traits<Allocator>::value_type, std::iter_value_t<OutIt>> &&
+         std::convertible_to<OutIt, typename std::allocator_traits<Allocator>::pointer>
+constexpr OutIt uninitialized_fill_n(OutIt dest_first, std::iter_difference_t<OutIt> count,
+                                      T const &val, Allocator &alloc)
+{
+  if (count <= 0) {
+    return dest_first;
+  }
+
+  constexpr bool use_alloc = uninitialized_detail::has_custom_construct<Allocator,
+                               typename std::allocator_traits<Allocator>::value_type *, T const &>;
+  constexpr bool memset_ok = uninitialized_detail::fill_memset_is_safe<OutIt, T> && !use_alloc;
+  constexpr bool zero_ok   = uninitialized_detail::fill_zero_memset_is_safe<OutIt, T> && !use_alloc;
+
+  if constexpr (memset_ok) {
+    if (!std::is_constant_evaluated()) {
+      uninitialized_detail::invoke_memset(dest_first, val, static_cast<size_t>(count));
+      return dest_first + count;
+    }
+  } else if constexpr (zero_ok) {
+    if (!std::is_constant_evaluated() && uninitialized_detail::is_all_bits_zero(val)) {
+      uninitialized_detail::invoke_zero_memset(dest_first, static_cast<size_t>(count));
+      return dest_first + count;
+    }
+  }
+
+  uninitialized_backout_al<Allocator> backout { dest_first, alloc };
+  for (; count > 0; --count) {
+    backout.emplace_back(val);
+  }
+  return backout.release();
 }
 
 } // namespace stdex
