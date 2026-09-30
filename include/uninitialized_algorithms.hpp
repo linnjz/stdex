@@ -473,6 +473,124 @@ constexpr auto uninitialized_move_n(InIt first, std::iter_difference_t<InIt> cou
   return { std::move(first), backout.release() };
 }
 
+template <std::input_iterator InIt, std::sentinel_for<InIt> InSent,
+          std::forward_iterator OutIt, std::sentinel_for<OutIt> OutSent>
+requires std::constructible_from<std::iter_value_t<OutIt>, std::iter_reference_t<InIt>>
+constexpr auto uninitialized_copy(InIt first, InSent last, OutIt dest_first, OutSent dest_last)
+    -> std::ranges::uninitialized_copy_result<InIt, OutIt>
+{
+  constexpr bool sized_src  = std::sized_sentinel_for<InSent, InIt>;
+  constexpr bool sized_dst  = std::sized_sentinel_for<OutSent, OutIt>;
+  constexpr bool can_memcpy = uninitialized_detail::iter_copy_cat<InIt, OutIt>::bitcopy_constructible &&
+                              uninitialized_detail::sized_or_unreachable_sentinel_for<InSent, InIt> &&
+                              uninitialized_detail::sized_or_unreachable_sentinel_for<OutSent, OutIt>;
+
+  if constexpr (can_memcpy && (sized_src || sized_dst)) {
+    if (!std::is_constant_evaluated()) {
+      return uninitialized_detail::invoke_memcpy(first, last, dest_first, dest_last);
+    }
+  } else if constexpr (can_memcpy) {
+    assert(false && "uninitialized_copy() with two unreachable sentinels cannot terminate");
+  }
+
+  uninitialized_backout<OutIt> backout { std::move(dest_first) };
+  for (; first != last && backout.last() != dest_last; ++first) {
+    backout.emplace_back(*first);
+  }
+  return { std::move(first), backout.release() };
+}
+
+template <std::input_iterator InIt, std::sentinel_for<InIt> InSent,
+          std::contiguous_iterator OutIt, std::sentinel_for<OutIt> OutSent, class Allocator>
+requires std::constructible_from<std::iter_value_t<OutIt>, std::iter_reference_t<InIt>> &&
+         std::same_as<typename std::allocator_traits<Allocator>::value_type, std::iter_value_t<OutIt>> &&
+         std::convertible_to<OutIt, typename std::allocator_traits<Allocator>::pointer>
+constexpr auto uninitialized_copy(InIt first, InSent last, OutIt dest_first, OutSent dest_last, Allocator &alloc)
+    -> std::ranges::uninitialized_copy_result<InIt, OutIt>
+{
+  constexpr bool sized_src  = std::sized_sentinel_for<InSent, InIt>;
+  constexpr bool sized_dst  = std::sized_sentinel_for<OutSent, OutIt>;
+  constexpr bool can_memcpy = uninitialized_detail::iter_copy_cat<InIt, OutIt>::bitcopy_constructible &&
+                              uninitialized_detail::sized_or_unreachable_sentinel_for<InSent, InIt> &&
+                              uninitialized_detail::sized_or_unreachable_sentinel_for<OutSent, OutIt> &&
+                              (!uninitialized_detail::has_custom_construct<Allocator,
+                                typename std::allocator_traits<Allocator>::value_type *,
+                                std::iter_reference_t<InIt>>);
+
+  if constexpr (can_memcpy && (sized_src || sized_dst)) {
+    if (!std::is_constant_evaluated()) {
+      return uninitialized_detail::invoke_memcpy(first, last, dest_first, dest_last);
+    }
+  } else if constexpr (can_memcpy) {
+    assert(false && "uninitialized_copy() with two unreachable sentinels cannot terminate");
+  }
+
+  uninitialized_backout_al<Allocator> backout { dest_first, alloc };
+  for (; first != last && backout.last() != dest_last; ++first) {
+    backout.emplace_back(*first);
+  }
+  return { std::move(first), backout.release() };
+}
+
+template <std::input_iterator InIt,
+          std::forward_iterator OutIt, std::sentinel_for<OutIt> OutSent>
+requires std::constructible_from<std::iter_value_t<OutIt>, std::iter_reference_t<InIt>>
+constexpr auto uninitialized_copy_n(InIt first, std::iter_difference_t<InIt> count,
+                                    OutIt dest_first, OutSent dest_last)
+    -> std::ranges::uninitialized_copy_n_result<InIt, OutIt>
+{
+  if (count <= 0) {
+    return { std::move(first), std::move(dest_first) };
+  }
+
+  constexpr bool can_memcpy = uninitialized_detail::iter_copy_cat<InIt, OutIt>::bitcopy_constructible &&
+                              uninitialized_detail::sized_or_unreachable_sentinel_for<OutSent, OutIt>;
+
+  if constexpr (can_memcpy) {
+    if (!std::is_constant_evaluated()) {
+      return uninitialized_detail::invoke_memcpy(first, first + count, dest_first, dest_last);
+    }
+  }
+
+  uninitialized_backout<OutIt> backout { std::move(dest_first) };
+  for (; count > 0 && backout.last() != dest_last; --count, ++first) {
+    backout.emplace_back(*first);
+  }
+  return { std::move(first), backout.release() };
+}
+
+template <std::input_iterator InIt,
+          std::contiguous_iterator OutIt, std::sentinel_for<OutIt> OutSent, class Allocator>
+requires std::constructible_from<std::iter_value_t<OutIt>, std::iter_reference_t<InIt>> &&
+         std::same_as<typename std::allocator_traits<Allocator>::value_type, std::iter_value_t<OutIt>> &&
+         std::convertible_to<OutIt, typename std::allocator_traits<Allocator>::pointer>
+constexpr auto uninitialized_copy_n(InIt first, std::iter_difference_t<InIt> count,
+                                    OutIt dest_first, OutSent dest_last, Allocator &alloc)
+    -> std::ranges::uninitialized_copy_n_result<InIt, OutIt>
+{
+  if (count <= 0) {
+    return { std::move(first), std::move(dest_first) };
+  }
+
+  constexpr bool can_memcpy = uninitialized_detail::iter_copy_cat<InIt, OutIt>::bitcopy_constructible &&
+                              uninitialized_detail::sized_or_unreachable_sentinel_for<OutSent, OutIt> &&
+                              (!uninitialized_detail::has_custom_construct<Allocator,
+                                typename std::allocator_traits<Allocator>::value_type *,
+                                std::iter_reference_t<InIt>>);
+
+  if constexpr (can_memcpy) {
+    if (!std::is_constant_evaluated()) {
+      return uninitialized_detail::invoke_memcpy(first, first + count, dest_first, dest_last);
+    }
+  }
+
+  uninitialized_backout_al<Allocator> backout { dest_first, alloc };
+  for (; count > 0 && backout.last() != dest_last; --count, ++first) {
+    backout.emplace_back(*first);
+  }
+  return { std::move(first), backout.release() };
+}
+
 } // namespace stdex
 
 #if defined(__clang__)
