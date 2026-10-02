@@ -284,6 +284,15 @@ void invoke_zero_memset(OutIt dest_first, size_t count)
   std::memset(static_cast<void *>(to_address_unwrap(dest_first)),
               0, count * sizeof(std::iter_value_t<OutIt>));
 }
+
+template <class OutIt, bool = iterator_is_contiguous<OutIt>>
+constexpr bool use_memset_value_construct = std::conjunction_v<
+    std::is_scalar<std::iter_value_t<OutIt>>,
+    std::negation<std::is_volatile<std::remove_reference_t<std::iter_reference_t<OutIt>>>>,
+    std::negation<std::is_member_pointer<std::iter_value_t<OutIt>>>>;
+
+template <class OutIt>
+constexpr bool use_memset_value_construct<OutIt, false> = false;
 } // namespace uninitialized_detail
 
 template <class T>
@@ -360,18 +369,15 @@ private:
   NoThrowForwardIt last_;
 };
 
-template <class Allocator>
+template <class Allocator, class OutIt>
 struct [[nodiscard]] uninitialized_backout_al
 {
 private:
-  using allocator_type   = Allocator;
-  using allocator_traits = std::allocator_traits<allocator_type>;
-
-  using value_type = typename allocator_traits::value_type;
-  using pointer    = typename allocator_traits::pointer;
+  using allocator_traits = std::allocator_traits<Allocator>;
+  using value_type       = typename allocator_traits::value_type;
 
 public:
-  constexpr explicit uninitialized_backout_al(pointer dest, Allocator &alloc)
+  constexpr explicit uninitialized_backout_al(OutIt dest, Allocator &alloc)
       : first_ { dest }
       , last_ { dest }
       , alloc_ { alloc }
@@ -383,8 +389,7 @@ public:
 
   constexpr ~uninitialized_backout_al() noexcept
   {
-    if constexpr (std::disjunction_v<std::negation<std::is_trivially_destructible<value_type>>,
-                                     std::bool_constant<uninitialized_detail::has_custom_destroy<Allocator, value_type *>>>) {
+    if constexpr (std::disjunction_v<std::negation<std::is_trivially_destructible<value_type>>, std::bool_constant<uninitialized_detail::has_custom_destroy<Allocator, value_type *>>>) {
       for (; first_ != last_; ++first_) {
         allocator_traits::destroy(alloc_, std::to_address(first_));
       }
@@ -393,7 +398,8 @@ public:
 
   template <class... Args>
   constexpr void emplace_back(Args &&...args) noexcept(
-      noexcept(allocator_traits::construct(alloc_, std::to_address(last_), std::forward<Args>(args)...)) && 
+      noexcept(allocator_traits::construct(
+          alloc_, std::to_address(last_), std::forward<Args>(args)...)) &&
       noexcept(++last_))
   {
     allocator_traits::construct(alloc_, std::to_address(last_), std::forward<Args>(args)...);
@@ -402,25 +408,26 @@ public:
 
 #if defined(__cpp_lib_constexpr_new)
   constexpr
-#endif 
-  void emplace_default() noexcept(
-      noexcept(allocator_traits::construct(alloc_, std::to_address(last_))) && noexcept(++last_))
+#endif
+      void emplace_default() noexcept(
+          noexcept(allocator_traits::construct(alloc_, std::to_address(last_))) &&
+          noexcept(++last_))
   {
     allocator_traits::construct(alloc_, std::to_address(last_));
     ++last_;
   }
 
-  constexpr pointer release() noexcept
+  constexpr OutIt release() noexcept
   {
     first_ = last_;
     return last_;
   }
 
-  constexpr pointer const &last() const noexcept { return last_; }
+  constexpr OutIt const &last() const noexcept { return last_; }
 
 private:
-  pointer first_;
-  pointer last_;
+  OutIt first_;
+  OutIt last_;
   Allocator &alloc_;
 };
 
@@ -441,7 +448,9 @@ constexpr auto uninitialized_move(InIt first, InSent last, OutIt dest_first, Out
       return uninitialized_detail::invoke_memcpy(first, last, dest_first, dest_last);
     }
   } else if constexpr (can_memcpy) {
-    assert(false && "uninitialized_move() with two unreachable sentinels cannot terminate");
+    static_assert(!(std::same_as<InSent, std::unreachable_sentinel_t> &&
+                    std::same_as<OutSent, std::unreachable_sentinel_t>),
+                  "uninitialized_move() cannot have two unreachable sentinels");
   }
 
   uninitialized_backout<OutIt> backout { std::move(dest_first) };
@@ -454,9 +463,9 @@ constexpr auto uninitialized_move(InIt first, InSent last, OutIt dest_first, Out
 template <std::input_iterator InIt, std::sentinel_for<InIt> InSent,
           std::contiguous_iterator OutIt, std::sentinel_for<OutIt> OutSent, class Allocator>
 requires std::constructible_from<std::iter_value_t<OutIt>, std::iter_rvalue_reference_t<InIt>> &&
-         std::same_as<typename std::allocator_traits<Allocator>::value_type, std::iter_value_t<OutIt>> &&
-         std::convertible_to<OutIt, typename std::allocator_traits<Allocator>::pointer>
-constexpr auto uninitialized_move(InIt first, InSent last, OutIt dest_first, OutSent dest_last, Allocator &alloc)
+         std::same_as<typename std::allocator_traits<Allocator>::value_type, std::iter_value_t<OutIt>>
+constexpr auto uninitialized_move(InIt first, InSent last, OutIt dest_first, OutSent dest_last,
+                                  Allocator &alloc)
     -> std::ranges::in_out_result<InIt, OutIt>
 {
   constexpr bool sized_src  = std::sized_sentinel_for<InSent, InIt>;
@@ -464,19 +473,22 @@ constexpr auto uninitialized_move(InIt first, InSent last, OutIt dest_first, Out
   constexpr bool can_memcpy = uninitialized_detail::iter_move_cat<InIt, OutIt>::bitcopy_constructible &&
                               uninitialized_detail::sized_or_unreachable_sentinel_for<InSent, InIt> &&
                               uninitialized_detail::sized_or_unreachable_sentinel_for<OutSent, OutIt> &&
-                              (!uninitialized_detail::has_custom_construct<Allocator,
-                                typename std::allocator_traits<Allocator>::value_type *,
-                                std::iter_rvalue_reference_t<InIt>>);
+                              (!uninitialized_detail::has_custom_construct<
+                                  Allocator,
+                                  typename std::allocator_traits<Allocator>::value_type *,
+                                  std::iter_rvalue_reference_t<InIt>>);
 
   if constexpr (can_memcpy && (sized_src || sized_dst)) {
     if (!std::is_constant_evaluated()) {
       return uninitialized_detail::invoke_memcpy(first, last, dest_first, dest_last);
     }
   } else if constexpr (can_memcpy) {
-    assert(false && "uninitialized_move() with two unreachable sentinels cannot terminate");
+    static_assert(!(std::same_as<InSent, std::unreachable_sentinel_t> &&
+                    std::same_as<OutSent, std::unreachable_sentinel_t>),
+                  "uninitialized_move() cannot have two unreachable sentinels");
   }
 
-  uninitialized_backout_al<Allocator> backout { dest_first, alloc };
+  uninitialized_backout_al<Allocator, OutIt> backout { dest_first, alloc };
   for (; first != last && backout.last() != dest_last; ++first) {
     backout.emplace_back(std::ranges::iter_move(first));
   }
@@ -510,11 +522,9 @@ constexpr auto uninitialized_move_n(InIt first, std::iter_difference_t<InIt> cou
   return { std::move(first), backout.release() };
 }
 
-template <std::input_iterator InIt,
-          std::contiguous_iterator OutIt, std::sentinel_for<OutIt> OutSent, class Allocator>
+template <std::input_iterator InIt, std::contiguous_iterator OutIt, std::sentinel_for<OutIt> OutSent, class Allocator>
 requires std::constructible_from<std::iter_value_t<OutIt>, std::iter_rvalue_reference_t<InIt>> &&
-         std::same_as<typename std::allocator_traits<Allocator>::value_type, std::iter_value_t<OutIt>> &&
-         std::convertible_to<OutIt, typename std::allocator_traits<Allocator>::pointer>
+         std::same_as<typename std::allocator_traits<Allocator>::value_type, std::iter_value_t<OutIt>>
 constexpr auto uninitialized_move_n(InIt first, std::iter_difference_t<InIt> count,
                                     OutIt dest_first, OutSent dest_last, Allocator &alloc)
     -> std::ranges::uninitialized_move_n_result<InIt, OutIt>
@@ -525,7 +535,8 @@ constexpr auto uninitialized_move_n(InIt first, std::iter_difference_t<InIt> cou
 
   constexpr bool can_memcpy = uninitialized_detail::iter_move_cat<InIt, OutIt>::bitcopy_constructible &&
                               uninitialized_detail::sized_or_unreachable_sentinel_for<OutSent, OutIt> &&
-                              (!uninitialized_detail::has_custom_construct<Allocator,
+                              (!uninitialized_detail::has_custom_construct<
+                                Allocator,
                                 typename std::allocator_traits<Allocator>::value_type *,
                                 std::iter_rvalue_reference_t<InIt>>);
 
@@ -535,7 +546,7 @@ constexpr auto uninitialized_move_n(InIt first, std::iter_difference_t<InIt> cou
     }
   }
 
-  uninitialized_backout_al<Allocator> backout { dest_first, alloc };
+  uninitialized_backout_al<Allocator, OutIt> backout { dest_first, alloc };
   for (; count > 0 && backout.last() != dest_last; --count, ++first) {
     backout.emplace_back(std::ranges::iter_move(first));
   }
@@ -559,7 +570,9 @@ constexpr auto uninitialized_copy(InIt first, InSent last, OutIt dest_first, Out
       return uninitialized_detail::invoke_memcpy(first, last, dest_first, dest_last);
     }
   } else if constexpr (can_memcpy) {
-    assert(false && "uninitialized_copy() with two unreachable sentinels cannot terminate");
+    static_assert(!(std::same_as<InSent, std::unreachable_sentinel_t> &&
+                    std::same_as<OutSent, std::unreachable_sentinel_t>),
+                  "uninitialized_copy() cannot have two unreachable sentinels");
   }
 
   uninitialized_backout<OutIt> backout { std::move(dest_first) };
@@ -572,8 +585,7 @@ constexpr auto uninitialized_copy(InIt first, InSent last, OutIt dest_first, Out
 template <std::input_iterator InIt, std::sentinel_for<InIt> InSent,
           std::contiguous_iterator OutIt, std::sentinel_for<OutIt> OutSent, class Allocator>
 requires std::constructible_from<std::iter_value_t<OutIt>, std::iter_reference_t<InIt>> &&
-         std::same_as<typename std::allocator_traits<Allocator>::value_type, std::iter_value_t<OutIt>> &&
-         std::convertible_to<OutIt, typename std::allocator_traits<Allocator>::pointer>
+         std::same_as<typename std::allocator_traits<Allocator>::value_type, std::iter_value_t<OutIt>>
 constexpr auto uninitialized_copy(InIt first, InSent last, OutIt dest_first, OutSent dest_last, Allocator &alloc)
     -> std::ranges::uninitialized_copy_result<InIt, OutIt>
 {
@@ -582,7 +594,8 @@ constexpr auto uninitialized_copy(InIt first, InSent last, OutIt dest_first, Out
   constexpr bool can_memcpy = uninitialized_detail::iter_copy_cat<InIt, OutIt>::bitcopy_constructible &&
                               uninitialized_detail::sized_or_unreachable_sentinel_for<InSent, InIt> &&
                               uninitialized_detail::sized_or_unreachable_sentinel_for<OutSent, OutIt> &&
-                              (!uninitialized_detail::has_custom_construct<Allocator,
+                              (!uninitialized_detail::has_custom_construct<
+                                Allocator,
                                 typename std::allocator_traits<Allocator>::value_type *,
                                 std::iter_reference_t<InIt>>);
 
@@ -591,10 +604,12 @@ constexpr auto uninitialized_copy(InIt first, InSent last, OutIt dest_first, Out
       return uninitialized_detail::invoke_memcpy(first, last, dest_first, dest_last);
     }
   } else if constexpr (can_memcpy) {
-    assert(false && "uninitialized_copy() with two unreachable sentinels cannot terminate");
+    static_assert(!(std::same_as<InSent, std::unreachable_sentinel_t> &&
+                    std::same_as<OutSent, std::unreachable_sentinel_t>),
+                  "uninitialized_copy() cannot have two unreachable sentinels");
   }
 
-  uninitialized_backout_al<Allocator> backout { dest_first, alloc };
+  uninitialized_backout_al<Allocator, OutIt> backout { dest_first, alloc };
   for (; first != last && backout.last() != dest_last; ++first) {
     backout.emplace_back(*first);
   }
@@ -628,11 +643,9 @@ constexpr auto uninitialized_copy_n(InIt first, std::iter_difference_t<InIt> cou
   return { std::move(first), backout.release() };
 }
 
-template <std::input_iterator InIt,
-          std::contiguous_iterator OutIt, std::sentinel_for<OutIt> OutSent, class Allocator>
+template <std::input_iterator InIt, std::contiguous_iterator OutIt, std::sentinel_for<OutIt> OutSent, class Allocator>
 requires std::constructible_from<std::iter_value_t<OutIt>, std::iter_reference_t<InIt>> &&
-         std::same_as<typename std::allocator_traits<Allocator>::value_type, std::iter_value_t<OutIt>> &&
-         std::convertible_to<OutIt, typename std::allocator_traits<Allocator>::pointer>
+         std::same_as<typename std::allocator_traits<Allocator>::value_type, std::iter_value_t<OutIt>>
 constexpr auto uninitialized_copy_n(InIt first, std::iter_difference_t<InIt> count,
                                     OutIt dest_first, OutSent dest_last, Allocator &alloc)
     -> std::ranges::uninitialized_copy_n_result<InIt, OutIt>
@@ -643,7 +656,8 @@ constexpr auto uninitialized_copy_n(InIt first, std::iter_difference_t<InIt> cou
 
   constexpr bool can_memcpy = uninitialized_detail::iter_copy_cat<InIt, OutIt>::bitcopy_constructible &&
                               uninitialized_detail::sized_or_unreachable_sentinel_for<OutSent, OutIt> &&
-                              (!uninitialized_detail::has_custom_construct<Allocator,
+                              (!uninitialized_detail::has_custom_construct<
+                                Allocator,
                                 typename std::allocator_traits<Allocator>::value_type *,
                                 std::iter_reference_t<InIt>>);
 
@@ -653,7 +667,7 @@ constexpr auto uninitialized_copy_n(InIt first, std::iter_difference_t<InIt> cou
     }
   }
 
-  uninitialized_backout_al<Allocator> backout { dest_first, alloc };
+  uninitialized_backout_al<Allocator, OutIt> backout { dest_first, alloc };
   for (; count > 0 && backout.last() != dest_last; --count, ++first) {
     backout.emplace_back(*first);
   }
@@ -691,8 +705,7 @@ constexpr OutIt uninitialized_fill(OutIt dest_first, OutSent dest_last, T const 
 
 template <std::contiguous_iterator OutIt, std::sentinel_for<OutIt> OutSent, class T, class Allocator>
 requires std::constructible_from<std::iter_value_t<OutIt>, T const &> &&
-         std::same_as<typename std::allocator_traits<Allocator>::value_type, std::iter_value_t<OutIt>> &&
-         std::convertible_to<OutIt, typename std::allocator_traits<Allocator>::pointer>
+         std::same_as<typename std::allocator_traits<Allocator>::value_type, std::iter_value_t<OutIt>>
 constexpr OutIt uninitialized_fill(OutIt dest_first, OutSent dest_last, T const &val, Allocator &alloc)
 {
   constexpr bool sized     = std::sized_sentinel_for<OutSent, OutIt>;
@@ -715,7 +728,7 @@ constexpr OutIt uninitialized_fill(OutIt dest_first, OutSent dest_last, T const 
     }
   }
 
-  uninitialized_backout_al<Allocator> backout { dest_first, alloc };
+  uninitialized_backout_al<Allocator, OutIt> backout { dest_first, alloc };
   while (backout.last() != dest_last) {
     backout.emplace_back(val);
   }
@@ -754,8 +767,7 @@ constexpr OutIt uninitialized_fill_n(OutIt dest_first, std::iter_difference_t<Ou
 
 template <std::contiguous_iterator OutIt, class T, class Allocator>
 requires std::constructible_from<std::iter_value_t<OutIt>, T const &> &&
-         std::same_as<typename std::allocator_traits<Allocator>::value_type, std::iter_value_t<OutIt>> &&
-         std::convertible_to<OutIt, typename std::allocator_traits<Allocator>::pointer>
+         std::same_as<typename std::allocator_traits<Allocator>::value_type, std::iter_value_t<OutIt>>
 constexpr OutIt uninitialized_fill_n(OutIt dest_first, std::iter_difference_t<OutIt> count,
                                       T const &val, Allocator &alloc)
 {
@@ -780,9 +792,107 @@ constexpr OutIt uninitialized_fill_n(OutIt dest_first, std::iter_difference_t<Ou
     }
   }
 
-  uninitialized_backout_al<Allocator> backout { dest_first, alloc };
+  uninitialized_backout_al<Allocator, OutIt> backout { dest_first, alloc };
   for (; count > 0; --count) {
     backout.emplace_back(val);
+  }
+  return backout.release();
+}
+
+template <std::forward_iterator OutIt, std::sentinel_for<OutIt> OutSent>
+requires std::default_initializable<std::iter_value_t<OutIt>>
+constexpr OutIt uninitialized_value_construct(OutIt dest_first, OutSent dest_last)
+{
+  constexpr bool sized     = std::sized_sentinel_for<OutSent, OutIt>;
+  constexpr bool memset_ok = sized && uninitialized_detail::use_memset_value_construct<OutIt>;
+
+  if constexpr (memset_ok) {
+    if (!std::is_constant_evaluated()) {
+      auto const n = static_cast<size_t>(dest_last - dest_first);
+      uninitialized_detail::invoke_zero_memset(dest_first, n);
+      return dest_first + static_cast<std::iter_difference_t<OutIt>>(n);
+    }
+  }
+
+  uninitialized_backout<OutIt> backout { std::move(dest_first) };
+  while (backout.last() != dest_last) {
+    backout.emplace_default();
+  }
+  return backout.release();
+}
+
+template <std::contiguous_iterator OutIt, std::sentinel_for<OutIt> OutSent, class Allocator>
+requires std::default_initializable<std::iter_value_t<OutIt>> &&
+         std::same_as<typename std::allocator_traits<Allocator>::value_type, std::iter_value_t<OutIt>>
+constexpr OutIt uninitialized_value_construct(OutIt dest_first, OutSent dest_last, Allocator &alloc)
+{
+  constexpr bool sized     = std::sized_sentinel_for<OutSent, OutIt>;
+  constexpr bool use_alloc = uninitialized_detail::has_custom_construct<Allocator,
+                               typename std::allocator_traits<Allocator>::value_type *>;
+  constexpr bool memset_ok = sized && uninitialized_detail::use_memset_value_construct<OutIt> && !use_alloc;
+
+  if constexpr (memset_ok) {
+    if (!std::is_constant_evaluated()) {
+      auto const n = static_cast<size_t>(dest_last - dest_first);
+      uninitialized_detail::invoke_zero_memset(dest_first, n);
+      return dest_first + static_cast<std::iter_difference_t<OutIt>>(n);
+    }
+  }
+
+  uninitialized_backout_al<Allocator, OutIt> backout { dest_first, alloc };
+  while (backout.last() != dest_last) {
+    backout.emplace_default();
+  }
+  return backout.release();
+}
+
+template <std::forward_iterator OutIt>
+requires std::default_initializable<std::iter_value_t<OutIt>>
+constexpr OutIt uninitialized_value_construct_n(OutIt dest_first, std::iter_difference_t<OutIt> count)
+{
+  if (count <= 0) {
+    return dest_first;
+  }
+
+  constexpr bool memset_ok = uninitialized_detail::use_memset_value_construct<OutIt>;
+
+  if constexpr (memset_ok) {
+    if (!std::is_constant_evaluated()) {
+      uninitialized_detail::invoke_zero_memset(dest_first, static_cast<size_t>(count));
+      return dest_first + count;
+    }
+  }
+
+  uninitialized_backout<OutIt> backout { std::move(dest_first) };
+  for (; count > 0; --count) {
+    backout.emplace_default();
+  }
+  return backout.release();
+}
+
+template <std::contiguous_iterator OutIt, class Allocator>
+requires std::default_initializable<std::iter_value_t<OutIt>> &&
+         std::same_as<typename std::allocator_traits<Allocator>::value_type, std::iter_value_t<OutIt>>
+constexpr OutIt uninitialized_value_construct_n(OutIt dest_first, std::iter_difference_t<OutIt> count, Allocator &alloc)
+{
+  if (count <= 0) {
+    return dest_first;
+  }
+
+  constexpr bool use_alloc = uninitialized_detail::has_custom_construct<Allocator,
+                               typename std::allocator_traits<Allocator>::value_type *>;
+  constexpr bool memset_ok = uninitialized_detail::use_memset_value_construct<OutIt> && !use_alloc;
+
+  if constexpr (memset_ok) {
+    if (!std::is_constant_evaluated()) {
+      uninitialized_detail::invoke_zero_memset(dest_first, static_cast<size_t>(count));
+      return dest_first + count;
+    }
+  }
+
+  uninitialized_backout_al<Allocator, OutIt> backout { dest_first, alloc };
+  for (; count > 0; --count) {
+    backout.emplace_default();
   }
   return backout.release();
 }
