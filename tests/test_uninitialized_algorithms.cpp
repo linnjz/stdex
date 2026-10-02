@@ -155,6 +155,35 @@ struct copy_only
   static void reset_counts() { copies = 0; }
 };
 
+struct throw_default
+{
+  int value = 0;
+  static inline int alive     = 0;
+  static inline int built     = 0;
+  static inline int throw_at  = 1000000;
+  static inline int destroyed = 0;
+
+  throw_default()
+  {
+    if (built++ >= throw_at) throw std::runtime_error("default ctor throws");
+    ++alive;
+    value = 7;
+  }
+  ~throw_default() { --alive; ++destroyed; }
+  static void reset()
+  {
+    alive = 0;
+    built = 0;
+    throw_at = 1000000;
+    destroyed = 0;
+  }
+  static void reset_counts()
+  {
+    built = 0;
+    destroyed = 0;
+  }
+};
+
 // ------------------------------------------------------------------
 // fancy pointer + allocators
 // ------------------------------------------------------------------
@@ -1704,6 +1733,452 @@ static void test_fill_n_alloc()
   fal.deallocate(fdst, 2);
 }
 
+// ------------------------------------------------------------------
+// uninitialized_value_construct trait gating
+// ------------------------------------------------------------------
+static void test_vc_traits()
+{
+  SECTION("value_construct/traits: memset gating");
+  static_assert(stdex::uninitialized_detail::use_memset_value_construct<int*>);
+  static_assert(stdex::uninitialized_detail::use_memset_value_construct<int**>);
+  static_assert(stdex::uninitialized_detail::use_memset_value_construct<double*>);
+  static_assert(!stdex::uninitialized_detail::use_memset_value_construct<std::string*>);
+  static_assert(!stdex::uninitialized_detail::use_memset_value_construct<int volatile*>);
+  CHECK(true);
+}
+
+// ------------------------------------------------------------------
+// uninitialized_value_construct, plain (no allocator)
+// ------------------------------------------------------------------
+static void test_vc_plain_memset()
+{
+  SECTION("value_construct/plain: scalar memset path + empty");
+  alignas(int) unsigned char buf[3 * sizeof(int)];
+  buf[0] = 0xFF;
+  buf[sizeof(int)] = 0xFF;
+  buf[2 * sizeof(int)] = 0xFF;
+  int* dst = reinterpret_cast<int*>(buf);
+  auto r = stdex::uninitialized_value_construct(dst, dst + 3);
+  CHECK((r == dst + 3));
+  CHECK(dst[0] == 0 && dst[1] == 0 && dst[2] == 0);
+  std::destroy(dst, dst + 3);
+
+  auto r0 = stdex::uninitialized_value_construct(dst, dst);
+  CHECK((r0 == dst));
+}
+
+static void test_vc_plain_loop()
+{
+  SECTION("value_construct/plain: non-trivial default construction");
+  move_tracker::reset();
+  {
+    alignas(move_tracker) unsigned char buf[2 * sizeof(move_tracker)];
+    auto* dst = reinterpret_cast<move_tracker*>(buf);
+    auto r = stdex::uninitialized_value_construct(dst, dst + 2);
+    CHECK((r == dst + 2));
+    CHECK(move_tracker::live == 2);
+    CHECK(move_tracker::copies == 0 && move_tracker::moves == 0);
+    CHECK(dst[0].value == 0 && dst[1].value == 0);
+    std::destroy(dst, dst + 2);
+  }
+  CHECK(move_tracker::live == 0);
+}
+
+static void test_vc_plain_throw_backout()
+{
+  SECTION("value_construct/plain: throwing default ctor destroys prefix");
+  throw_default::reset();
+  {
+    throw_default::throw_at = 2;
+    alignas(throw_default) unsigned char buf[4 * sizeof(throw_default)];
+    auto* dst = reinterpret_cast<throw_default*>(buf);
+    bool threw = false;
+    try {
+      (void) stdex::uninitialized_value_construct(dst, dst + 4);
+    } catch (std::runtime_error const&) {
+      threw = true;
+    }
+    CHECK(threw);
+    CHECK(throw_default::alive == 0);
+    CHECK(throw_default::destroyed == 2);
+  }
+  CHECK(throw_default::alive == 0);
+}
+
+static void test_vc_plain_constexpr()
+{
+  SECTION("value_construct/plain: constexpr evaluation (loop fallback)");
+  // emplace_default is constexpr only with __cpp_lib_constexpr_new (absent on
+  // MSVC 19.51 preview headers); runtime paths are unaffected.
+#if defined(__cpp_lib_constexpr_new)
+  constexpr auto run = [] {
+    int d[3] = { 9, 9, 9 };
+    auto r = stdex::uninitialized_value_construct(d, d + 3);
+    return r == d + 3 && d[0] == 0 && d[2] == 0;
+  };
+  static_assert(run());
+  CHECK(run());
+#else
+  CHECK(true);
+#endif
+}
+
+// ------------------------------------------------------------------
+// uninitialized_value_construct with raw allocator
+// ------------------------------------------------------------------
+static void test_vc_alloc_raw_memset()
+{
+  SECTION("value_construct/alloc-raw: scalar memset path");
+  std::allocator<int> al;
+  int* dst = al.allocate(3);
+  auto r = stdex::uninitialized_value_construct(dst, dst + 3, al);
+  CHECK((r == dst + 3));
+  CHECK(dst[0] == 0 && dst[2] == 0);
+  std::destroy(dst, dst + 3);
+  al.deallocate(dst, 3);
+}
+
+static void test_vc_alloc_raw_loop_forced()
+{
+  SECTION("value_construct/alloc-raw: custom construct forces loop");
+  counting_alloc<int>::reset();
+  counting_alloc<int> al;
+  int* dst = al.allocate(3);
+  auto r = stdex::uninitialized_value_construct(dst, dst + 3, al);
+  CHECK((r == dst + 3));
+  CHECK(counting_alloc<int>::construct_count == 3);
+  CHECK(dst[0] == 0 && dst[2] == 0);
+  std::destroy(dst, dst + 3);
+  al.deallocate(dst, 3);
+}
+
+static void test_vc_alloc_raw_nontrivial_counting()
+{
+  SECTION("value_construct/alloc-raw: non-trivial via counting allocator");
+  counting_alloc<move_tracker>::reset();
+  move_tracker::reset();
+  {
+    counting_alloc<move_tracker> al;
+    move_tracker* dst = al.allocate(2);
+    auto r = stdex::uninitialized_value_construct(dst, dst + 2, al);
+    CHECK((r == dst + 2));
+    CHECK(counting_alloc<move_tracker>::construct_count == 2);
+    CHECK(dst[0].value == 0 && dst[1].value == 0);
+    std::destroy(dst, dst + 2);
+    al.deallocate(dst, 2);
+  }
+  CHECK(move_tracker::live == 0);
+}
+
+static void test_vc_alloc_raw_throw_backout()
+{
+  SECTION("value_construct/alloc-raw: throwing ctor calls allocator destroy");
+  counting_alloc<throw_default>::reset();
+  throw_default::reset();
+  {
+    counting_alloc<throw_default> al;
+    throw_default::throw_at = 1;
+    throw_default* dst = al.allocate(4);
+    bool threw = false;
+    try {
+      (void) stdex::uninitialized_value_construct(dst, dst + 4, al);
+    } catch (std::runtime_error const&) {
+      threw = true;
+    }
+    CHECK(threw);
+    CHECK(counting_alloc<throw_default>::construct_count == 2);
+    CHECK(counting_alloc<throw_default>::destroy_count == 1);
+    CHECK(throw_default::alive == 0);
+    al.deallocate(dst, 4);
+  }
+  CHECK(throw_default::alive == 0);
+}
+
+// ------------------------------------------------------------------
+// uninitialized_value_construct with fancy allocator
+// ------------------------------------------------------------------
+static void test_vc_alloc_fancy_memset()
+{
+  SECTION("value_construct/alloc-fancy: scalar memset path + empty");
+  fancy_alloc<int> al;
+  fancy_ptr<int> dst = al.allocate(3);
+  auto r = stdex::uninitialized_value_construct(dst, dst + 3, al);
+  CHECK((r == dst + 3));
+  CHECK(dst[0] == 0 && dst[2] == 0);
+  std::destroy(std::to_address(dst), std::to_address(dst + 3));
+  al.deallocate(dst, 3);
+
+  fancy_ptr<int> d0 = al.allocate(1);
+  auto r0 = stdex::uninitialized_value_construct(d0, d0, al);
+  CHECK((r0 == d0));
+  al.deallocate(d0, 1);
+}
+
+static void test_vc_alloc_fancy_nontrivial()
+{
+  SECTION("value_construct/alloc-fancy: non-trivial via fancy");
+  fancy_alloc<move_tracker> al;
+  move_tracker::reset();
+  {
+    fancy_ptr<move_tracker> dst = al.allocate(2);
+    auto r = stdex::uninitialized_value_construct(dst, dst + 2, al);
+    CHECK((r == dst + 2));
+    CHECK(move_tracker::live == 2);
+    CHECK(dst[0].value == 0 && dst[1].value == 0);
+    std::destroy(std::to_address(dst), std::to_address(dst + 2));
+    al.deallocate(dst, 2);
+  }
+  CHECK(move_tracker::live == 0);
+}
+
+static void test_vc_alloc_fancy_custom_construct_no_memset()
+{
+  SECTION("value_construct/alloc-fancy: custom construct disables memset");
+  fancy_counting_alloc<int>::reset();
+  fancy_counting_alloc<int> al;
+  fancy_ptr<int> dst = al.allocate(3);
+  auto r = stdex::uninitialized_value_construct(dst, dst + 3, al);
+  CHECK((r == dst + 3));
+  CHECK(fancy_counting_alloc<int>::construct_count == 3);
+  CHECK(dst[0] == 0);
+  std::destroy(std::to_address(dst), std::to_address(dst + 3));
+  al.deallocate(dst, 3);
+}
+
+static void test_vc_alloc_fancy_throw_custom_destroy()
+{
+  SECTION("value_construct/alloc-fancy: throw -> custom destroy on prefix");
+  fancy_counting_alloc<throw_default>::reset();
+  throw_default::reset();
+  {
+    fancy_counting_alloc<throw_default> al;
+    throw_default::throw_at = 1;
+    fancy_ptr<throw_default> dst = al.allocate(3);
+    bool threw = false;
+    try {
+      (void) stdex::uninitialized_value_construct(dst, dst + 3, al);
+    } catch (std::runtime_error const&) {
+      threw = true;
+    }
+    CHECK(threw);
+    CHECK(fancy_counting_alloc<throw_default>::destroy_count == 1);
+    CHECK(throw_default::alive == 0);
+    al.deallocate(dst, 3);
+  }
+  CHECK(throw_default::alive == 0);
+}
+
+static void test_vc_alloc_fancy_success_noop()
+{
+  SECTION("value_construct/alloc-fancy: success leaves nothing for backout");
+  fancy_counting_alloc<int>::reset();
+  fancy_counting_alloc<int> al;
+  fancy_ptr<int> dst = al.allocate(2);
+  auto r = stdex::uninitialized_value_construct(dst, dst + 2, al);
+  CHECK((r == dst + 2));
+  CHECK(fancy_counting_alloc<int>::construct_count == 2);
+  CHECK(fancy_counting_alloc<int>::destroy_count == 0);
+  std::destroy(std::to_address(dst), std::to_address(dst + 2));
+  al.deallocate(dst, 2);
+}
+
+// ------------------------------------------------------------------
+// value_construct_n (plain + alloc)
+// ------------------------------------------------------------------
+static void test_vc_n_plain()
+{
+  SECTION("value_construct_n/plain: memset/empty/loop/constexpr");
+  alignas(int) unsigned char buf[2 * sizeof(int)];
+  int* dst = reinterpret_cast<int*>(buf);
+  auto r = stdex::uninitialized_value_construct_n(dst, 2);
+  CHECK((r == dst + 2));
+  CHECK(dst[0] == 0 && dst[1] == 0);
+  std::destroy(dst, dst + 2);
+
+  auto r0 = stdex::uninitialized_value_construct_n(dst, 0);
+  CHECK((r0 == dst));
+  auto rn = stdex::uninitialized_value_construct_n(dst, -3);
+  CHECK((rn == dst));
+
+  move_tracker::reset();
+  {
+    alignas(move_tracker) unsigned char mbuf[2 * sizeof(move_tracker)];
+    auto* mdst = reinterpret_cast<move_tracker*>(mbuf);
+    auto rm = stdex::uninitialized_value_construct_n(mdst, 2);
+    CHECK((rm == mdst + 2));
+    CHECK(move_tracker::live == 2);
+    CHECK(mdst[0].value == 0);
+    std::destroy(mdst, mdst + 2);
+  }
+  CHECK(move_tracker::live == 0);
+
+#if defined(__cpp_lib_constexpr_new)
+  constexpr auto run = [] {
+    int d[2] = { 9, 9 };
+    auto r2 = stdex::uninitialized_value_construct_n(d, 2);
+    return r2 == d + 2 && d[0] == 0 && d[1] == 0;
+  };
+  static_assert(run());
+  CHECK(run());
+#else
+  CHECK(true);
+#endif
+}
+
+static void test_vc_n_alloc()
+{
+  SECTION("value_construct_n/alloc: raw + fancy");
+  std::allocator<int> al;
+  int* dst = al.allocate(2);
+  auto r = stdex::uninitialized_value_construct_n(dst, 2, al);
+  CHECK((r == dst + 2));
+  CHECK(dst[0] == 0 && dst[1] == 0);
+  std::destroy(dst, dst + 2);
+  al.deallocate(dst, 2);
+
+  auto r0 = stdex::uninitialized_value_construct_n(dst, 0, al);
+  CHECK((r0 == dst));
+
+  counting_alloc<int>::reset();
+  counting_alloc<int> cal;
+  int* cdst = cal.allocate(2);
+  auto rc = stdex::uninitialized_value_construct_n(cdst, 2, cal);
+  CHECK((rc == cdst + 2));
+  CHECK(counting_alloc<int>::construct_count == 2);
+  std::destroy(cdst, cdst + 2);
+  cal.deallocate(cdst, 2);
+
+  fancy_alloc<int> fal;
+  fancy_ptr<int> fdst = fal.allocate(2);
+  auto rf = stdex::uninitialized_value_construct_n(fdst, 2, fal);
+  CHECK((rf == fdst + 2));
+  CHECK(fdst[0] == 0 && fdst[1] == 0);
+  std::destroy(std::to_address(fdst), std::to_address(fdst + 2));
+  fal.deallocate(fdst, 2);
+}
+
+// ------------------------------------------------------------------
+// copy(make_move_iterator(it)) == move(it), incl. fancy pointers
+// ------------------------------------------------------------------
+static void test_copy_move_iter_equiv_traits()
+{
+  SECTION("copy(move_iterator) == move: trait equivalence");
+  using F  = fancy_ptr<int>;
+  using MF = std::move_iterator<F>;
+  static_assert(stdex::uninitialized_detail::iter_copy_cat<MF, F>::bitcopy_constructible ==
+                stdex::uninitialized_detail::iter_move_cat<F, F>::bitcopy_constructible);
+  static_assert(stdex::uninitialized_detail::iter_copy_cat<MF, F>::bitcopy_constructible);
+  using TF  = fancy_ptr<move_tracker>;
+  using MTF = std::move_iterator<TF>;
+  static_assert(!stdex::uninitialized_detail::iter_copy_cat<MTF, TF>::bitcopy_constructible);
+  static_assert(!stdex::uninitialized_detail::iter_move_cat<TF, TF>::bitcopy_constructible);
+  using MR = std::move_iterator<int*>;
+  static_assert(stdex::uninitialized_detail::iter_copy_cat<MR, int*>::bitcopy_constructible ==
+                stdex::uninitialized_detail::iter_move_cat<int*, int*>::bitcopy_constructible);
+  CHECK(true);
+}
+
+static void test_copy_move_iter_equiv_memcpy()
+{
+  SECTION("copy(move_iterator) == move: memcpy path (raw + fancy)");
+  {
+    int src[3] = { 1, 2, 3 };
+    alignas(int) unsigned char b1[3 * sizeof(int)], b2[3 * sizeof(int)];
+    int* d1 = reinterpret_cast<int*>(b1);
+    int* d2 = reinterpret_cast<int*>(b2);
+    auto mfirst = std::make_move_iterator(src);
+    auto mlast  = std::make_move_iterator(src + 3);
+    auto r1 = stdex::uninitialized_copy(mfirst, mlast, d1, d1 + 3);
+    auto r2 = stdex::uninitialized_move(src, src + 3, d2, d2 + 3);
+    CHECK((r1.in == mlast && r2.in == src + 3));
+    CHECK((r1.out == d1 + 3 && r2.out == d2 + 3));
+    CHECK(d1[0] == d2[0] && d1[1] == d2[1] && d1[2] == d2[2]);
+    std::destroy(d1, d1 + 3);
+    std::destroy(d2, d2 + 3);
+  }
+  {
+    int raw[3] = { 4, 5, 6 };
+    fancy_ptr<int> src(raw);
+    auto mfirst = std::make_move_iterator(src);
+    auto mlast  = std::make_move_iterator(src + 3);
+    alignas(int) unsigned char b1[3 * sizeof(int)], b2[3 * sizeof(int)];
+    fancy_ptr<int> d1(reinterpret_cast<int*>(b1)), d2(reinterpret_cast<int*>(b2));
+    auto r1 = stdex::uninitialized_copy(mfirst, mlast, d1, d1 + 3);
+    auto r2 = stdex::uninitialized_move(src, src + 3, d2, d2 + 3);
+    CHECK((r1.in == mlast && r2.in == src + 3));
+    CHECK((r1.out == d1 + 3 && r2.out == d2 + 3));
+    CHECK(d1[0] == d2[0] && d1[2] == d2[2]);
+    std::destroy(std::to_address(d1), std::to_address(d1 + 3));
+    std::destroy(std::to_address(d2), std::to_address(d2 + 3));
+  }
+}
+
+static void test_copy_move_iter_equiv_loop()
+{
+  SECTION("copy(move_iterator) == move: loop path moves, truncates alike (fancy)");
+  move_tracker::reset();
+  {
+    move_tracker raw1[3] { move_tracker(1), move_tracker(2), move_tracker(3) };
+    move_tracker raw2[3] { move_tracker(1), move_tracker(2), move_tracker(3) };
+    move_tracker::reset_counts();
+    fancy_ptr<move_tracker> s1(raw1), s2(raw2);
+    auto mfirst = std::make_move_iterator(s1);
+    alignas(move_tracker) unsigned char b1[2 * sizeof(move_tracker)], b2[2 * sizeof(move_tracker)];
+    fancy_ptr<move_tracker> d1(reinterpret_cast<move_tracker*>(b1));
+    fancy_ptr<move_tracker> d2(reinterpret_cast<move_tracker*>(b2));
+
+    auto r1 = stdex::uninitialized_copy(mfirst, std::make_move_iterator(s1 + 3), d1, d1 + 2);
+    CHECK(move_tracker::copies == 0); // moved, not copied
+    CHECK(move_tracker::moves == 2);
+    CHECK(raw1[0].moved_from); // source pilfered through copy+move_iterator
+
+    auto r2 = stdex::uninitialized_move(s2, s2 + 3, d2, d2 + 2);
+    CHECK(move_tracker::moves == 4);
+    CHECK((r1.in == std::make_move_iterator(s1 + 2) && r2.in == s2 + 2));
+    CHECK((r1.out == d1 + 2 && r2.out == d2 + 2));
+    CHECK(d1[0].value == d2[0].value && d1[1].value == d2[1].value);
+    std::destroy(std::to_address(d1), std::to_address(d1 + 2));
+    std::destroy(std::to_address(d2), std::to_address(d2 + 2));
+  }
+  CHECK(move_tracker::live == 0);
+}
+
+static void test_copy_move_iter_equiv_alloc()
+{
+  SECTION("copy(move_iterator) == move: allocator overload (fancy)");
+  fancy_alloc<int> al;
+  int raw[3] = { 7, 8, 9 };
+  fancy_ptr<int> src(raw);
+  auto mfirst = std::make_move_iterator(src);
+  auto mlast  = std::make_move_iterator(src + 3);
+  fancy_ptr<int> d1 = al.allocate(3);
+  fancy_ptr<int> d2 = al.allocate(3);
+  auto r1 = stdex::uninitialized_copy(mfirst, mlast, d1, d1 + 3, al);
+  auto r2 = stdex::uninitialized_move(src, src + 3, d2, d2 + 3, al);
+  CHECK((r1.in == mlast && r2.in == src + 3));
+  CHECK((r1.out == d1 + 3 && r2.out == d2 + 3));
+  CHECK(d1[0] == d2[0] && d1[2] == d2[2]);
+  std::destroy(std::to_address(d1), std::to_address(d1 + 3));
+  std::destroy(std::to_address(d2), std::to_address(d2 + 3));
+  al.deallocate(d1, 3);
+  al.deallocate(d2, 3);
+}
+
+static void test_copy_n_move_iter_equiv()
+{
+  SECTION("copy_n(move_iterator) == move_n");
+  int src[3] = { 1, 2, 3 };
+  alignas(int) unsigned char b1[3 * sizeof(int)], b2[3 * sizeof(int)];
+  int* d1 = reinterpret_cast<int*>(b1);
+  int* d2 = reinterpret_cast<int*>(b2);
+  auto r1 = stdex::uninitialized_copy_n(std::make_move_iterator(src), 3, d1, d1 + 3);
+  auto r2 = stdex::uninitialized_move_n(src, 3, d2, d2 + 3);
+  CHECK((r1.out == d1 + 3 && r2.out == d2 + 3));
+  CHECK(d1[0] == d2[0] && d1[2] == d2[2]);
+  std::destroy(d1, d1 + 3);
+  std::destroy(d2, d2 + 3);
+}
+
 int main()
 {
   test_plain_trivial_exact();
@@ -1785,6 +2260,32 @@ int main()
 
   test_fill_n_plain();
   test_fill_n_alloc();
+
+  test_vc_traits();
+  test_vc_plain_memset();
+  test_vc_plain_loop();
+  test_vc_plain_throw_backout();
+  test_vc_plain_constexpr();
+
+  test_vc_alloc_raw_memset();
+  test_vc_alloc_raw_loop_forced();
+  test_vc_alloc_raw_nontrivial_counting();
+  test_vc_alloc_raw_throw_backout();
+
+  test_vc_alloc_fancy_memset();
+  test_vc_alloc_fancy_nontrivial();
+  test_vc_alloc_fancy_custom_construct_no_memset();
+  test_vc_alloc_fancy_throw_custom_destroy();
+  test_vc_alloc_fancy_success_noop();
+
+  test_vc_n_plain();
+  test_vc_n_alloc();
+
+  test_copy_move_iter_equiv_traits();
+  test_copy_move_iter_equiv_memcpy();
+  test_copy_move_iter_equiv_loop();
+  test_copy_move_iter_equiv_alloc();
+  test_copy_n_move_iter_equiv();
 
   std::println("\npass={} fail={}", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;
