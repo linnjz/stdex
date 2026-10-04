@@ -138,6 +138,7 @@ private:
   using base::required_capacity_for_growth_;
   using base::aligned_capacity_;
 
+  using base::uses_fancy_pointers_v;
   static constexpr bool is_pocca_v = allocator_traits::propagate_on_container_copy_assignment::value;
   static constexpr bool is_pocma_v = allocator_traits::propagate_on_container_move_assignment::value;
   static constexpr bool is_pocs_v  = allocator_traits::propagate_on_container_swap::value;
@@ -388,6 +389,7 @@ public:
         std::is_nothrow_move_constructible_v<key_equal> &&
         std::is_nothrow_move_constructible_v<allocator_type> &&
         allocator_traits::is_always_equal::value &&
+        !uses_fancy_pointers_v &&
         (inline_capacity == 0 ||
          (std::is_nothrow_move_constructible_v<value_type> &&
           std::is_nothrow_invocable_v<hasher&, key_type const&> &&
@@ -411,6 +413,7 @@ public:
         std::is_nothrow_move_constructible_v<value_type> &&
         std::is_nothrow_destructible_v<value_type> &&
         allocator_traits::is_always_equal::value &&
+        !uses_fancy_pointers_v &&
         std::is_nothrow_invocable_v<hasher&, key_type const&> &&
         std::is_nothrow_invocable_v<key_equal&, key_type const&, key_type const&>)
   {
