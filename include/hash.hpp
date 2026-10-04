@@ -109,6 +109,19 @@ concept scalar_hashable = std::integral<std::remove_cv_t<T>> ||
                           std::is_enum_v<std::remove_cv_t<T>> ||
                           std::floating_point<std::remove_cv_t<T>>;
 
+// -0.0 == +0.0 but bit_cast differs; NaN != NaN so no normalization needed.
+template <typename T>
+[[nodiscard]] constexpr unsigned_equivalent_t<T> to_hashable_unsigned(T const value) noexcept
+{
+  using U = std::remove_cv_t<T>;
+  if constexpr (std::floating_point<U>) {
+    if (value == static_cast<T>(0)) {
+      return static_cast<unsigned_equivalent_t<T>>(0);
+    }
+  }
+  return to_unsigned(value);
+}
+
 template <typename Range>
 concept contiguous_byte_range = std::ranges::contiguous_range<Range> &&
                                 std::ranges::sized_range<Range> &&
@@ -227,9 +240,23 @@ template <hash_detail::contiguous_byte_range Range, hash_mode Mode = hash_standa
 template <hash_detail::contiguous_object_range Range, hash_mode Mode = hash_standard_t>
 [[nodiscard]] constexpr uint64_t hash_range(Range const &range, uint64_t seed = 0) noexcept
 {
-  using value_type   = std::remove_cv_t<std::ranges::range_value_t<Range>>;
-  auto const objects = std::span<value_type const> { std::ranges::data(range), std::ranges::size(range) };
-  return hash_bytes<std::byte, Mode>(std::as_bytes(objects), seed);
+  using value_type = std::remove_cv_t<std::ranges::range_value_t<Range>>;
+  if constexpr (hash_detail::scalar_hashable<value_type>) {
+    // Per-element hash_value keeps this consistent with the scalar path on every
+    // platform (little_endian_array, -0.0 folding); a raw as_bytes pass would bake
+    // in native endianness. Structs without hash_value support take the branch below.
+    uint64_t h = seed;
+    for (value_type const v : range) {
+      h = hash_value<value_type, Mode>(v, h);
+    }
+    return h;
+  } else {
+    static_assert(std::has_unique_object_representations_v<value_type>, "stdex::hash_range: value_type has padding or aliased representations; "
+                                                                        "hashing raw bytes would violate a == b => hash(a) == hash(b). "
+                                                                        "Provide a custom hash over members.");
+    auto const objects = std::span<value_type const> { std::ranges::data(range), std::ranges::size(range) };
+    return hash_bytes<std::byte, Mode>(std::as_bytes(objects), seed);
+  }
 }
 
 template <hash_mode Mode = hash_standard_t>
@@ -241,9 +268,9 @@ template <hash_mode Mode = hash_standard_t>
 template <hash_detail::scalar_hashable T, hash_mode Mode = hash_standard_t>
 [[nodiscard]] constexpr uint64_t hash_value(T const value, uint64_t const seed = 0) noexcept
 {
-  auto const bytes = little_endian_array(to_unsigned(value));
-  using byte_type  = std::remove_cv_t<decltype(bytes)>;
-  return hash_range<byte_type, Mode>(bytes, seed);
+  auto const bytes = little_endian_array(hash_detail::to_hashable_unsigned(value));
+  using array_type = std::remove_cv_t<decltype(bytes)>;
+  return hash_range<array_type, Mode>(bytes, seed);
 }
 
 template <class T>
@@ -256,12 +283,11 @@ struct hash<T>
   using result_type   = size_t;
 
   [[nodiscard]] constexpr size_t operator() (argument_type value) const noexcept
-  requires (hash_detail::scalar_hashable<T>)
   {
     if constexpr (sizeof(void *) == 8) {
-      return mix(static_cast<uint64_t>(to_unsigned(value)), 0x9E'37'79'B9'7F'4A'7C'15ull);
+      return mix(static_cast<uint64_t>(hash_detail::to_hashable_unsigned(value)), 0x9E'37'79'B9'7F'4A'7C'15ull);
     } else {
-      uint64_t product = static_cast<uint64_t>(to_unsigned(value)) * 0xE8'17'FB'2Du;
+      uint64_t product = static_cast<uint64_t>(hash_detail::to_hashable_unsigned(value)) * 0xE8'17'FB'2Du;
 #if defined(__MSVC_RUNTIME_CHECKS)
       return static_cast<uint32_t>(product & UINT32_MAX) ^ static_cast<uint32_t>(product >> 32);
 #else
@@ -309,7 +335,9 @@ struct hash<std::nullptr_t>
   }
 };
 
-template <class T>
+// reinterpret_cast from a function pointer is conditionally-supported; exclude function
+// types so hash<void(*)()> fails on the constraint instead of inside reinterpret_cast.
+template <class T> requires (!std::is_function_v<T>)
 struct hash<T *>
 {
   using argument_type = T *;
