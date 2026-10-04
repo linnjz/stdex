@@ -57,6 +57,14 @@ struct iterator_pointer<Reference, false>
 template <class Traits, bool IsConstant>
 using iterator_reference_t = std::conditional_t<IsConstant, typename Traits::const_reference, typename Traits::reference>;
 
+/// Storage is always raw: elements/groups live either in a single heap buffer
+/// (accessed via to_address once) or in stack inline arrays that no allocator
+/// fancy pointer could address. Keeping only raw here avoids requiring fancy
+/// arithmetic across the overlaid group area and explicit raw->fancy builds
+/// at every find/emplace/begin site (boost::foa keeps fancy in its iterator
+/// and pays that cost via to_pointer; we have SBO on top, so raw is safer).
+/// ValuePointer/GroupPointer are retained as phantom parameters so existing
+/// aliases (inline_storage::iterator) keep their identity across allocators.
 template <class Traits, class ValuePointer, class GroupPointer, bool IsConstant>
 class hash_table_iterator : public iterator_pointer<iterator_reference_t<Traits, IsConstant>>
 {
@@ -65,7 +73,7 @@ class hash_table_iterator : public iterator_pointer<iterator_reference_t<Traits,
 
   using value_ptr_traits = std::pointer_traits<ValuePointer>;
   using group_ptr_traits = std::pointer_traits<GroupPointer>;
-  
+
   using group_type       = typename group_ptr_traits::element_type;
 
 public:
@@ -154,14 +162,14 @@ public:
   }
 
 private:
-  constexpr explicit hash_table_iterator(value_pointer element_ptr, group_pointer group_ptr, size_t slot_index) noexcept
+  constexpr explicit hash_table_iterator(value_type *element_ptr, group_type *group_ptr, size_t slot_index) noexcept
       : element_ptr_ { element_ptr }
       , group_ptr_ { group_ptr }
       , slot_index_ { slot_index }
   {
   }
 
-  constexpr value_type *element_address_() const noexcept { return std::to_address(element_ptr_); }
+  constexpr value_type *element_address_() const noexcept { return element_ptr_; }
 
   constexpr reference dereference_() const noexcept
   {
@@ -173,7 +181,7 @@ private:
     }
   }
 
-  constexpr group_type *group_address_() const noexcept { return std::to_address(group_ptr_); }
+  constexpr group_type *group_address_() const noexcept { return group_ptr_; }
 
   constexpr void increment_() noexcept
   {
@@ -221,8 +229,8 @@ private:
   template <class, class, class, class>
   friend struct inline_storage;
 
-  value_pointer element_ptr_;
-  group_pointer group_ptr_;
+  value_type *element_ptr_;
+  group_type *group_ptr_;
   size_t slot_index_;
 };
 

@@ -63,10 +63,19 @@ struct inline_storage : public Traits
 
   using const_iterator = hash_table_iterator<Traits, pointer, group_pointer, true>;
   using iterator       = std::conditional_t<
-    std::is_same_v<key_type, value_type>, 
-    const_iterator, 
+    std::is_same_v<key_type, value_type>,
+    const_iterator,
     hash_table_iterator<Traits, pointer, group_pointer, false>>;
   using lazy_iterator  = hash_table_lazy_iterator<iterator>;
+
+  static constexpr bool uses_fancy_pointers_v = !std::is_same_v<pointer, value_type *>;
+
+  template <class FancyPtr, class RawPtr>
+  static constexpr FancyPtr to_pointer_or_null_(RawPtr raw) noexcept
+  {
+    if (raw == nullptr) return nullptr;
+    return std::pointer_traits<FancyPtr>::pointer_to(*raw);
+  }
 
   using Traits::inline_capacity;
   static constexpr size_type max_load_factor_den = 7;
@@ -194,7 +203,7 @@ struct inline_storage : public Traits
       auto groups_alloc = group_allocator_type { alloc_ };
       auto groups_ptr   = group_allocator_traits::allocate(groups_alloc, group_count_());
 
-      initial_group_array_(groups_ptr, group_count_());
+      initial_group_array_(std::to_address(groups_ptr), group_count_());
 
       heap_ = { elements_ptr, groups_ptr };
     } else {
@@ -207,7 +216,7 @@ struct inline_storage : public Traits
       auto groups_ptr = reinterpret_cast<group_type *>(byte_ptr);
       initial_group_array_(groups_ptr, group_count_());
 
-      heap_ = { elements_ptr, group_pointer_traits::pointer_to(*groups_ptr) };
+      heap_ = { elements_ptr, std::pointer_traits<group_pointer>::pointer_to(*groups_ptr) };
     }
   }
 
