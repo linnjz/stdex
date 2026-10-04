@@ -258,6 +258,126 @@ private:
 };
 
 // ==================================================================
+// minimal fancy pointer + allocator (explicit raw ctor catches
+// implicit raw->fancy conversions; exercises heap/stack, rehash,
+// copy/move/swap with pointer != T*)
+// ==================================================================
+template <class T>
+struct fancy_ptr
+{
+  T *p_ = nullptr;
+
+  constexpr fancy_ptr() noexcept = default;
+  constexpr fancy_ptr(std::nullptr_t) noexcept : p_ { nullptr } {}
+  constexpr explicit fancy_ptr(T *p) noexcept : p_ { p } {}
+
+  template <class U>
+  requires std::convertible_to<U *, T *>
+  constexpr fancy_ptr(fancy_ptr<U> const &other) noexcept
+      : p_ { other.get() }
+  {
+  }
+
+  [[nodiscard]] constexpr T *get() const noexcept { return p_; }
+  [[nodiscard]] constexpr T &operator*() const noexcept { return *p_; }
+  [[nodiscard]] constexpr T *operator->() const noexcept { return p_; }
+
+  friend constexpr bool operator== (fancy_ptr a, fancy_ptr b) noexcept { return a.p_ == b.p_; }
+  friend constexpr bool operator!= (fancy_ptr a, fancy_ptr b) noexcept { return !(a == b); }
+  friend constexpr bool operator== (fancy_ptr a, std::nullptr_t) noexcept { return a.p_ == nullptr; }
+  friend constexpr bool operator!= (fancy_ptr a, std::nullptr_t) noexcept { return a.p_ != nullptr; }
+  friend constexpr bool operator== (std::nullptr_t, fancy_ptr a) noexcept { return a.p_ == nullptr; }
+  friend constexpr bool operator!= (std::nullptr_t, fancy_ptr a) noexcept { return a.p_ != nullptr; }
+};
+
+template <class T>
+struct fancy_alloc
+{
+  using value_type      = T;
+  using pointer         = fancy_ptr<T>;
+  using const_pointer   = fancy_ptr<T const>;
+  using size_type       = std::size_t;
+  using difference_type = std::ptrdiff_t;
+
+  using propagate_on_container_copy_assignment = std::false_type;
+  using propagate_on_container_move_assignment = std::false_type;
+  using propagate_on_container_swap            = std::false_type;
+  using is_always_equal                        = std::false_type;
+
+  template <class U>
+  struct rebind
+  {
+    using other = fancy_alloc<U>;
+  };
+
+  fancy_alloc() = default;
+
+  constexpr fancy_alloc(allocator_probe_state *state, int id) noexcept
+      : state_ { state }
+      , id_ { id }
+  {
+  }
+
+  template <class U>
+  constexpr fancy_alloc(fancy_alloc<U> const &other) noexcept
+      : state_ { other.state_ }
+      , id_ { other.id_ }
+  {
+  }
+
+  [[nodiscard]] pointer allocate(size_type count)
+  {
+    ++state_->allocation_attempts;
+    auto *raw = static_cast<T *>(::operator new(count * sizeof(T)));
+    ++state_->allocations;
+    ++state_->active_allocations;
+    return pointer { raw };
+  }
+
+  void deallocate(pointer ptr, size_type) noexcept
+  {
+    ::operator delete(static_cast<void *>(ptr.get()));
+    ++state_->deallocations;
+    --state_->active_allocations;
+  }
+
+  template <class U>
+  friend constexpr bool operator== (fancy_alloc const &left, fancy_alloc<U> const &right) noexcept
+  {
+    return left.state_ == right.state_ && left.id_ == right.id_;
+  }
+
+  template <class U>
+  friend constexpr bool operator!= (fancy_alloc const &left, fancy_alloc<U> const &right) noexcept
+  {
+    return !(left == right);
+  }
+
+  template <class>
+  friend struct fancy_alloc;
+
+private:
+  allocator_probe_state *state_ = nullptr;
+  int id_                       = 0;
+};
+
+namespace std
+{
+template <class T>
+struct pointer_traits<fancy_ptr<T>>
+{
+  using pointer         = fancy_ptr<T>;
+  using element_type    = T;
+  using difference_type = std::ptrdiff_t;
+
+  template <class U>
+  using rebind = fancy_ptr<U>;
+
+  static pointer pointer_to(element_type &ref) noexcept { return pointer { std::addressof(ref) }; }
+};
+} // namespace std
+
+// ==================================================================
 // convenience aliases
 // ==================================================================
 template <size_t N>
@@ -331,6 +451,20 @@ using StdexISet = ufd::hash_table<
     stdex::hash<int>,
     std::equal_to<>,
     std::allocator<int>>;
+
+template <size_t N>
+using FancyMap = ufd::hash_table<
+    ufd::ufmap_traits<int, int, N>,
+    std::hash<int>,
+    std::equal_to<>,
+    fancy_alloc<std::pair<int, int>>>;
+
+template <size_t N>
+using FancySet = ufd::hash_table<
+    ufd::ufset_traits<int, N>,
+    std::hash<int>,
+    std::equal_to<>,
+    fancy_alloc<int>>;
 
 // per hard constraint: set's iterator is const_iterator, map's must differ.
 static_assert(std::is_same_v<ISet<0>::iterator, ISet<0>::const_iterator>);
@@ -1438,8 +1572,8 @@ constexpr bool constexpr_hash_mul()
   auto const k1 = stdex::hash_value(12345);
   auto const k2 = stdex::hash_value(54321);
   auto const standard = stdex::hash_range(buffer);
-  auto const micro    = stdex::hash_range<decltype(buffer), stdex::micro_t>(buffer, 0u);
-  auto const nano     = stdex::hash_range<decltype(buffer), stdex::nano_t>(buffer, 0u);
+  auto const micro    = stdex::hash_range<decltype(buffer), stdex::hash_micro_t>(buffer, 0u);
+  auto const nano     = stdex::hash_range<decltype(buffer), stdex::hash_nano_t>(buffer, 0u);
 
   auto const product = stdex::umul128(0x0123'4567'89AB'CDEFull, 0xFEDC'BA98'7654'3210ull);
   return k1 != k2 && standard != micro && standard != nano && micro != nano &&
@@ -2754,6 +2888,101 @@ void test_stdex_hash_integration()
 }
 
 // ==================================================================
+// 43. fancy pointers: explicit raw ctor, heap/stack, rehash/copy/move/swap
+// ==================================================================
+void test_fancy_pointers()
+{
+  SECTION("fancy pointers (explicit raw ctor)");
+
+  static_assert(!std::is_same_v<FancyMap<0>::pointer, std::pair<int, int> *>);
+  // NOTE: FancyMap<0>::iterator::difference_type via the container hits MSVC
+  // C2247 (private-base path); go through a local alias instead.
+  using fancy_iter = FancyMap<0>::iterator;
+  using raw_iter   = IMap<0>::iterator;
+  static_assert(std::is_same_v<typename fancy_iter::difference_type, std::ptrdiff_t>);
+  static_assert(std::is_same_v<typename raw_iter::difference_type, std::ptrdiff_t>);
+  static_assert(!noexcept(FancyMap<0>(std::declval<FancyMap<0> &&>())));
+
+  // heap table CRUD + iteration + erase + rehash.
+  {
+    allocator_probe_state st {};
+    FancyMap<0> t { std::hash<int> {}, std::equal_to<> {}, fancy_alloc<std::pair<int, int>> { &st, 1 } };
+
+    for (int i = 0; i < 200; ++i) CHECK(t.emplace(i, i * 2).second);
+    CHECK_EQ(t.size(), 200u);
+    for (int i = 0; i < 200; ++i) {
+      auto it = t.find(i);
+      CHECK(it != t.end());
+      if (it != t.end()) CHECK_EQ(it->second, i * 2);
+    }
+    int count = 0;
+    for (auto &&[k, v] : t) {
+      (void) k;
+      (void) v;
+      ++count;
+    }
+    CHECK_EQ(count, 200);
+
+    for (int i = 0; i < 100; ++i) CHECK_EQ(t.erase(i), 1u);
+    CHECK_EQ(t.size(), 100u);
+    t.rehash(500);
+    for (int i = 100; i < 200; ++i) CHECK(t.contains(i));
+    t.reserve(1000);
+    CHECK(t.capacity() >= 1000u);
+
+    FancyMap<0> u { std::hash<int> {}, std::equal_to<> {}, fancy_alloc<std::pair<int, int>> { &st, 1 } };
+    for (int i = 100; i < 200; ++i) u.emplace(i, i * 2);
+    CHECK(t == u);
+    CHECK(!(t != u));
+    u.emplace(9999, 1);
+    CHECK(t != u);
+
+    // copy with same allocator state stays equal; move keeps values.
+    FancyMap<0> v { t, fancy_alloc<std::pair<int, int>> { &st, 1 } };
+    CHECK(v == t);
+    FancyMap<0> w { std::move(v), fancy_alloc<std::pair<int, int>> { &st, 1 } };
+    CHECK(w == t);
+
+    // swap + clear; allocations balanced at scope exit.
+    // NOTE: propagate_on_container_swap is false, so swap requires equal
+    // allocators ([container.requirements.general]/8); use the same id.
+    FancyMap<0> empty { std::hash<int> {}, std::equal_to<> {}, fancy_alloc<std::pair<int, int>> { &st, 1 } };
+    w.swap(empty);
+    CHECK(empty == t);
+    CHECK(w.empty());
+    w.clear();
+    empty.clear();
+  }
+
+  // stack table: fill inline, promote, then copy/move across allocators.
+  {
+    allocator_probe_state st {};
+    FancyMap<29> t { std::hash<int> {}, std::equal_to<> {}, fancy_alloc<std::pair<int, int>> { &st, 1 } };
+    for (int i = 0; i < 29; ++i) CHECK(t.emplace(i, i).second);
+    CHECK(t.is_stack());
+    CHECK(t.emplace(29, 29).second);
+    CHECK(t.is_heap());
+    for (int i = 0; i < 30; ++i) CHECK(t.contains(i));
+
+    FancyMap<29> u { t, fancy_alloc<std::pair<int, int>> { &st, 1 } };
+    CHECK(u == t);
+    FancyMap<29> mv { std::move(u), fancy_alloc<std::pair<int, int>> { &st, 1 } };
+    CHECK(mv == t);
+  }
+
+  // set smoke with fancy.
+  {
+    allocator_probe_state st {};
+    FancySet<0> s { std::hash<int> {}, std::equal_to<> {}, fancy_alloc<int> { &st, 1 } };
+    for (int i = 0; i < 50; ++i) CHECK(s.emplace(i).second);
+    CHECK_EQ(s.size(), 50u);
+    CHECK(s.contains(49));
+    CHECK_EQ(s.erase(49), 1u);
+    CHECK(!s.contains(49));
+  }
+}
+
+// ==================================================================
 // main
 // ==================================================================
 int main()
@@ -2803,6 +3032,7 @@ int main()
   test_insert_overloads();
   test_const_find_and_node();
   test_stdex_hash_integration();
+  test_fancy_pointers();
 
   std::println("\n===============================");
   std::println("PASS: {}   FAIL: {}", g_pass, g_fail);
