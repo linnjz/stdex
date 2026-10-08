@@ -17,7 +17,6 @@
 #pragma once
 
 #include <array>       // std::array
-#include <bit>         // std::bit_cast
 #include <cassert>     // assert
 #include <concepts>    // std::constructible_from
 #include <cstddef>     // size_t, std::byte
@@ -28,6 +27,8 @@
 #include <new>         // ::new (placement)
 #include <type_traits> // std::is_same_v, std::remove_const_t, ...
 #include <utility>     // std::forward, std::move, std::pair
+
+#include "bit_traits.hpp"
 
 #if defined(__clang__)
 #  pragma clang diagnostic push
@@ -166,16 +167,6 @@ template <class Sent, class It>
 concept sized_or_unreachable_sentinel_for = 
     std::sized_sentinel_for<Sent, It> || std::same_as<Sent, std::unreachable_sentinel_t>;
 
-template <class Alloc, class Ptr, class... Args>
-concept has_custom_construct = requires (Alloc &a, Ptr p, Args &&...args) {
-  a.construct(p, std::forward<Args>(args)...);
-};
-
-template <class Alloc, class Ptr>
-concept has_custom_destroy = requires (Alloc &a, Ptr p) {
-  a.destroy(p);
-};
-
 template <class It>
 constexpr auto to_address_unwrap(It const &it) noexcept
 {
@@ -246,28 +237,6 @@ constexpr bool fill_zero_memset_is_safe = std::conjunction_v<std::is_scalar<T>,
 template <class OutIt, class T>
 constexpr bool fill_zero_memset_is_safe<OutIt, T, false> = false;
 
-template <class T>
-[[nodiscard]] constexpr bool is_all_bits_zero(T const &val) noexcept
-{
-  static_assert(std::is_scalar_v<T> && !std::is_member_pointer_v<T>);
-  if constexpr (std::is_null_pointer_v<T>) {
-    return true;
-  } else if constexpr (std::is_integral_v<T> || std::is_pointer_v<T>) {
-    return val == T {};
-  } else if constexpr (sizeof(T) == 1) {
-    return std::bit_cast<std::uint8_t>(val) == 0;
-  } else if constexpr (sizeof(T) == 2) {
-    return std::bit_cast<std::uint16_t>(val) == 0;
-  } else if constexpr (sizeof(T) == 4) {
-    return std::bit_cast<std::uint32_t>(val) == 0;
-  } else if constexpr (sizeof(T) == 8) {
-    return std::bit_cast<std::uint64_t>(val) == 0;
-  } else {
-    return std::bit_cast<std::array<unsigned char, sizeof(T)>>(val) ==
-           std::bit_cast<std::array<unsigned char, sizeof(T)>>(T{});
-  }
-}
-
 template <class OutIt, class T>
 void invoke_memset(OutIt dest_first, T const &val, size_t count)
 {
@@ -294,6 +263,16 @@ constexpr bool use_memset_value_construct = std::conjunction_v<
 template <class OutIt>
 constexpr bool use_memset_value_construct<OutIt, false> = false;
 } // namespace uninitialized_detail
+
+template <class Alloc, class Ptr, class... Args>
+concept has_custom_construct = requires (Alloc &a, Ptr p, Args &&...args) {
+  a.construct(p, std::forward<Args>(args)...);
+};
+
+template <class Alloc, class Ptr>
+concept has_custom_destroy = requires (Alloc &a, Ptr p) {
+  a.destroy(p);
+};
 
 template <class T>
 #if defined(__cpp_lib_constexpr_new)
@@ -389,7 +368,8 @@ public:
 
   constexpr ~uninitialized_backout_al() noexcept
   {
-    if constexpr (std::disjunction_v<std::negation<std::is_trivially_destructible<value_type>>, std::bool_constant<uninitialized_detail::has_custom_destroy<Allocator, value_type *>>>) {
+    if constexpr (std::disjunction_v<std::negation<std::is_trivially_destructible<value_type>>, 
+                                     std::bool_constant<has_custom_destroy<Allocator, value_type *>>>) {
       for (; first_ != last_; ++first_) {
         allocator_traits::destroy(alloc_, std::to_address(first_));
       }
@@ -473,7 +453,7 @@ constexpr auto uninitialized_move(InIt first, InSent last, OutIt dest_first, Out
   constexpr bool can_memcpy = uninitialized_detail::iter_move_cat<InIt, OutIt>::bitcopy_constructible &&
                               uninitialized_detail::sized_or_unreachable_sentinel_for<InSent, InIt> &&
                               uninitialized_detail::sized_or_unreachable_sentinel_for<OutSent, OutIt> &&
-                              (!uninitialized_detail::has_custom_construct<
+                              (!has_custom_construct<
                                   Allocator,
                                   typename std::allocator_traits<Allocator>::value_type *,
                                   std::iter_rvalue_reference_t<InIt>>);
@@ -535,7 +515,7 @@ constexpr auto uninitialized_move_n(InIt first, std::iter_difference_t<InIt> cou
 
   constexpr bool can_memcpy = uninitialized_detail::iter_move_cat<InIt, OutIt>::bitcopy_constructible &&
                               uninitialized_detail::sized_or_unreachable_sentinel_for<OutSent, OutIt> &&
-                              (!uninitialized_detail::has_custom_construct<
+                              (!has_custom_construct<
                                 Allocator,
                                 typename std::allocator_traits<Allocator>::value_type *,
                                 std::iter_rvalue_reference_t<InIt>>);
@@ -594,7 +574,7 @@ constexpr auto uninitialized_copy(InIt first, InSent last, OutIt dest_first, Out
   constexpr bool can_memcpy = uninitialized_detail::iter_copy_cat<InIt, OutIt>::bitcopy_constructible &&
                               uninitialized_detail::sized_or_unreachable_sentinel_for<InSent, InIt> &&
                               uninitialized_detail::sized_or_unreachable_sentinel_for<OutSent, OutIt> &&
-                              (!uninitialized_detail::has_custom_construct<
+                              (!has_custom_construct<
                                 Allocator,
                                 typename std::allocator_traits<Allocator>::value_type *,
                                 std::iter_reference_t<InIt>>);
@@ -656,7 +636,7 @@ constexpr auto uninitialized_copy_n(InIt first, std::iter_difference_t<InIt> cou
 
   constexpr bool can_memcpy = uninitialized_detail::iter_copy_cat<InIt, OutIt>::bitcopy_constructible &&
                               uninitialized_detail::sized_or_unreachable_sentinel_for<OutSent, OutIt> &&
-                              (!uninitialized_detail::has_custom_construct<
+                              (!has_custom_construct<
                                 Allocator,
                                 typename std::allocator_traits<Allocator>::value_type *,
                                 std::iter_reference_t<InIt>>);
@@ -689,7 +669,7 @@ constexpr OutIt uninitialized_fill(OutIt dest_first, OutSent dest_last, T const 
       return dest_first + static_cast<std::iter_difference_t<OutIt>>(n);
     }
   } else if constexpr (zero_ok) {
-    if (!std::is_constant_evaluated() && uninitialized_detail::is_all_bits_zero(val)) {
+    if (!std::is_constant_evaluated() && is_all_bits_zero(val)) {
       auto const n = static_cast<size_t>(dest_last - dest_first);
       uninitialized_detail::invoke_zero_memset(dest_first, n);
       return dest_first + static_cast<std::iter_difference_t<OutIt>>(n);
@@ -709,7 +689,7 @@ requires std::constructible_from<std::iter_value_t<OutIt>, T const &> &&
 constexpr OutIt uninitialized_fill(OutIt dest_first, OutSent dest_last, T const &val, Allocator &alloc)
 {
   constexpr bool sized     = std::sized_sentinel_for<OutSent, OutIt>;
-  constexpr bool use_alloc = uninitialized_detail::has_custom_construct<Allocator,
+  constexpr bool use_alloc = has_custom_construct<Allocator,
                                typename std::allocator_traits<Allocator>::value_type *, T const &>;
   constexpr bool memset_ok = sized && uninitialized_detail::fill_memset_is_safe<OutIt, T> && !use_alloc;
   constexpr bool zero_ok   = sized && uninitialized_detail::fill_zero_memset_is_safe<OutIt, T> && !use_alloc;
@@ -721,7 +701,7 @@ constexpr OutIt uninitialized_fill(OutIt dest_first, OutSent dest_last, T const 
       return dest_first + static_cast<std::iter_difference_t<OutIt>>(n);
     }
   } else if constexpr (zero_ok) {
-    if (!std::is_constant_evaluated() && uninitialized_detail::is_all_bits_zero(val)) {
+    if (!std::is_constant_evaluated() && is_all_bits_zero(val)) {
       auto const n = static_cast<size_t>(dest_last - dest_first);
       uninitialized_detail::invoke_zero_memset(dest_first, n);
       return dest_first + static_cast<std::iter_difference_t<OutIt>>(n);
@@ -752,7 +732,7 @@ constexpr OutIt uninitialized_fill_n(OutIt dest_first, std::iter_difference_t<Ou
       return dest_first + count;
     }
   } else if constexpr (zero_ok) {
-    if (!std::is_constant_evaluated() && uninitialized_detail::is_all_bits_zero(val)) {
+    if (!std::is_constant_evaluated() && is_all_bits_zero(val)) {
       uninitialized_detail::invoke_zero_memset(dest_first, static_cast<size_t>(count));
       return dest_first + count;
     }
@@ -775,7 +755,7 @@ constexpr OutIt uninitialized_fill_n(OutIt dest_first, std::iter_difference_t<Ou
     return dest_first;
   }
 
-  constexpr bool use_alloc = uninitialized_detail::has_custom_construct<Allocator,
+  constexpr bool use_alloc = has_custom_construct<Allocator,
                                typename std::allocator_traits<Allocator>::value_type *, T const &>;
   constexpr bool memset_ok = uninitialized_detail::fill_memset_is_safe<OutIt, T> && !use_alloc;
   constexpr bool zero_ok   = uninitialized_detail::fill_zero_memset_is_safe<OutIt, T> && !use_alloc;
@@ -786,7 +766,7 @@ constexpr OutIt uninitialized_fill_n(OutIt dest_first, std::iter_difference_t<Ou
       return dest_first + count;
     }
   } else if constexpr (zero_ok) {
-    if (!std::is_constant_evaluated() && uninitialized_detail::is_all_bits_zero(val)) {
+    if (!std::is_constant_evaluated() && is_all_bits_zero(val)) {
       uninitialized_detail::invoke_zero_memset(dest_first, static_cast<size_t>(count));
       return dest_first + count;
     }
@@ -827,7 +807,7 @@ requires std::default_initializable<std::iter_value_t<OutIt>> &&
 constexpr OutIt uninitialized_value_construct(OutIt dest_first, OutSent dest_last, Allocator &alloc)
 {
   constexpr bool sized     = std::sized_sentinel_for<OutSent, OutIt>;
-  constexpr bool use_alloc = uninitialized_detail::has_custom_construct<Allocator,
+  constexpr bool use_alloc = has_custom_construct<Allocator,
                                typename std::allocator_traits<Allocator>::value_type *>;
   constexpr bool memset_ok = sized && uninitialized_detail::use_memset_value_construct<OutIt> && !use_alloc;
 
@@ -879,7 +859,7 @@ constexpr OutIt uninitialized_value_construct_n(OutIt dest_first, std::iter_diff
     return dest_first;
   }
 
-  constexpr bool use_alloc = uninitialized_detail::has_custom_construct<Allocator,
+  constexpr bool use_alloc = has_custom_construct<Allocator,
                                typename std::allocator_traits<Allocator>::value_type *>;
   constexpr bool memset_ok = uninitialized_detail::use_memset_value_construct<OutIt> && !use_alloc;
 

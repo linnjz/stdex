@@ -1337,11 +1337,11 @@ static void test_fill_traits()
   static_assert(stdex::uninitialized_detail::fill_zero_memset_is_safe<int*, int>);
   static_assert(stdex::uninitialized_detail::fill_zero_memset_is_safe<double*, double>);
   static_assert(!stdex::uninitialized_detail::fill_zero_memset_is_safe<std::string*, std::string>);
-  static_assert(stdex::uninitialized_detail::is_all_bits_zero(0));
-  static_assert(!stdex::uninitialized_detail::is_all_bits_zero(1));
-  static_assert(stdex::uninitialized_detail::is_all_bits_zero(0.0));
-  static_assert(!stdex::uninitialized_detail::is_all_bits_zero(0.5));
-  static_assert(stdex::uninitialized_detail::is_all_bits_zero(nullptr));
+  static_assert(stdex::is_all_bits_zero(0));
+  static_assert(!stdex::is_all_bits_zero(1));
+  static_assert(stdex::is_all_bits_zero(0.0));
+  static_assert(!stdex::is_all_bits_zero(0.5));
+  static_assert(stdex::is_all_bits_zero(nullptr));
   CHECK(true);
 }
 
