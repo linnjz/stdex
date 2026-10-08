@@ -132,3 +132,9 @@ Design references (no code copied)
   Copyright (c) Microsoft Corporation.
 
   include/fixed_string.hpp follows P3094R5 ("std::basic_fixed_string").
+
+  include/inlined_bitset.hpp follows the public interface of
+  pinam45/dynamic_bitset (an implementation of the proposed
+  std::dynamic_bitset); only the API declarations were referenced, no
+  implementation code was copied.
+  https://github.com/pinam45/dynamic_bitset
