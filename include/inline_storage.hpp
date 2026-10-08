@@ -129,6 +129,33 @@ protected:
     constexpr void dismiss() noexcept { data_ = pointer {}; }
   };
 
+  struct reallocation_guard
+  {
+    pointer data_;
+    size_type capacity_;
+    value_type *constructed_first_;
+    value_type *constructed_last_;
+    allocator_type &alloc_;
+
+    reallocation_guard &operator= (reallocation_guard const &) = delete;
+    reallocation_guard &operator= (reallocation_guard &&)      = delete;
+
+    constexpr ~reallocation_guard() noexcept
+    {
+      if (data_ != pointer {}) {
+        if constexpr (std::disjunction_v<std::negation<std::is_trivially_destructible<value_type>>,
+                                         std::bool_constant<has_custom_destroy<allocator_type, value_type *>>>) {
+          for (value_type *current = constructed_first_; current != constructed_last_; ++current) {
+            allocator_traits::destroy(alloc_, current);
+          }
+        }
+        allocator_traits::deallocate(alloc_, data_, capacity_);
+      }
+    }
+
+    constexpr void dismiss() noexcept { data_ = pointer {}; }
+  };
+
   constexpr void initialize_storage_() noexcept
   {
     if constexpr (inline_capacity == 0) {
@@ -214,7 +241,7 @@ protected:
   constexpr void construct_heap_n_unchecked_(size_type const count, Args &&...args)
   {
     auto const [new_block, new_capacity] = allocate_unchecked_(count);
-    allocation_guard guard { new_block, new_capacity, alloc_ };
+    allocation_guard alloc_guard { new_block, new_capacity, alloc_ };
     value_type *const raw_new_block = std::to_address(new_block);
     if constexpr (sizeof...(Args) == 0) {
       (void) uninitialized_value_construct_n(raw_new_block, count, alloc_);
@@ -229,7 +256,7 @@ protected:
     } else {
       static_assert(sizeof...(Args) <= 2, "unexpected number of arguments");
     }
-    guard.dismiss();
+    alloc_guard.dismiss();
 
     heap_.elements_ptr_ = new_block;
     heap_.capacity_     = new_capacity;
@@ -508,10 +535,10 @@ protected:
       if (was_stack) promote_to_heap_();
     }
     auto const [new_block, new_capacity] = allocate_unchecked_(growth);
-    allocation_guard guard { new_block, new_capacity, alloc_ };
+    allocation_guard alloc_guard { new_block, new_capacity, alloc_ };
     value_type *const raw_new_block = std::to_address(new_block);
     (void) uninitialized_copy_n(src, count, raw_new_block, raw_new_block + count, alloc_);
-    guard.dismiss();
+    alloc_guard.dismiss();
 
     heap_.elements_ptr_ = new_block;
     heap_.capacity_     = new_capacity;
@@ -928,6 +955,76 @@ public:
       heap_.capacity_     = new_capacity;
       set_size_(count, heap_flag);
     }
+  }
+
+protected:
+  template <class... Args>
+  requires (sizeof...(Args) <= 1)
+  constexpr void resize_reallocate_(size_type const newsize, Args&&... args)
+  {
+    if (newsize > max_size()) [[unlikely]] throw_length_error_();
+    size_type const oldsize = size();
+    assert(oldsize < newsize && newsize > capacity() && "resize_reallocate_() requires growth beyond capacity");
+
+    value_type *const old_data = data();
+    size_type const growth      = calculate_growth_(newsize);
+    auto const [new_block, new_capacity] = allocate_unchecked_(growth);
+    value_type *const raw_new        = std::to_address(new_block);
+    value_type *const appended_first = raw_new + oldsize;
+
+    reallocation_guard guard { new_block, new_capacity, appended_first, appended_first, alloc_ };
+    if constexpr (sizeof...(Args) == 0) {
+      guard.constructed_last_ = uninitialized_value_construct_n(appended_first, newsize - oldsize, alloc_);
+    } else {
+      guard.constructed_last_ = uninitialized_fill_n(appended_first, newsize - oldsize, std::forward<Args>(args)..., alloc_);
+    }
+    transfer_unchecked_(old_data, oldsize, raw_new, alloc_);
+    guard.dismiss();
+
+    destroy_elements_unchecked_(old_data, oldsize);
+    if (is_heap()) {
+      if (heap_.elements_ptr_ != pointer {}) deallocate_unchecked_();
+    } else if constexpr (inline_capacity != 0) {
+      promote_to_heap_();
+    }
+
+    heap_.elements_ptr_ = new_block;
+    heap_.capacity_     = new_capacity;
+    set_size_(newsize, heap_flag);
+  }
+
+  template <class... Args>
+  requires (sizeof...(Args) <= 1)
+  constexpr void resize_impl_(size_type const newsize, Args&&... args)
+  {
+    size_type const oldsize = size();
+    if (newsize < oldsize) {
+      value_type *const newlast = data() + newsize;
+      destroy_elements_unchecked_(newlast, oldsize - newsize);
+      set_size_(newsize, get_flag_());
+      return;
+    }
+    if (newsize > oldsize) {
+      if (newsize > capacity()) {
+        resize_reallocate_(newsize, std::forward<Args>(args)...);
+        return;
+      }
+      construct_elements_unchecked_(data() + oldsize, newsize - oldsize, std::forward<Args>(args)...);
+      set_size_(newsize, get_flag_());
+    }
+  }
+
+public:
+  constexpr void resize(size_type const newsize)
+  requires std::default_initializable<value_type>
+  {
+    resize_impl_(newsize);
+  }
+
+  constexpr void resize(size_type const newsize, const_reference fill_value)
+  requires std::constructible_from<value_type, const_reference>
+  {
+    resize_impl_(newsize, fill_value);
   }
 
 protected:

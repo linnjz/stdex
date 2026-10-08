@@ -72,49 +72,115 @@ public:
 
     constexpr reference &operator= (reference const &other) noexcept
     {
-      return *this;
+      return *this = static_cast<bool>(other);
     }
 
-    constexpr reference &operator= (reference &&other) noexcept;
+    constexpr reference &operator= (reference &&other) noexcept
+    {
+      return *this = static_cast<bool>(other);
+    }
 
     constexpr reference &operator= (bool const val) noexcept
     {
+      if (val) {
+        *block_ |= single_bit_mask_;
+      } else {
+        *block_ &= static_cast<block_type>(~single_bit_mask_);
+      }
       return *this;
     }
 
-    constexpr reference &operator&= (bool val);
-    constexpr reference &operator|= (bool val);
-    constexpr reference &operator^= (bool val);
-    constexpr reference &operator-= (bool val);
+    constexpr reference &operator&= (bool val) noexcept
+    {
+      if (!val) {
+        *block_ &= static_cast<block_type>(~single_bit_mask_);
+      }
+      return *this;
+    }
+
+    constexpr reference &operator|= (bool val) noexcept
+    {
+      if (val) {
+        *block_ |= single_bit_mask_;
+      }
+      return *this;
+    }
+
+    constexpr reference &operator^= (bool val) noexcept
+    {
+      if (val) {
+        *block_ ^= single_bit_mask_;
+      }
+      return *this;
+    }
+
+    constexpr reference &operator-= (bool val) noexcept
+    {
+      return *this &= static_cast<bool>(!val);
+    }
 
     constexpr void operator& () = delete;
-    [[nodiscard]] constexpr bool operator~() const;
-    [[nodiscard]] constexpr operator bool() const;
 
-    constexpr reference &set();
+    [[nodiscard]] constexpr bool operator~() const noexcept
+    {
+      return (*block_ & single_bit_mask_) == 0;
+    }
 
-    constexpr reference &reset();
+    [[nodiscard]] constexpr operator bool() const noexcept
+    {
+      return (*block_ & single_bit_mask_) != 0;
+    }
+
+    constexpr reference &set() noexcept
+    {
+      *block_ |= single_bit_mask_;
+      return *this;
+    }
+
+    constexpr reference &reset() noexcept
+    {
+      *block_ &= static_cast<block_type>(~single_bit_mask_);
+      return *this;
+    }
 
     constexpr reference &flip() noexcept
     {
+      *block_ ^= single_bit_mask_;
+      return *this;
     }
 
-    constexpr reference &assign(bool val) { }
+    constexpr reference &assign(bool val) noexcept
+    {
+      return *this = val;
+    }
 
     friend constexpr void swap(reference lhs, reference rhs) noexcept
     {
+      bool const tmp = static_cast<bool>(lhs);
+      lhs            = static_cast<bool>(rhs);
+      rhs            = tmp;
     }
 
     friend constexpr void swap(reference lhs, bool &rhs) noexcept
     {
+      bool const tmp = static_cast<bool>(lhs);
+      lhs            = rhs;
+      rhs            = tmp;
     }
 
     friend constexpr void swap(bool &lhs, reference rhs) noexcept
     {
+      bool const tmp = lhs;
+      lhs            = static_cast<bool>(rhs);
+      rhs            = tmp;
     }
 
   private:
-    constexpr reference(inlined_bitset &bitset, size_type bit_pos);
+    constexpr reference(block_type *block, size_type bit_pos) noexcept
+        : block_ { block }
+        , single_bit_mask_ { static_cast<block_type>(block_type { 1 } << (bit_pos % bits_per_block)) }
+    {
+    }
 
     block_type *block_;
     block_type single_bit_mask_;
@@ -144,8 +210,11 @@ public:
 private:
   using base::throw_length_error_;
   using base::max_size_;
+  using base::get_flag_;
   using base::set_size_;
   using base::allocate_unchecked_;
+  using base::construct_elements_unchecked_;
+  using base::destroy_elements_unchecked_;
   using base::promote_to_heap_;
   using base::try_construct_stack_n_unchecked_;
   using base::construct_heap_n_unchecked_;
@@ -167,6 +236,23 @@ private:
       throw_overflow_error_();
     }
     return block_count;
+  }
+
+  static constexpr block_type low_bits_mask_(size_type n) noexcept
+  {
+    return static_cast<block_type>((block_type { 1 } << n) - block_type { 1 });
+  }
+
+  constexpr void clear_tail_bits_(size_type nbits, size_type nblocks) noexcept
+  {
+    if (size_type const r = nbits % bits_per_block; r != 0) {
+      data()[nblocks - 1] &= low_bits_mask_(r);
+    }
+  }
+
+  constexpr void clear_tail_bits_(size_type nbits) noexcept
+  {
+    clear_tail_bits_(nbits, blocks_for_bits_(nbits));
   }
 
 public:
@@ -243,9 +329,7 @@ public:
       : base { blocks_for_bits_(nbits), block_type { 0 } - static_cast<block_type>(init_val), alloc }
       , bit_size_ { nbits }
   {
-    if (size_type r; init_val && (r = nbits % bits_per_block) != 0) {
-      data()[block_count() - 1] &= static_cast<block_type>((block_type { 1 } << r) - block_type { 1 });
-    }
+    if (init_val) clear_tail_bits_(nbits, block_count());
   }
 
   constexpr inlined_bitset(from_blocks_t, size_type nblocks, block_type init_val, allocator_type const &alloc = allocator_type {})
@@ -666,20 +750,57 @@ public:
 
   constexpr void push_back(bool value);
   constexpr void pop_back() noexcept;
-  constexpr void clear() noexcept;
-  constexpr void reserve(size_type bit_capacity);
-  constexpr void resize(size_type bit_count, bool value = false);
 
-  constexpr void append(std::initializer_list<bool> blocks);
+  constexpr void clear() noexcept
+  {
+    base::clear();
+    bit_size_ = size_type {};
+  }
+
+  constexpr void reserve(size_type bit_capacity)
+  {
+    if (bit_capacity > max_size()) [[unlikely]] throw_length_error_();
+    base::reserve(blocks_for_bits_(bit_capacity));
+  }
+
+  constexpr void resize(size_type bit_count, bool value = false)
+  {
+    if (bit_count > max_size()) [[unlikely]] throw_length_error_();
+
+    size_type const old_bits   = bit_size_;
+    size_type const old_blocks = block_count();
+    size_type const new_blocks = blocks_for_bits_(bit_count);
+    if (bit_count == old_bits) return;
+
+    if (size_type const old_r; bit_count > old_bits && value && (old_r = old_bits % bits_per_block) != 0) {
+      // Bits [old_bits, new tail start) live in the old tail block, which the
+      // block-granular growth below never touches; OR them in now. Padding is
+      // always zero, so growing with false needs no corresponding clear.
+      size_type const new_r    = bit_count % bits_per_block;
+      size_type const fill_end = (new_blocks == old_blocks && new_r != 0) ? new_r : bits_per_block;
+      data()[old_blocks - 1] |= static_cast<block_type>(((block_type { 1 } << (fill_end - old_r)) - block_type { 1 }) << old_r);
+    }
+
+    base::resize(new_blocks, block_type { 0 } - static_cast<block_type>(value));
+
+    // The new tail block may carry ones past bit_count (fill with true sets the
+    // whole block; trimming exposes stale bits); mask them off so padding stays
+    // zero and whole-block comparison stays valid.
+    clear_tail_bits_(bit_count, new_blocks);
+
+    bit_size_ = bit_count;
+  }
+
+  constexpr void append(std::initializer_list<bool> bits) { (void) insert(size(), bits); }
 
   template <std::input_iterator InputIt>
   requires std::convertible_to<std::iter_reference_t<InputIt>, bool>
-  constexpr void append(InputIt first, InputIt last);
+  constexpr void append(InputIt first, InputIt last) { (void) insert(size(), first, last); }
 
 #if defined(__cpp_lib_ranges)
   template <std::ranges::input_range Rng>
   requires std::convertible_to<std::ranges::range_reference_t<Rng>, bool>
-  constexpr void append_range(Rng &&rng);
+  constexpr void append_range(Rng &&rng) { (void) insert_range(size(), std::forward<Rng>(rng)); }
 #endif
 
   constexpr iterator insert(size_type pos, bool value);
@@ -714,43 +835,48 @@ public:
   constexpr iterator erase(size_type first, size_type last) noexcept;
 
 public:
-  constexpr void resize(from_blocks_t, size_type block_count, block_type value = block_type {});
+  constexpr void resize(from_blocks_t, size_type nblocks, block_type value = block_type {})
+  {
+    if (nblocks > max_size() / bits_per_block) [[unlikely]] throw_length_error_();
+    base::resize(nblocks, value);
+    bit_size_ = nblocks * bits_per_block;
+  }
 
-  constexpr void append(from_blocks_t, block_type block);
+  constexpr void append(from_blocks_t, block_type block) { (void) insert(from_blocks, block_count(), block); }
 
   template <std::unsigned_integral T>
   requires std::convertible_to<T, block_type>
-  constexpr void append(from_blocks_t, std::initializer_list<T> blocks);
-  
+  constexpr void append(from_blocks_t, std::initializer_list<T> blocks) { (void) insert(from_blocks, block_count(), blocks); }
+
   template <std::input_iterator InputIt>
-  requires std::unsigned_integral<std::remove_cvref_t<std::iter_value_t<InputIt>>> 
+  requires std::unsigned_integral<std::remove_cvref_t<std::iter_value_t<InputIt>>>
         && std::convertible_to<std::iter_reference_t<InputIt>, block_type>
-  constexpr void append(from_blocks_t, InputIt first, InputIt last);
+  constexpr void append(from_blocks_t, InputIt first, InputIt last) { (void) insert(from_blocks, block_count(), first, last); }
 
 #if defined(__cpp_lib_ranges)
   template <std::ranges::input_range Rng>
-  requires std::unsigned_integral<std::remove_cvref_t<std::ranges::range_value_t<Rng>>> 
+  requires std::unsigned_integral<std::remove_cvref_t<std::ranges::range_value_t<Rng>>>
         && std::convertible_to<std::ranges::range_reference_t<Rng>, block_type>
-  constexpr void append_range(from_blocks_t, Rng &&rng);
+  constexpr void append_range(from_blocks_t, Rng &&rng) { (void) insert_range(from_blocks, block_count(), std::forward<Rng>(rng)); }
 #endif
         
-  constexpr iterator insert(from_blocks_t, size_type block_pos, block_type block);
-  constexpr iterator insert(from_blocks_t, size_type block_pos, size_type block_count, block_type block);
+  constexpr block_iterator insert(from_blocks_t, size_type block_pos, block_type block);
+  constexpr block_iterator insert(from_blocks_t, size_type block_pos, size_type block_count, block_type block);
   
   template <std::unsigned_integral T>
   requires std::convertible_to<T, block_type>
-  constexpr iterator insert(from_blocks_t, size_type block_pos, std::initializer_list<T> ilist);
+  constexpr block_iterator insert(from_blocks_t, size_type block_pos, std::initializer_list<T> ilist);
 
   template <std::input_iterator InputIt>
   requires std::unsigned_integral<std::remove_cvref_t<std::iter_value_t<InputIt>>> 
         && std::convertible_to<std::iter_reference_t<InputIt>, block_type>
-  constexpr iterator insert(from_blocks_t, size_type block_pos, InputIt first, InputIt last);
+  constexpr block_iterator insert(from_blocks_t, size_type block_pos, InputIt first, InputIt last);
         
 #if defined(__cpp_lib_ranges)
   template <std::ranges::input_range Rng>
   requires std::unsigned_integral<std::remove_cvref_t<std::ranges::range_value_t<Rng>>> 
         && std::convertible_to<std::ranges::range_reference_t<Rng>, block_type>
-  constexpr iterator insert_range(from_blocks_t, size_type block_pos, Rng &&rng);
+  constexpr block_iterator insert_range(from_blocks_t, size_type block_pos, Rng &&rng);
 #endif
 
   constexpr void assign(from_blocks_t, size_type block_count, block_type value);
@@ -771,7 +897,7 @@ public:
   constexpr void assign_range(from_blocks_t, Rng &&rng);
 #endif
 
-  constexpr iterator erase(from_blocks_t, size_type block_pos, size_type block_count = 1) noexcept;
+  constexpr block_iterator erase(from_blocks_t, size_type block_pos, size_type block_count = 1) noexcept;
 
 public:
   template <class CharT = char, class Traits = std::char_traits<CharT>, class StrAlloc = std::allocator<CharT>>
