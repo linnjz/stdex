@@ -118,7 +118,7 @@ struct stdex_nano_int
 {
   size_t operator() (int const value) const noexcept
   {
-    return static_cast<size_t>(stdex::hash_value<int, stdex::nano_t>(value, 0u));
+    return static_cast<size_t>(stdex::hash_value<int, stdex::hash_nano_t>(value, 0u));
   }
 };
 
@@ -126,7 +126,7 @@ struct stdex_micro_int
 {
   size_t operator() (int const value) const noexcept
   {
-    return static_cast<size_t>(stdex::hash_value<int, stdex::micro_t>(value, 0u));
+    return static_cast<size_t>(stdex::hash_value<int, stdex::hash_micro_t>(value, 0u));
   }
 };
 
@@ -134,7 +134,7 @@ struct stdex_nano_str
 {
   size_t operator() (std::string const &value) const noexcept
   {
-    return static_cast<size_t>(stdex::hash_range<std::string, stdex::nano_t>(value, 0u));
+    return static_cast<size_t>(stdex::hash_range<std::string, stdex::hash_nano_t>(value, 0u));
   }
 };
 
@@ -142,7 +142,7 @@ struct stdex_micro_str
 {
   size_t operator() (std::string const &value) const noexcept
   {
-    return static_cast<size_t>(stdex::hash_range<std::string, stdex::micro_t>(value, 0u));
+    return static_cast<size_t>(stdex::hash_range<std::string, stdex::hash_micro_t>(value, 0u));
   }
 };
 
