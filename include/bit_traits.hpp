@@ -121,6 +121,28 @@ constexpr size_t highest_one_bit_index(T const value) noexcept
   using uint_t = unsigned_equivalent_t<T>;
   return std::bit_width(static_cast<uint_t>(to_unsigned(value) | uint_t(1))) - 1;
 }
+
+template <class T>
+[[nodiscard]] constexpr bool is_all_bits_zero(T const &val) noexcept
+{
+  static_assert(std::is_scalar_v<T> && !std::is_member_pointer_v<T>);
+  if constexpr (std::is_null_pointer_v<T>) {
+    return true;
+  } else if constexpr (std::is_integral_v<T> || std::is_pointer_v<T>) {
+    return val == T {};
+  } else if constexpr (sizeof(T) == 1) {
+    return std::bit_cast<std::uint8_t>(val) == 0;
+  } else if constexpr (sizeof(T) == 2) {
+    return std::bit_cast<std::uint16_t>(val) == 0;
+  } else if constexpr (sizeof(T) == 4) {
+    return std::bit_cast<std::uint32_t>(val) == 0;
+  } else if constexpr (sizeof(T) == 8) {
+    return std::bit_cast<std::uint64_t>(val) == 0;
+  } else {
+    return std::bit_cast<std::array<unsigned char, sizeof(T)>>(val) ==
+           std::bit_cast<std::array<unsigned char, sizeof(T)>>(T {});
+  }
+}
 } // namespace stdex
 
 #if defined(__clang__)
