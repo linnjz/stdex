@@ -17,6 +17,7 @@
 #pragma once
 
 #include <algorithm>        // std::min
+#include <bit>              // std::popcount
 #include <concepts>         // std::convertible_to, std::unsigned_integral
 #include <cstdlib>          // std::abort
 #include <initializer_list> // std::initializer_list
@@ -236,6 +237,11 @@ private:
       throw_overflow_error_();
     }
     return block_count;
+  }
+
+  static constexpr block_type bit_mask_(size_type bit_pos) noexcept
+  {
+    return static_cast<block_type>(block_type { 1 } << (bit_pos % bits_per_block));
   }
 
   static constexpr block_type low_bits_mask_(size_type n) noexcept
@@ -712,33 +718,214 @@ public:
     return max_blocks > (max_bits / bits_per_block) ? max_bits : max_blocks * bits_per_block;
   }
 
-  [[nodiscard]] constexpr reference operator[] (size_type pos) noexcept;
-  [[nodiscard]] constexpr bool      operator[] (size_type pos) const noexcept;
-  [[nodiscard]] constexpr reference at(size_type pos);
-  [[nodiscard]] constexpr bool at(size_type pos) const;
+  [[nodiscard]] constexpr reference operator[] (size_type pos) noexcept
+  {
+    return reference(data() + pos / bits_per_block, pos);
+  }
 
-  [[nodiscard]] constexpr reference front() noexcept;
-  [[nodiscard]] constexpr bool front() const noexcept;
-  [[nodiscard]] constexpr reference back() noexcept;
-  [[nodiscard]] constexpr bool back() const noexcept;
+  [[nodiscard]] constexpr bool operator[] (size_type pos) const noexcept
+  {
+    return (data()[pos / bits_per_block] & bit_mask_(pos)) != 0;
+  }
 
-  [[nodiscard]] constexpr bool test(size_type pos) const;
-  [[nodiscard]] constexpr bool test_set(size_type pos, bool value = true);
+  [[nodiscard]] constexpr reference at(size_type pos)
+  {
+    if (pos >= bit_size_) throw_out_of_range_();
+    return reference(data() + pos / bits_per_block, pos);
+  }
 
-  constexpr inlined_bitset &set() noexcept;
-  constexpr inlined_bitset &set(size_type pos, bool value = true);
-  constexpr inlined_bitset &set(size_type pos, size_type len, bool value);
-  constexpr inlined_bitset &reset() noexcept;
-  constexpr inlined_bitset &reset(size_type pos);
-  constexpr inlined_bitset &reset(size_type pos, size_type len);
-  constexpr inlined_bitset &flip() noexcept;
-  constexpr inlined_bitset &flip(size_type pos);
-  constexpr inlined_bitset &flip(size_type pos, size_type len);
+  [[nodiscard]] constexpr bool at(size_type pos) const
+  {
+    if (pos >= bit_size_) throw_out_of_range_();
+    return (data()[pos / bits_per_block] & bit_mask_(pos)) != 0;
+  }
 
-  [[nodiscard]] constexpr bool all() const noexcept;
-  [[nodiscard]] constexpr bool any() const noexcept;
-  [[nodiscard]] constexpr bool none() const noexcept;
-  [[nodiscard]] constexpr size_type count() const noexcept;
+  [[nodiscard]] constexpr reference front() noexcept { return reference(data(), size_type { 0 }); }
+  [[nodiscard]] constexpr bool front() const noexcept { return (data()[0] & block_type { 1 }) != 0; }
+
+  [[nodiscard]] constexpr reference back() noexcept
+  {
+    return reference(data() + (bit_size_ - 1) / bits_per_block, bit_size_ - 1);
+  }
+
+  [[nodiscard]] constexpr bool back() const noexcept
+  {
+    return (data()[(bit_size_ - 1) / bits_per_block] & bit_mask_(bit_size_ - 1)) != 0;
+  }
+
+  [[nodiscard]] constexpr bool test(size_type pos) const
+  {
+    if (pos >= bit_size_) throw_out_of_range_();
+    return (data()[pos / bits_per_block] & bit_mask_(pos)) != 0;
+  }
+
+  [[nodiscard]] constexpr bool test_set(size_type pos, bool value = true)
+  {
+    if (pos >= bit_size_) throw_out_of_range_();
+    block_type *const block = data() + pos / bits_per_block;
+    block_type const mask   = bit_mask_(pos);
+    bool const old          = (*block & mask) != 0;
+    if (value) {
+      *block |= mask;
+    } else {
+      *block &= static_cast<block_type>(~mask);
+    }
+    return old;
+  }
+
+  [[nodiscard]] constexpr bool all() const noexcept
+  {
+    block_type const *const blocks = data();
+    size_type const full           = bit_size_ / bits_per_block;
+    for (size_type i = 0; i < full; ++i) {
+      if (blocks[i] != static_cast<block_type>(~block_type { 0 })) return false;
+    }
+    if (size_type const r = bit_size_ % bits_per_block; r != 0) {
+      if ((blocks[full] & low_bits_mask_(r)) != low_bits_mask_(r)) return false;
+    }
+    return true;
+  }
+
+  [[nodiscard]] constexpr bool any() const noexcept
+  {
+    // Padding is always zero, so the tail block needs no masking: nonzero
+    // anywhere (full or tail) implies a set bit.
+    block_type const *const blocks   = data();
+    size_type const block_count_value = block_count();
+    for (size_type i = 0; i < block_count_value; ++i) {
+      if (blocks[i] != block_type { 0 }) return true;
+    }
+    return false;
+  }
+  [[nodiscard]] constexpr bool none() const noexcept { return !any(); }
+
+  [[nodiscard]] constexpr size_type count() const noexcept
+  {
+    block_type const *const blocks = data();
+    size_type total                = size_type { 0 };
+    size_type const full           = bit_size_ / bits_per_block;
+    for (size_type i = 0; i < full; ++i) {
+      total += static_cast<size_type>(std::popcount(blocks[i]));
+    }
+    if (size_type const r = bit_size_ % bits_per_block; r != 0) {
+      total += static_cast<size_type>(std::popcount(static_cast<block_type>(blocks[full] & low_bits_mask_(r))));
+    }
+    return total;
+  }
+
+private:
+  /// Applies op(block, mask) over [pos, pos + len). Requires pos + len <= bit_size_;
+  /// len == 0 is a no-op. Masks are whole-block for interior blocks.
+  template <class Op>
+  constexpr void apply_range_unchecked_(size_type pos, size_type len, Op op)
+  {
+    if (len == 0) [[unlikely]] return;
+    block_type *const blocks    = data();
+    size_type const first       = pos / bits_per_block;
+    size_type const last        = (pos + len - 1) / bits_per_block;
+    size_type const first_shift = pos % bits_per_block;
+    size_type const last_r      = (pos + len) % bits_per_block;
+    block_type const all_ones   = static_cast<block_type>(~block_type { 0 });
+    block_type const first_mask = static_cast<block_type>(all_ones << first_shift);
+    if (first == last) {
+      op(blocks[first], last_r == 0 ? first_mask : static_cast<block_type>(first_mask & low_bits_mask_(last_r)));
+      return;
+    }
+    op(blocks[first], first_mask);
+    for (size_type i = first + 1; i < last; ++i) {
+      op(blocks[i], all_ones);
+    }
+    op(blocks[last], last_r == 0 ? all_ones : low_bits_mask_(last_r));
+  }
+
+public:
+  constexpr inlined_bitset &set() noexcept
+  {
+    size_type const n = block_count();
+    if (n == 0) [[unlikely]] return *this;
+    block_type *const blocks = data();
+    std::fill_n(blocks, n - 1, static_cast<block_type>(~block_type { 0 }));
+    size_type const r = bit_size_ % bits_per_block;
+    blocks[n - 1]     = (r == 0) ? static_cast<block_type>(~block_type { 0 }) : low_bits_mask_(r);
+    return *this;
+  }
+
+  constexpr inlined_bitset &set(size_type pos, bool value = true)
+  {
+    if (pos >= bit_size_) throw_out_of_range_();
+    (*this)[pos] = value;
+    return *this;
+  }
+
+  constexpr inlined_bitset &set(size_type pos, size_type len, bool value)
+  {
+    if (pos > bit_size_ || len > bit_size_ - pos) throw_out_of_range_();
+
+    if (value) {
+      apply_range_unchecked_(pos, len, [](block_type &block, block_type mask) constexpr noexcept { 
+        block |= mask; 
+      });
+    } else {
+      apply_range_unchecked_(pos, len, [](block_type &block, block_type mask) constexpr noexcept { 
+        block &= static_cast<block_type>(~mask); 
+      });
+    }
+    return *this;
+  }
+
+  constexpr inlined_bitset &reset() noexcept
+  {
+    std::fill_n(data(), block_count(), block_type { 0 });
+    return *this;
+  }
+
+  constexpr inlined_bitset &reset(size_type pos)
+  {
+    if (pos >= bit_size_) throw_out_of_range_();
+    (*this)[pos].reset();
+    return *this;
+  }
+
+  constexpr inlined_bitset &reset(size_type pos, size_type len)
+  {
+    if (pos > bit_size_ || len > bit_size_ - pos) throw_out_of_range_();
+    apply_range_unchecked_(pos, len, [](block_type &block, block_type mask) constexpr noexcept {
+      block &= static_cast<block_type>(~mask);
+    });
+    return *this;
+  }
+
+  constexpr inlined_bitset &flip() noexcept
+  {
+    size_type const n = block_count();
+    if (n == 0) [[unlikely]] return *this;
+
+    block_type *const blocks = data();
+    for (size_type i = 0; i < n - 1; ++i) {
+      blocks[i] = static_cast<block_type>(~blocks[i]);
+    }
+
+    size_type const r = bit_size_ % bits_per_block;
+    blocks[n - 1]     = (r == 0) ? static_cast<block_type>(~blocks[n - 1])
+                                 : static_cast<block_type>(~blocks[n - 1] & low_bits_mask_(r));
+    return *this;
+  }
+
+  constexpr inlined_bitset &flip(size_type pos)
+  {
+    if (pos >= bit_size_) throw_out_of_range_();
+    (*this)[pos].flip();
+    return *this;
+  }
+
+  constexpr inlined_bitset &flip(size_type pos, size_type len)
+  {
+    if (pos > bit_size_ || len > bit_size_ - pos) throw_out_of_range_();
+    apply_range_unchecked_(pos, len, [](block_type &block, block_type mask) constexpr noexcept { 
+      block ^= mask; 
+    });
+    return *this;
+  }
 
   template <class... Args>
   requires std::constructible_from<bool, Args...>
