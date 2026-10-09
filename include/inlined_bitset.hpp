@@ -22,7 +22,8 @@
 #include <cstdlib>          // std::abort
 #include <initializer_list> // std::initializer_list
 #include <iosfwd>           // std::basic_istream, std::basic_ostream
-#include <iterator>         // std::input_iterator, std::iter_reference_t, std::iter_value_t
+#include <iterator>         // std::input_iterator, std::iter_reference_t, std::iter_value_t,
+                            // std::random_access_iterator_tag, std::reverse_iterator
 #include <memory>           // std::allocator
 #include <limits>           // std::numeric_limits
 #include <ranges>           // std::from_range_t, std::ranges::input_range, std::ranges::range_reference_t, std::ranges::range_value_t
@@ -30,6 +31,7 @@
 #include <string>           // std::basic_string, std::char_traits
 #include <string_view>      // std::basic_string_view
 #include <type_traits>      // std::remove_cv_t, std::remove_cvref_t
+#include <utility>          // std::forward
 
 #include "inline_storage.hpp"
 
@@ -60,11 +62,14 @@ public:
   using typename base::pointer;
   using typename base::size_type;
   
-  using const_reference = bool;
+  class iterator;
+  class const_iterator;
 
+  using const_reference = bool;
   class reference
   {
     friend inlined_bitset;
+    friend class iterator;
 
   public:
     constexpr reference(reference const &) noexcept = default;
@@ -189,10 +194,193 @@ public:
 
   class iterator
   {
+    friend class const_iterator;
+    friend inlined_bitset;
+
+  public:
+    using iterator_category = std::random_access_iterator_tag;
+    using iterator_concept  = std::random_access_iterator_tag;
+    using value_type        = bool;
+    using difference_type   = typename base::difference_type;
+    using pointer           = void;
+    using reference         = inlined_bitset::reference;
+
+    constexpr iterator() noexcept = default;
+
+    [[nodiscard]] constexpr reference operator*() const noexcept { return reference(blocks_ + pos_ / bits_per_block, pos_); }
+    [[nodiscard]] constexpr reference operator[] (difference_type n) const noexcept { return *(*this + n); }
+
+    constexpr iterator &operator++() noexcept
+    {
+      ++pos_;
+      return *this;
+    }
+
+    constexpr iterator operator++(int) noexcept
+    {
+      iterator tmp = *this;
+      ++pos_;
+      return tmp;
+    }
+
+    constexpr iterator &operator--() noexcept
+    {
+      --pos_;
+      return *this;
+    }
+
+    constexpr iterator operator--(int) noexcept
+    {
+      iterator tmp = *this;
+      --pos_;
+      return tmp;
+    }
+
+    constexpr iterator &operator+= (difference_type n) noexcept
+    {
+      pos_ = static_cast<size_type>(static_cast<difference_type>(pos_) + n);
+      return *this;
+    }
+
+    constexpr iterator &operator-= (difference_type n) noexcept { return *this += -n; }
+
+    [[nodiscard]] constexpr iterator operator+ (difference_type n) const noexcept
+    {
+      iterator tmp = *this;
+      tmp += n;
+      return tmp;
+    }
+
+    [[nodiscard]] constexpr iterator operator- (difference_type n) const noexcept
+    {
+      iterator tmp = *this;
+      tmp -= n;
+      return tmp;
+    }
+
+    [[nodiscard]] constexpr difference_type operator- (iterator const &other) const noexcept
+    {
+      return static_cast<difference_type>(pos_) - static_cast<difference_type>(other.pos_);
+    }
+
+    [[nodiscard]] friend constexpr iterator operator+ (difference_type n, iterator it) noexcept
+    {
+      it += n;
+      return it;
+    }
+
+    constexpr bool operator== (iterator const &) const noexcept = default;
+    constexpr auto operator<=> (iterator const &) const noexcept = default;
+
+  private:
+    constexpr iterator(block_type *blocks, size_type pos) noexcept
+        : blocks_ { blocks }
+        , pos_ { pos }
+    {
+    }
+
+    block_type *blocks_ = nullptr;
+    size_type pos_      = size_type { 0 };
   };
 
   class const_iterator
   {
+  public:
+    using iterator_category = std::random_access_iterator_tag;
+    using iterator_concept  = std::random_access_iterator_tag;
+    using value_type        = bool;
+    using difference_type   = typename base::difference_type;
+    using pointer           = void;
+    using reference         = bool;
+
+    constexpr const_iterator() noexcept = default;
+
+    constexpr const_iterator(iterator const &other) noexcept
+        : blocks_ { other.blocks_ }
+        , pos_ { other.pos_ }
+    {
+    }
+
+    [[nodiscard]] constexpr reference operator*() const noexcept
+    {
+      return (blocks_[pos_ / bits_per_block] & bit_mask_(pos_)) != 0;
+    }
+
+    [[nodiscard]] constexpr reference operator[] (difference_type n) const noexcept { return *(*this + n); }
+
+    constexpr const_iterator &operator++() noexcept
+    {
+      ++pos_;
+      return *this;
+    }
+
+    constexpr const_iterator operator++(int) noexcept
+    {
+      const_iterator tmp = *this;
+      ++pos_;
+      return tmp;
+    }
+
+    constexpr const_iterator &operator--() noexcept
+    {
+      --pos_;
+      return *this;
+    }
+
+    constexpr const_iterator operator--(int) noexcept
+    {
+      const_iterator tmp = *this;
+      --pos_;
+      return tmp;
+    }
+
+    constexpr const_iterator &operator+= (difference_type n) noexcept
+    {
+      pos_ = static_cast<size_type>(static_cast<difference_type>(pos_) + n);
+      return *this;
+    }
+
+    constexpr const_iterator &operator-= (difference_type n) noexcept { return *this += -n; }
+
+    [[nodiscard]] constexpr const_iterator operator+ (difference_type n) const noexcept
+    {
+      const_iterator tmp = *this;
+      tmp += n;
+      return tmp;
+    }
+
+    [[nodiscard]] constexpr const_iterator operator- (difference_type n) const noexcept
+    {
+      const_iterator tmp = *this;
+      tmp -= n;
+      return tmp;
+    }
+
+    [[nodiscard]] constexpr difference_type operator- (const_iterator const &other) const noexcept
+    {
+      return static_cast<difference_type>(pos_) - static_cast<difference_type>(other.pos_);
+    }
+
+    [[nodiscard]] friend constexpr const_iterator operator+ (difference_type n, const_iterator it) noexcept
+    {
+      it += n;
+      return it;
+    }
+
+    constexpr bool operator== (const_iterator const &) const noexcept = default;
+    constexpr auto operator<=> (const_iterator const &) const noexcept = default;
+
+  private:
+    friend inlined_bitset;
+
+    constexpr const_iterator(block_type const *blocks, size_type pos) noexcept
+        : blocks_ { blocks }
+        , pos_ { pos }
+    {
+    }
+
+    block_type const *blocks_ = nullptr;
+    size_type pos_            = size_type { 0 };
   };
   using reverse_iterator       = std::reverse_iterator<iterator>;
   using const_reverse_iterator = std::reverse_iterator<const_iterator>;
@@ -215,6 +403,7 @@ private:
   using base::set_size_;
   using base::allocate_unchecked_;
   using base::construct_elements_unchecked_;
+  using base::destroy_element_unchecked_;
   using base::destroy_elements_unchecked_;
   using base::promote_to_heap_;
   using base::try_construct_stack_n_unchecked_;
@@ -668,18 +857,18 @@ public:
     return *this;
   }
 
-  [[nodiscard]] constexpr iterator begin() noexcept;
-  [[nodiscard]] constexpr const_iterator begin() const noexcept;
-  [[nodiscard]] constexpr iterator end() noexcept;
-  [[nodiscard]] constexpr const_iterator end() const noexcept;
-  [[nodiscard]] constexpr reverse_iterator rbegin() noexcept;
-  [[nodiscard]] constexpr const_reverse_iterator rbegin() const noexcept;
-  [[nodiscard]] constexpr reverse_iterator rend() noexcept;
-  [[nodiscard]] constexpr const_reverse_iterator rend() const noexcept;
-  [[nodiscard]] constexpr const_iterator cbegin() const noexcept;
-  [[nodiscard]] constexpr const_iterator cend() const noexcept;
-  [[nodiscard]] constexpr const_reverse_iterator crbegin() const noexcept;
-  [[nodiscard]] constexpr const_reverse_iterator crend() const noexcept;
+  [[nodiscard]] constexpr iterator begin() noexcept { return iterator(data(), size_type { 0 }); }
+  [[nodiscard]] constexpr const_iterator begin() const noexcept { return const_iterator(data(), size_type { 0 }); }
+  [[nodiscard]] constexpr iterator end() noexcept { return iterator(data(), bit_size_); }
+  [[nodiscard]] constexpr const_iterator end() const noexcept { return const_iterator(data(), bit_size_); }
+  [[nodiscard]] constexpr reverse_iterator rbegin() noexcept { return reverse_iterator(end()); }
+  [[nodiscard]] constexpr const_reverse_iterator rbegin() const noexcept { return const_reverse_iterator(end()); }
+  [[nodiscard]] constexpr reverse_iterator rend() noexcept { return reverse_iterator(begin()); }
+  [[nodiscard]] constexpr const_reverse_iterator rend() const noexcept { return const_reverse_iterator(begin()); }
+  [[nodiscard]] constexpr const_iterator cbegin() const noexcept { return begin(); }
+  [[nodiscard]] constexpr const_iterator cend() const noexcept { return end(); }
+  [[nodiscard]] constexpr const_reverse_iterator crbegin() const noexcept { return rbegin(); }
+  [[nodiscard]] constexpr const_reverse_iterator crend() const noexcept { return rend(); }
 
   [[nodiscard]] constexpr block_iterator block_begin() noexcept { return base::begin(); }
   [[nodiscard]] constexpr block_const_iterator block_begin() const noexcept { return base::begin(); }
@@ -817,7 +1006,7 @@ private:
   /// Applies op(block, mask) over [pos, pos + len). Requires pos + len <= bit_size_;
   /// len == 0 is a no-op. Masks are whole-block for interior blocks.
   template <class Op>
-  constexpr void apply_range_unchecked_(size_type pos, size_type len, Op op)
+  constexpr void apply_range_unchecked_(size_type const pos, size_type const len, Op op)
   {
     if (len == 0) [[unlikely]] return;
     block_type *const blocks    = data();
@@ -929,14 +1118,41 @@ public:
 
   template <class... Args>
   requires std::constructible_from<bool, Args...>
-  constexpr iterator emplace(size_type pos, Args &&...args);
+  constexpr iterator emplace(size_type pos, Args &&...args)
+  {
+    return insert(pos, bool(std::forward<Args>(args)...));
+  }
 
   template <class... Args>
   requires std::constructible_from<bool, Args...>
-  constexpr reference emplace_back(Args &&...args);
+  constexpr reference emplace_back(Args &&...args)
+  {
+    push_back(bool(std::forward<Args>(args)...));
+    return back();
+  }
 
-  constexpr void push_back(bool value);
-  constexpr void pop_back() noexcept;
+  constexpr void push_back(bool value)
+  {
+    if (bit_size_ >= max_size()) [[unlikely]] throw_length_error_();
+    if (bit_size_ % bits_per_block == 0) {
+      base::emplace_one_at_back_(block_type { 0 });
+    }
+    (*this)[bit_size_] = value;
+    ++bit_size_;
+  }
+
+  constexpr void pop_back() noexcept
+  {
+    if (empty()) [[unlikely]] return;
+
+    --bit_size_;
+    if (bit_size_ % bits_per_block != 0) {
+      (*this)[bit_size_].reset();
+    } else {
+      destroy_element_unchecked_(data() + block_count() - 1);
+      set_size_(block_count() - 1, get_flag_());
+    }
+  }
 
   constexpr void clear() noexcept
   {
