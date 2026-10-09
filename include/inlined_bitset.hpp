@@ -18,6 +18,7 @@
 
 #include <algorithm>        // std::min
 #include <bit>              // std::popcount
+#include <cassert>          // assert
 #include <concepts>         // std::convertible_to, std::unsigned_integral
 #include <cstdlib>          // std::abort
 #include <initializer_list> // std::initializer_list
@@ -409,6 +410,13 @@ private:
   using base::try_construct_stack_n_unchecked_;
   using base::construct_heap_n_unchecked_;
   using base::append_uncounted_range_;
+  using base::emplace_one_at_back_;
+  using base::insert_counted_range_;
+  using base::insert_uncounted_range_;
+  using base::insert_range_;
+  using base::assign_counted_range_;
+  using base::assign_uncounted_range_;
+  using base::assign_range_;
 
   using base::copy_construct_from_;
   using base::move_construct_from_;
@@ -711,13 +719,13 @@ private:
 
 public:
   // ---------- iterator-range (bit-wise) ----------
-  template <std::input_iterator InputIt>
+  template <std::input_iterator InputIt, std::sentinel_for<InputIt> InSent>
   requires std::convertible_to<std::iter_reference_t<InputIt>, bool>
-  constexpr inlined_bitset(InputIt first, InputIt last, allocator_type const &alloc = allocator_type {})
+  constexpr inlined_bitset(InputIt first, InSent last, allocator_type const &alloc = allocator_type {})
       : base { alloc }
   {
     if constexpr (std::forward_iterator<InputIt>) {
-      auto const nbits = static_cast<size_type>(std::distance(first, last));
+      auto const nbits = static_cast<size_type>(std::ranges::distance(first, last));
       if (nbits > max_size()) [[unlikely]] throw_length_error_();
       if (nbits == 0) [[unlikely]] return;
 
@@ -752,15 +760,15 @@ public:
 #endif
 
   // ---------- iterator-range (block-wise) ----------
-  template <std::input_iterator InputIt>
-  requires std::unsigned_integral<std::remove_cvref_t<std::iter_value_t<InputIt>>> 
+  template <std::input_iterator InputIt, std::sentinel_for<InputIt> InSent>
+  requires std::unsigned_integral<std::remove_cvref_t<std::iter_value_t<InputIt>>>
         && std::convertible_to<std::iter_reference_t<InputIt>, block_type>
-  constexpr inlined_bitset(from_blocks_t, InputIt first, InputIt last, allocator_type const &alloc = allocator_type {})
+  constexpr inlined_bitset(from_blocks_t, InputIt first, InSent last, allocator_type const &alloc = allocator_type {})
       : base { alloc }
   {
     if constexpr (std::forward_iterator<InputIt>) {
-      auto const n = static_cast<size_type>(std::distance(first, last));
-      if (checked_block_count_(n) == 0) [[unlikely]] return;
+      auto const n = static_cast<size_type>(std::ranges::distance(first, last));
+      if (checked_block_count_(n, alloc) == 0) [[unlikely]] return;
 
       if constexpr (inline_capacity != 0) {
         if (try_construct_stack_n_unchecked_(n, first, last)) return;
@@ -1135,7 +1143,7 @@ public:
   {
     if (bit_size_ >= max_size()) [[unlikely]] throw_length_error_();
     if (bit_size_ % bits_per_block == 0) {
-      base::emplace_one_at_back_(block_type { 0 });
+      emplace_one_at_back_(block_type { 0 });
     }
     (*this)[bit_size_] = value;
     ++bit_size_;
@@ -1175,7 +1183,7 @@ public:
     size_type const new_blocks = blocks_for_bits_(bit_count);
     if (bit_count == old_bits) return;
 
-    if (size_type const old_r; bit_count > old_bits && value && (old_r = old_bits % bits_per_block) != 0) {
+    if (size_type const old_r = old_bits % bits_per_block; bit_count > old_bits && value && old_r != 0) {
       // Bits [old_bits, new tail start) live in the old tail block, which the
       // block-granular growth below never touches; OR them in now. Padding is
       // always zero, so growing with false needs no corresponding clear.
@@ -1240,7 +1248,7 @@ public:
 public:
   constexpr void resize(from_blocks_t, size_type nblocks, block_type value = block_type {})
   {
-    if (nblocks > max_size() / bits_per_block) [[unlikely]] throw_length_error_();
+    if (nblocks > max_size() / bits_per_block) [[unlikely]] throw_overflow_error_();
     base::resize(nblocks, value);
     bit_size_ = nblocks * bits_per_block;
   }
@@ -1263,44 +1271,135 @@ public:
   constexpr void append_range(from_blocks_t, Rng &&rng) { (void) insert_range(from_blocks, block_count(), std::forward<Rng>(rng)); }
 #endif
         
-  constexpr block_iterator insert(from_blocks_t, size_type block_pos, block_type block);
-  constexpr block_iterator insert(from_blocks_t, size_type block_pos, size_type block_count, block_type block);
-  
-  template <std::unsigned_integral T>
-  requires std::convertible_to<T, block_type>
-  constexpr block_iterator insert(from_blocks_t, size_type block_pos, std::initializer_list<T> ilist);
+  constexpr block_iterator insert(from_blocks_t, size_type block_pos, block_type block)
+  {
+    return insert(from_blocks, block_pos, size_type { 1 }, block);
+  }
 
-  template <std::input_iterator InputIt>
-  requires std::unsigned_integral<std::remove_cvref_t<std::iter_value_t<InputIt>>> 
-        && std::convertible_to<std::iter_reference_t<InputIt>, block_type>
-  constexpr block_iterator insert(from_blocks_t, size_type block_pos, InputIt first, InputIt last);
-        
-#if defined(__cpp_lib_ranges)
-  template <std::ranges::input_range Rng>
-  requires std::unsigned_integral<std::remove_cvref_t<std::ranges::range_value_t<Rng>>> 
-        && std::convertible_to<std::ranges::range_reference_t<Rng>, block_type>
-  constexpr block_iterator insert_range(from_blocks_t, size_type block_pos, Rng &&rng);
-#endif
-
-  constexpr void assign(from_blocks_t, size_type block_count, block_type value);
+  constexpr block_iterator insert(from_blocks_t, size_type block_pos, size_type count, block_type value)
+  {
+    assert(block_pos <= this->block_count() && "insert position out of range");
+    if (count == 0) [[unlikely]] return block_iterator(data() + block_pos);
+    size_type const old_count = this->block_count();
+    if (count > max_size() / bits_per_block - old_count) [[unlikely]] throw_overflow_error_();
+    // Append-then-rotate (the insert_uncounted_range_ shape): resize fills the
+    // tail with value, rotate slides it into the gap.
+    base::resize(old_count + count, value);
+    std::rotate(data() + block_pos, data() + old_count, data() + old_count + count);
+    bit_size_ += count * bits_per_block;
+    return block_iterator(data() + block_pos);
+  }
 
   template <std::unsigned_integral T>
   requires std::convertible_to<T, block_type>
-  constexpr void assign(from_blocks_t, std::initializer_list<T> ilist);
-  
-  template <std::input_iterator InputIt>
-  requires std::unsigned_integral<std::remove_cvref_t<std::iter_value_t<InputIt>>> 
-        && std::convertible_to<std::iter_reference_t<InputIt>, block_type>
-  constexpr void assign(from_blocks_t, InputIt first, InputIt last);
+  constexpr block_iterator insert(from_blocks_t, size_type block_pos, std::initializer_list<T> ilist)
+  {
+    return insert(from_blocks, block_pos, ilist.begin(), ilist.end());
+  }
+
+  template <std::input_iterator InIt, std::sentinel_for<InIt> InSent>
+  requires std::unsigned_integral<std::remove_cvref_t<std::iter_value_t<InIt>>>
+        && std::convertible_to<std::iter_reference_t<InIt>, block_type>
+  constexpr block_iterator insert(from_blocks_t, size_type block_pos, InIt first, InSent last)
+  {
+    assert(block_pos <= block_count() && "insert position out of range");
+    size_type const old_count = block_count();
+    if constexpr (std::sized_sentinel_for<InSent, InIt>) {
+      size_type const count = static_cast<size_type>(last - first);
+      if (count > max_size() / bits_per_block - old_count) [[unlikely]] throw_overflow_error_();
+    } else if constexpr (std::forward_iterator<InIt>) {
+      size_type const count = static_cast<size_type>(std::ranges::distance(first, last));
+      if (count > max_size() / bits_per_block - old_count) [[unlikely]] throw_overflow_error_();
+    }
+    insert_range_(block_pos, first, last);
+    size_type const new_count = block_count();
+    if constexpr ((!std::sized_sentinel_for<InSent, InIt>) && (!std::forward_iterator<InIt>)) {
+      if (new_count > max_size() / bits_per_block) [[unlikely]] throw_overflow_error_();
+    }
+    // Post-op delta: no upfront distance needed, single-pass sources stay valid.
+    bit_size_ += (new_count - old_count) * bits_per_block;
+    return block_iterator(data() + block_pos);
+  }
 
 #if defined(__cpp_lib_ranges)
   template <std::ranges::input_range Rng>
-  requires std::unsigned_integral<std::remove_cvref_t<std::ranges::range_value_t<Rng>>> 
+  requires std::unsigned_integral<std::remove_cvref_t<std::ranges::range_value_t<Rng>>>
         && std::convertible_to<std::ranges::range_reference_t<Rng>, block_type>
-  constexpr void assign_range(from_blocks_t, Rng &&rng);
+  constexpr block_iterator insert_range(from_blocks_t, size_type block_pos, Rng &&rng)
+  {
+    return insert(from_blocks, block_pos, std::ranges::begin(rng), std::ranges::end(rng));
+  }
 #endif
 
-  constexpr block_iterator erase(from_blocks_t, size_type block_pos, size_type block_count = 1) noexcept;
+  constexpr void assign(from_blocks_t, size_type count, block_type value)
+  {
+    if (count > max_size() / bits_per_block) [[unlikely]] throw_overflow_error_();
+    if (count > block_capacity()) {
+      base::clear();
+      base::resize(count, value);
+    } else {
+      size_type const old_count = block_count();
+      base::resize(count, value);
+      std::fill_n(data(), (std::min)(old_count, count), value);
+    }
+    bit_size_ = count * bits_per_block;
+  }
+
+  template <std::unsigned_integral T>
+  requires std::convertible_to<T, block_type>
+  constexpr void assign(from_blocks_t, std::initializer_list<T> ilist)
+  {
+    assign(from_blocks, ilist.begin(), ilist.end());
+  }
+
+  template <std::input_iterator InIt, std::sentinel_for<InIt> InSent>
+  requires std::unsigned_integral<std::remove_cvref_t<std::iter_value_t<InIt>>>
+        && std::convertible_to<std::iter_reference_t<InIt>, block_type>
+  constexpr void assign(from_blocks_t, InIt first, InSent last)
+  {
+    if constexpr (std::sized_sentinel_for<InSent, InIt>) {
+      size_type const count = static_cast<size_type>(last - first);
+      if (count > max_size() / bits_per_block) [[unlikely]] throw_overflow_error_();
+    } else if constexpr (std::forward_iterator<InIt>) {
+      size_type const count = static_cast<size_type>(std::ranges::distance(first, last));
+      if (count > max_size() / bits_per_block) [[unlikely]] throw_overflow_error_();
+    }
+    assign_range_(first, last);
+    if constexpr ((!std::sized_sentinel_for<InSent, InIt>) && (!std::forward_iterator<InIt>) ) {
+      if (block_count() > max_size() / bits_per_block) [[unlikely]] throw_overflow_error_();
+    }
+    bit_size_ = block_count() * bits_per_block;
+  }
+
+#if defined(__cpp_lib_ranges)
+  template <std::ranges::input_range Rng>
+  requires std::unsigned_integral<std::remove_cvref_t<std::ranges::range_value_t<Rng>>>
+        && std::convertible_to<std::ranges::range_reference_t<Rng>, block_type>
+  constexpr void assign_range(from_blocks_t, Rng &&rng)
+  {
+    assign(from_blocks, std::ranges::begin(rng), std::ranges::end(rng));
+  }
+#endif
+
+  constexpr block_iterator erase(from_blocks_t, size_type pos) noexcept
+  {
+    return erase(from_blocks, pos, pos + 1);
+  }
+
+  constexpr block_iterator erase(from_blocks_t, size_type first, size_type last) noexcept
+  {
+    assert(first <= last && last <= block_count() && "erase range out of bounds");
+    if (first != last) {
+      block_type *const blocks    = data();
+      size_type const old_count   = block_count();
+      size_type const removed     = last - first;
+      std::move(blocks + last, blocks + old_count, blocks + first);
+      destroy_elements_unchecked_(blocks + old_count - removed, removed);
+      set_size_(old_count - removed, get_flag_());
+      bit_size_ -= removed * bits_per_block;
+    }
+    return block_iterator(data() + first);
+  }
 
 public:
   template <class CharT = char, class Traits = std::char_traits<CharT>, class StrAlloc = std::allocator<CharT>>
