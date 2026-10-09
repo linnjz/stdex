@@ -156,6 +156,39 @@ protected:
     constexpr void dismiss() noexcept { data_ = pointer {}; }
   };
 
+  /// Owns an already-constructed range inside current storage (nothing to
+  /// deallocate, unlike reallocation_guard): destroys it on unwind unless
+  /// dismissed. Covers discontiguous liveness that size_ cannot express, e.g.
+  /// the relocated tail in insert_counted_range_ before the gap is filled.
+  struct destruction_guard
+  {
+    value_type *constructed_first_;
+    value_type *constructed_last_;
+    allocator_type &alloc_;
+    bool use_allocator_;
+    bool dismissed_ = false;
+
+    destruction_guard &operator= (destruction_guard const &) = delete;
+    destruction_guard &operator= (destruction_guard &&)      = delete;
+
+    constexpr ~destruction_guard() noexcept
+    {
+      if (dismissed_) return;
+      if (use_allocator_) {
+        if constexpr (std::disjunction_v<std::negation<std::is_trivially_destructible<value_type>>,
+                                         std::bool_constant<has_custom_destroy<allocator_type, value_type *>>>) {
+          for (value_type *current = constructed_first_; current != constructed_last_; ++current) {
+            allocator_traits::destroy(alloc_, current);
+          }
+        }
+      } else if constexpr (!std::is_trivially_destructible_v<value_type>) {
+        std::destroy(constructed_first_, constructed_last_);
+      }
+    }
+
+    constexpr void dismiss() noexcept { dismissed_ = true; }
+  };
+
   constexpr void initialize_storage_() noexcept
   {
     if constexpr (inline_capacity == 0) {
@@ -382,6 +415,135 @@ protected:
   {
     for (; first != last; ++first) {
       emplace_one_at_back_(*first);
+    }
+  }
+
+  template <std::input_iterator InIt, std::sentinel_for<InIt> InSent>
+  requires std::constructible_from<value_type, std::iter_reference_t<InIt>>
+  constexpr void insert_uncounted_range_(size_type const pos, InIt first, InSent const last)
+  {
+    assert(pos <= size() && "insert_uncounted_range_() position out of range");
+    if (first == last) [[unlikely]] return;
+    size_type const old_size = size();
+    append_uncounted_range_(first, last);
+    value_type *const storage = data();
+    std::rotate(storage + pos, storage + old_size, storage + size());
+  }
+
+  template <std::input_iterator InIt>
+  [[nodiscard]] constexpr bool source_overlaps_storage_(InIt first, size_type const count) const noexcept
+  {
+    if constexpr (std::contiguous_iterator<InIt>) {
+      if (count == 0 || empty()) return false;
+      value_type const *const src_first = std::to_address(first);
+      value_type const *const dst_first = data();
+      value_type const *const dst_last  = dst_first + size();
+      // A source starting inside our storage necessarily overlaps (this also
+      // avoids forming src + count past our end); otherwise both ends are
+      // compared, which is valid because the source range is a valid range by
+      // contract. Unrelated-pointer comparison is implementation-defined but
+      // correct on flat address spaces, as assumed throughout.
+      if (src_first >= dst_first && src_first < dst_last) return true;
+      return src_first < dst_first && dst_first < src_first + count;
+    } else {
+      return false;
+    }
+  }
+
+  template <std::input_iterator InIt>
+  requires std::constructible_from<value_type, std::iter_reference_t<InIt>> &&
+           std::assignable_from<reference, std::iter_reference_t<InIt>>
+  constexpr void insert_counted_range_(size_type const pos, InIt first, size_type const count)
+  {
+    assert(pos <= size() && "insert_counted_range_() position out of range");
+    if (count == 0) [[unlikely]] return;
+    size_type const old_size = size();
+    if (count > max_size() - old_size) [[unlikely]] throw_length_error_();
+
+    size_type const new_size = old_size + count;
+    // A fitting but overlapping source takes the reallocation path too,
+    // trading one allocation for correctness (gap-first stays alias-safe).
+    if (new_size > capacity() || source_overlaps_storage_(first, count)) {
+      value_type *const old_data = data();
+      size_type const growth     = calculate_growth_(new_size);
+      auto const [new_block, new_capacity] = allocate_unchecked_(growth);
+      value_type *const raw_new   = std::to_address(new_block);
+      value_type *const gap_first = raw_new + pos;
+
+      reallocation_guard guard { new_block, new_capacity, gap_first, gap_first, alloc_ };
+      guard.constructed_last_  = uninitialized_copy_n(first, count, gap_first, gap_first + count, alloc_).out;
+      transfer_unchecked_(old_data, pos, raw_new, alloc_);
+      guard.constructed_first_ = raw_new;
+      transfer_unchecked_(old_data + pos, old_size - pos, gap_first + count, alloc_);
+      guard.dismiss();
+
+      destroy_elements_unchecked_(old_data, old_size);
+      if (is_heap()) {
+        if (heap_.elements_ptr_ != pointer {}) deallocate_unchecked_();
+      } else if constexpr (inline_capacity != 0) {
+        promote_to_heap_();
+      }
+
+      heap_.elements_ptr_ = new_block;
+      heap_.capacity_     = new_capacity;
+      set_size_(new_size, heap_flag);
+      return;
+    }
+
+    // In-place flow (fits, no overlap): relocate the tail right by count, then
+    // fill the vacated gap. Only one pass over existing elements, and a single
+    // sequential pass over the source (shared-state inputs stay correct).
+    // Basic guarantee: a throwing element copy leaves moved/partial state.
+    value_type *const storage = data();
+    value_type *const pos_ptr = storage + pos;
+    value_type *const old_end = storage + old_size;
+    size_type const tail      = old_size - pos;
+    if (count <= tail) {
+      if (is_heap()) {
+        transfer_unchecked_(old_end - count, count, old_end, alloc_);
+      } else {
+        transfer_unchecked_(old_end - count, count, old_end);
+      }
+      set_size_(new_size, get_flag_());
+      std::move_backward(pos_ptr, old_end - count, old_end);
+      std::copy_n(first, count, pos_ptr);
+    } else {
+      size_type const spill      = count - tail;
+      value_type *const shifted  = old_end + spill;
+      if (is_heap()) {
+        transfer_unchecked_(pos_ptr, tail, shifted, alloc_);
+      } else {
+        transfer_unchecked_(pos_ptr, tail, shifted);
+      }
+      // The relocated tail leaves discontiguous liveness ([pos, old_end) plus
+      // the copies past old_end) that size_ cannot express: a destruction
+      // guard owns the copies until the gap is filled.
+      destruction_guard tail_holder { shifted, shifted + tail, alloc_, is_heap() };
+      value_type *dst = pos_ptr;
+      for (size_type i = 0; i < tail; ++i, ++dst, ++first) {
+        *dst = *first;
+      }
+      if (is_heap()) {
+        (void) uninitialized_copy_n(first, spill, old_end, old_end + spill, alloc_);
+      } else {
+        (void) uninitialized_copy_n(first, spill, old_end, old_end + spill);
+      }
+      tail_holder.dismiss();
+      set_size_(new_size, get_flag_());
+    }
+  }
+
+  template <std::input_iterator InIt, std::sentinel_for<InIt> InSent>
+  requires std::constructible_from<value_type, std::iter_reference_t<InIt>>
+  constexpr void insert_range_(size_type const pos, InIt first, InSent const last)
+  {
+    assert(pos <= size() && "insert_range_() position out of range");
+    if constexpr (std::sized_sentinel_for<InSent, InIt>) {
+      insert_counted_range_(pos, first, static_cast<size_type>(last - first));
+    } else if constexpr (std::forward_iterator<InIt>) {
+      insert_counted_range_(pos, first, static_cast<size_type>(std::distance(first, last)));
+    } else {
+      insert_uncounted_range_(pos, first, last);
     }
   }
 
