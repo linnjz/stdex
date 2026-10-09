@@ -16,7 +16,7 @@
 
 #pragma once
 
-#include <algorithm>   // std::copy_n, std::fill_n
+#include <algorithm>   // std::copy_n, std::fill_n, std::ranges::copy_n
 #include <cassert>     // assert
 #include <compare>     // std::common_comparison_category_t, std::strong_ordering
 #include <concepts>    // std::constructible_from
@@ -716,13 +716,15 @@ protected:
     value_type *const this_data = data();
     size_type const this_size   = size();
     if (other_size > this_size) {
+      // Single-pass: the assign loop consumes the first this_size inputs, and
+      // the copy result resumes exactly where it stopped for tail construct
+      // (ranges::copy_n returns both ends; std::copy_n returns only the output).
+      auto const assigned = std::ranges::copy_n(other_data, this_size, this_data);
       if (is_heap()) {
-        std::copy_n(other_data, this_size, this_data);
-        (void) uninitialized_copy_n(other_data + this_size, other_size - this_size, 
+        (void) uninitialized_copy_n(assigned.in, other_size - this_size, 
                                     this_data + this_size, this_data + other_size, alloc_);
       } else {
-        std::copy_n(other_data, this_size, this_data);
-        (void) uninitialized_copy_n(other_data + this_size, other_size - this_size, 
+        (void) uninitialized_copy_n(assigned.in, other_size - this_size, 
                                     this_data + this_size, this_data + other_size);
       }
     } else {
@@ -730,6 +732,49 @@ protected:
       destroy_elements_unchecked_(this_data + other_size, this_size - other_size);
     }
     set_size_(other_size, get_flag_());
+  }
+
+  template <std::input_iterator InIt>
+  requires std::constructible_from<value_type, std::iter_reference_t<InIt>> &&
+           std::assignable_from<reference, std::iter_reference_t<InIt>>
+  constexpr void assign_counted_range_(InIt first, size_type const count)
+  {
+    if (count > max_size()) [[unlikely]] throw_length_error_();
+    if (count > capacity()) {
+      assign_grow_from_(first, count, is_stack(), false);
+      return;
+    }
+    assign_from_range_unchecked_(first, count);
+  }
+
+  template <std::input_iterator InIt, std::sentinel_for<InIt> InSent>
+  requires std::constructible_from<value_type, std::iter_reference_t<InIt>> &&
+           std::assignable_from<reference, std::iter_reference_t<InIt>>
+  constexpr void assign_uncounted_range_(InIt first, InSent const last)
+  {
+    value_type *next          = data();
+    value_type *const old_end = next + size();
+    for (; first != last && next != old_end; ++first, ++next) {
+      *next = *first;
+    }
+    size_type const tail = static_cast<size_type>(old_end - next);
+    destroy_elements_unchecked_(next, tail);
+    set_size_(size() - tail, get_flag_());
+    append_uncounted_range_(first, last);
+  }
+
+  template <std::input_iterator InIt, std::sentinel_for<InIt> InSent>
+  requires std::constructible_from<value_type, std::iter_reference_t<InIt>> &&
+           std::assignable_from<reference, std::iter_reference_t<InIt>>
+  constexpr void assign_range_(InIt first, InSent const last)
+  {
+    if constexpr (std::sized_sentinel_for<InSent, InIt>) {
+      assign_counted_range_(first, static_cast<size_type>(last - first));
+    } else if constexpr (std::forward_iterator<InIt>) {
+      assign_counted_range_(first, static_cast<size_type>(std::distance(first, last)));
+    } else {
+      assign_uncounted_range_(first, last);
+    }
   }
 
   constexpr void copy_assignment_from_(inline_storage const &other)

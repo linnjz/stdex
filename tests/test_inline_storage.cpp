@@ -129,6 +129,9 @@ struct fix : stdex::inline_storage<T, N, A> {
   using base::move_construct_from_;
   using base::assign_grow_from_;
   using base::assign_from_range_unchecked_;
+  using base::assign_counted_range_;
+  using base::assign_uncounted_range_;
+  using base::assign_range_;
   using base::copy_assignment_from_;
   using base::move_assignment_from_;
   using base::swap_stack_elements_;
@@ -2673,6 +2676,230 @@ static void test_reallocation_guard()
 }
 
 // ------------------------------------------------------------------
+// 27. assign_counted_range_ / assign_uncounted_range_ / assign_range_
+// ------------------------------------------------------------------
+static void test_assign_range()
+{
+  SECTION("assign_range");
+  {
+    // counted in-place: shrink, equal, extend within capacity (stack)
+    fix<int, 6> f(std::allocator<int>{});
+    int src[6] = { 1, 2, 3, 4, 5, 6 };
+    f.assign_counted_range_(src, 4);
+    CHECK(f.size() == 4 && f.is_stack());
+    CHECK(f.data()[0] == 1 && f.data()[3] == 4);
+    f.assign_counted_range_(src + 2, 4); // equal: overwrite only
+    CHECK(f.size() == 4 && f.data()[0] == 3 && f.data()[3] == 6);
+    f.assign_counted_range_(src, 2); // shrink: overwrite + destroy tail
+    CHECK(f.size() == 2 && f.data()[0] == 1 && f.data()[1] == 2);
+    f.assign_counted_range_(src, 6); // extend: overwrite + construct tail
+    CHECK(f.size() == 6 && f.is_stack());
+    CHECK(f.data()[5] == 6 && f.invariants());
+    f.assign_counted_range_(src, 0); // empty keeps storage and mode
+    CHECK(f.empty() && f.is_stack() && f.capacity() == 6 && f.invariants());
+  }
+  {
+    // counted in-place lifetimes: no leak, survivors keep values
+    track::reset();
+    {
+      fix<track, 6> f(std::allocator<track>{});
+      track src[2] = { track(1), track(2) };
+      f.assign_counted_range_(src, 2);
+      CHECK(track::live == 4); // 2 members + 2 sources
+      track src2[5] = { track(7), track(8), track(9), track(10), track(11) };
+      f.assign_counted_range_(src2, 5); // extend in place
+      CHECK(track::live == 2 + 5 + 5);
+      CHECK(f.size() == 5 && f.data()[0].value == 7 && f.data()[4].value == 11);
+      f.assign_counted_range_(src, 2); // shrink destroys 3
+      CHECK(track::live == 2 + 5 + 2);
+      CHECK(f.size() == 2 && f.data()[1].value == 2);
+      CHECK(f.invariants());
+    }
+    CHECK(track::live == 0);
+  }
+  {
+    // counted grow: stack -> heap and heap -> heap, contents replaced
+    fix<int, 4> f(std::allocator<int>{});
+    int small[3] = { 1, 2, 3 };
+    f.assign_counted_range_(small, 3);
+    int big[10] = { 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 };
+    auto const growth = f.calculate_growth_(10);
+    f.assign_counted_range_(big, 10);
+    CHECK(f.is_heap() && f.size() == 10 && f.capacity() == growth);
+    CHECK(f.data()[0] == 9 && f.data()[9] == 0);
+    int big2[12];
+    for (int i = 0; i < 12; ++i) big2[i] = 100 + i;
+    f.assign_counted_range_(big2, 12); // heap -> heap regrow
+    CHECK(f.is_heap() && f.size() == 12 && f.data()[0] == 100 && f.data()[11] == 111);
+    CHECK(f.invariants());
+  }
+  {
+    // counted with single-pass input iterators (no operator+ on source)
+    fix<int, 8> f(std::allocator<int>{});
+    int vals[6] = { 5, 4, 3, 2, 1, 0 };
+    f.assign_counted_range_(input_only_it{ vals }, 4); // in-place extend
+    CHECK(f.size() == 4 && f.data()[0] == 5 && f.data()[3] == 2);
+    f.assign_counted_range_(input_only_it{ vals }, 2); // in-place shrink
+    CHECK(f.size() == 2 && f.data()[1] == 4);
+    int many[12];
+    for (int i = 0; i < 12; ++i) many[i] = i;
+    f.assign_counted_range_(input_only_it{ many }, 12); // grow from input
+    CHECK(f.is_heap() && f.size() == 12 && f.data()[0] == 0 && f.data()[11] == 11);
+    CHECK(f.invariants());
+  }
+  {
+    // counted self-assign: full and subrange stay in place without regrow
+    fix<int, 6> f(std::allocator<int>{});
+    int vals[5] = { 1, 2, 3, 4, 5 };
+    f.assign_counted_range_(vals, 5);
+    f.assign_counted_range_(f.data(), f.size());
+    CHECK(f.size() == 5 && f.is_stack() && f.data()[4] == 5);
+    f.assign_counted_range_(f.data() + 2, 3); // [3,4,5]
+    CHECK(f.size() == 3 && f.data()[0] == 3 && f.data()[2] == 5);
+    CHECK(f.invariants());
+  }
+  {
+    // counted N == 0: grow and in-place
+    fix<int, 0> f(std::allocator<int>{});
+    int vals[4] = { 1, 2, 3, 4 };
+    f.assign_counted_range_(vals, 3);
+    CHECK(f.is_heap() && f.size() == 3 && f.data()[2] == 3);
+    auto const* p = f.data();
+    int vals2[2] = { 7, 8 };
+    f.assign_counted_range_(vals2, 2); // shrink keeps heap storage
+    CHECK(f.data() == p && f.size() == 2 && f.data()[0] == 7);
+    int vals3[9] = { 0, 1, 2, 3, 4, 5, 6, 7, 8 };
+    f.assign_counted_range_(vals3, 9);
+    CHECK(f.size() == 9 && f.data()[8] == 8 && f.invariants());
+  }
+  {
+    // counted length_error leaves state untouched
+    fix<int, 4, capped_alloc<int, 10>> f((capped_alloc<int, 10>{}));
+    int vals[3] = { 1, 2, 3 };
+    f.assign_counted_range_(vals, 3);
+    bool threw = false;
+    int big[11] = {};
+    try {
+      f.assign_counted_range_(big, 11);
+    } catch (std::length_error const&) { threw = true; }
+    CHECK(threw && f.size() == 3 && f.is_stack() && f.data()[0] == 1);
+  }
+  {
+    // counted grow throw: dispose-first, old contents gone but nothing leaks
+    throw_copy::reset();
+    fix<throw_copy, 2> f(std::allocator<throw_copy>{});
+    f.emplace_one_at_back_(1);
+    f.emplace_one_at_back_(2);
+    throw_copy src[4] = { throw_copy(1), throw_copy(2), throw_copy(3), throw_copy(4) };
+    throw_copy::count = 0;
+    throw_copy::throw_after = 0;
+    bool threw = false;
+    try {
+      f.assign_counted_range_(src, 4);
+    } catch (std::runtime_error const&) { threw = true; }
+    throw_copy::throw_after = 1000000;
+    CHECK(threw && f.size() == 0);
+    CHECK(throw_copy::alive == 4); // only the external sources survive
+    CHECK(f.invariants());
+  }
+  {
+    // counted in-place throw: size untouched, no construction leak
+    throw_copy::reset();
+    fix<throw_copy, 4> f(std::allocator<throw_copy>{});
+    f.emplace_one_at_back_(1);
+    throw_copy src[3] = { throw_copy(10), throw_copy(20), throw_copy(30) };
+    throw_copy::count = 0;
+    throw_copy::throw_after = 0; // first tail copy-construct throws
+    bool threw = false;
+    try {
+      f.assign_counted_range_(src, 3);
+    } catch (std::runtime_error const&) { threw = true; }
+    throw_copy::throw_after = 1000000;
+    CHECK(threw && f.size() == 1 && f.data()[0].value == 10);
+    CHECK(throw_copy::alive == 1 + 3);
+    CHECK(f.invariants());
+  }
+  {
+    // uncounted single-pass: shorter trims, equal overwrites, empty clears
+    fix<int, 6> f(std::allocator<int>{});
+    int vals[5] = { 1, 2, 3, 4, 5 };
+    f.assign_counted_range_(vals, 5);
+    int shorter[3] = { 9, 8, 7 };
+    f.assign_uncounted_range_(input_only_it{ shorter }, input_only_it{ shorter + 3 });
+    CHECK(f.size() == 3 && f.is_stack());
+    CHECK(f.data()[0] == 9 && f.data()[2] == 7);
+    int same[3] = { 1, 1, 1 };
+    f.assign_uncounted_range_(input_only_it{ same }, input_only_it{ same + 3 });
+    CHECK(f.size() == 3 && f.data()[0] == 1 && f.data()[2] == 1);
+    f.assign_uncounted_range_(input_only_it{ same }, input_only_it{ same });
+    CHECK(f.empty() && f.is_stack() && f.capacity() == 6 && f.invariants());
+  }
+  {
+    // uncounted longer: appends within capacity without reallocating
+    fix<int, 8> f(std::allocator<int>{});
+    int vals[2] = { 1, 2 };
+    f.assign_counted_range_(vals, 2);
+    auto* p = f.data();
+    int longer[6] = { 7, 6, 5, 4, 3, 2 };
+    f.assign_uncounted_range_(input_only_it{ longer }, input_only_it{ longer + 6 });
+    CHECK(f.data() == p && f.is_stack() && f.size() == 6);
+    CHECK(f.data()[0] == 7 && f.data()[5] == 2 && f.invariants());
+  }
+  {
+    // uncounted longer past capacity: append regrows mid-pass
+    fix<int, 2> f(std::allocator<int>{});
+    int vals[2] = { 1, 2 };
+    f.assign_counted_range_(vals, 2);
+    int longer[7] = { 10, 20, 30, 40, 50, 60, 70 };
+    f.assign_uncounted_range_(input_only_it{ longer }, input_only_it{ longer + 7 });
+    CHECK(f.is_heap() && f.size() == 7);
+    CHECK(f.data()[0] == 10 && f.data()[6] == 70 && f.invariants());
+  }
+  {
+    // uncounted non-trivial lifetimes: trim destroys, extend constructs
+    // (track assigns only from track: int sources are correctly rejected by
+    // the assignable_from constraint, so this uses track ranges directly)
+    track::reset();
+    {
+      fix<track, 6> f(std::allocator<track>{});
+      track vals[5] = { track(1), track(2), track(3), track(4), track(5) };
+      f.assign_uncounted_range_(vals, vals + 5);
+      CHECK(track::live == 5 + 5 && f.size() == 5);
+      track fewer[2] = { track(9), track(9) };
+      f.assign_uncounted_range_(fewer, fewer + 2);
+      CHECK(track::live == 2 + 5 + 2 && f.size() == 2 && f.data()[0].value == 9);
+      CHECK(f.invariants());
+    }
+    CHECK(track::live == 0);
+  }
+  {
+    // dispatch: sized -> counted grow, forward-only -> counted, input -> uncounted
+    fix<int, 4> f(std::allocator<int>{});
+    std::vector<int> v = { 1, 2, 3, 4, 5, 6 };
+    f.assign_range_(v.begin(), v.end());
+    CHECK(f.is_heap() && f.size() == 6 && f.data()[5] == 6);
+    std::forward_list<int> fl = { 7, 8 };
+    f.assign_range_(fl.begin(), fl.end());
+    CHECK(f.is_heap() && f.size() == 2); // assign never shrinks storage
+    CHECK(f.data()[0] == 7 && f.data()[1] == 8);
+    int vals[3] = { 3, 2, 1 };
+    f.assign_range_(input_only_it{ vals }, input_only_it{ vals + 3 });
+    CHECK(f.size() == 3 && f.data()[0] == 3 && f.data()[2] == 1);
+    CHECK(f.invariants());
+  }
+  {
+    // dispatch with strings: overwrite + tail construct/destroy
+    fix<std::string, 4> f(std::allocator<std::string>{});
+    std::vector<std::string> v = { "a", "bb", "ccc" };
+    f.assign_range_(v.begin(), v.end());
+    CHECK(f.size() == 3 && f.is_stack() && f.data()[2] == "ccc");
+    std::vector<std::string> w = { "x" };
+    f.assign_range_(w.begin(), w.end());
+    CHECK(f.size() == 1 && f.data()[0] == "x" && f.invariants());
+  }
+}
+
+// ------------------------------------------------------------------
 // 19. constexpr evaluation (heap paths only; stack constexpr needs
 //     C++26 start_lifetime, unavailable in this toolchain)
 // ------------------------------------------------------------------
@@ -2746,6 +2973,7 @@ int main()
   test_destruction_guard();
   test_resize();
   test_reallocation_guard();
+  test_assign_range();
   test_fancy();
   test_boundary();
   test_fuzz();
