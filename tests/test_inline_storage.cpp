@@ -16,9 +16,10 @@
 
 // test_inline_storage.cpp
 // Covers stdex::inline_storage<T, N, Allocator> from inline_storage.hpp:
-// ctors, observers, growth, reserve/shrink/reset/clear, copy/move helpers,
-// swap, storage_equal_/storage_compare_, exception safety, fancy pointers,
-// heap/stack combinations, boundary cases, model fuzz, constexpr (heap only;
+// ctors, observers, growth, reserve/shrink/reset/clear, insert/range helpers,
+// guards, copy/move helpers, swap, storage_equal_/storage_compare_,
+// exception safety, fancy pointers, heap/stack combinations, boundary cases,
+// model fuzz, constexpr (heap only;
 // stack constexpr needs C++26 start_lifetime, unavailable locally).
 //
 // The mutating surface is protected by design, so tests drive it through a
@@ -31,6 +32,7 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdio>
+#include <forward_list>
 #include <iterator>
 #include <limits>
 #include <memory>
@@ -91,12 +93,17 @@ struct fix : stdex::inline_storage<T, N, A> {
   using base::reset;
   using base::clear;
   using base::reserve;
+  using base::resize;
+  using base::resize_reallocate_;
+  using base::resize_impl_;
   using base::swap;
 
   // Nested types need public aliases: MSVC rejects using-declarations that
   // re-export protected nested types (C2248); same-name aliases hide them.
   using move_outcome = typename base::move_outcome;
   using allocation_guard = typename base::allocation_guard;
+  using destruction_guard = typename base::destruction_guard;
+  using reallocation_guard = typename base::reallocation_guard;
   using base::allocators_equal_;
   using base::max_size_;
   using base::throw_length_error_;
@@ -110,6 +117,10 @@ struct fix : stdex::inline_storage<T, N, A> {
   using base::emplace_back_with_unused_capacity_;
   using base::emplace_one_at_back_;
   using base::append_uncounted_range_;
+  using base::insert_uncounted_range_;
+  using base::insert_counted_range_;
+  using base::insert_range_;
+  using base::source_overlaps_storage_;
   using base::destroy_element_unchecked_;
   using base::destroy_elements_unchecked_;
   using base::dispose_;
@@ -218,6 +229,8 @@ struct throw_copy {
     ++alive;
   }
   throw_copy(throw_copy&& o) noexcept : value(o.value) { ++alive; o.value = -1; }
+  throw_copy& operator=(throw_copy const& o) { value = o.value; return *this; }
+  throw_copy& operator=(throw_copy&& o) noexcept { value = o.value; o.value = -1; return *this; }
   ~throw_copy() { --alive; }
 };
 
@@ -255,6 +268,33 @@ struct throw_moveonly {
   }
   throw_moveonly(throw_moveonly const&) = delete;
   ~throw_moveonly() { --alive; }
+};
+
+// Move-only with a throwing move ctor but noexcept move assignment: forces the
+// transfer itself (not the source copy) to throw midway, for insert paths
+// that relocate existing elements before filling the gap.
+struct throw_moveonly_asn {
+  int value = 0;
+  static inline int alive = 0;
+  static inline int count = 0;
+  static inline int throw_after = 1000000;
+  static void reset() { alive = 0; count = 0; throw_after = 1000000; }
+  explicit throw_moveonly_asn(int v) : value(v) { ++alive; }
+  throw_moveonly_asn(throw_moveonly_asn&& o) : value(o.value)
+  {
+    if (count++ >= throw_after) throw std::runtime_error("move throws");
+    ++alive;
+    o.value = -1;
+  }
+  throw_moveonly_asn& operator=(throw_moveonly_asn&& o) noexcept
+  {
+    value = o.value;
+    o.value = -1;
+    return *this;
+  }
+  throw_moveonly_asn(throw_moveonly_asn const&) = delete;
+  throw_moveonly_asn& operator=(throw_moveonly_asn const&) = delete;
+  ~throw_moveonly_asn() { --alive; }
 };
 
 // two-argument-constructible element for multi-arg emplace coverage
@@ -484,6 +524,25 @@ struct input_only_it {
 };
 static_assert(!std::forward_iterator<input_only_it>);
 static_assert(std::input_iterator<input_only_it>);
+
+// Shared-state single-pass input (istream-like): copies share the position,
+// so re-reading from a copy observes the advanced position, never replays.
+struct shared_input_it {
+  using iterator_category = std::input_iterator_tag;
+  using value_type = int;
+  using difference_type = std::ptrdiff_t;
+  struct shared_state {
+    int const* base;
+    std::size_t index;
+  };
+  std::shared_ptr<shared_state> state_;
+  int operator*() const { return state_->base[state_->index]; }
+  shared_input_it& operator++() { ++state_->index; return *this; }
+  void operator++(int) { ++state_->index; }
+  bool operator==(shared_input_it const& o) const { return state_ == o.state_ && state_->index == o.state_->index; }
+};
+static_assert(!std::forward_iterator<shared_input_it>);
+static_assert(std::input_iterator<shared_input_it>);
 
 // deterministic PRNG for fuzz
 struct xorshift64 {
@@ -1866,6 +1925,754 @@ static void test_fuzz_leaks()
 }
 
 // ------------------------------------------------------------------
+// 20. insert_uncounted_range_ (append + rotate)
+// ------------------------------------------------------------------
+
+// int-content comparison with invariant check for the insert sections below.
+template <size_t N, class A = std::allocator<int>>
+[[nodiscard]] static bool int_content_matches_(fix<int, N, A>& storage, std::vector<int> const& values)
+{
+  if (storage.size() != values.size()) return false;
+  for (std::size_t i = 0; i < values.size(); ++i) {
+    if (storage.data()[i] != values[i]) return false;
+  }
+  return storage.invariants();
+}
+
+static void test_insert_uncounted_range()
+{
+  SECTION("insert_uncounted_range_");
+  {
+    // empty source is a no-op at any position
+    fix<int, 4> f(3, 1);
+    int arr[1] = { 0 };
+    f.insert_uncounted_range_(0, arr, arr);
+    f.insert_uncounted_range_(3, arr, arr);
+    CHECK(f.size() == 3 && f.is_stack());
+    CHECK(int_content_matches_(f, { 1, 1, 1 }));
+  }
+  {
+    // front / middle / back insertion through rotate
+    fix<int, 8> f(std::allocator<int>{});
+    int src[3] = { 10, 20, 30 };
+    f.insert_uncounted_range_(0, src, src + 3);
+    CHECK(int_content_matches_(f, { 10, 20, 30 }));
+    int mid[2] = { 11, 12 };
+    f.insert_uncounted_range_(1, mid, mid + 2);
+    CHECK(int_content_matches_(f, { 10, 11, 12, 20, 30 }));
+    int tail[1] = { 99 };
+    f.insert_uncounted_range_(5, tail, tail + 1); // append-at-end path
+    CHECK(int_content_matches_(f, { 10, 11, 12, 20, 30, 99 }));
+  }
+  {
+    // single-pass source across reallocations
+    fix<int, 4> f(2, -1);
+    int arr[10] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 };
+    f.insert_uncounted_range_(1, input_only_it{ arr }, input_only_it{ arr + 10 });
+    CHECK(f.size() == 12 && f.is_heap());
+    CHECK(f.data()[0] == -1 && f.data()[1] == 0 && f.data()[2] == 1);
+    CHECK(f.data()[10] == 9 && f.data()[11] == -1); // trailing original element
+    CHECK(f.invariants());
+  }
+  {
+    // non-trivial elements survive append + rotate without leaks
+    track::reset();
+    {
+      fix<track, 4> f(std::allocator<track>{});
+      f.emplace_one_at_back_(1);
+      track src[2]{ track(7), track(8) };
+      f.insert_uncounted_range_(0, src, src + 2);
+      CHECK(f.size() == 3 && f.is_stack());
+      CHECK(f.data()[0].value == 7 && f.data()[1].value == 8 && f.data()[2].value == 1);
+      CHECK(f.invariants());
+    }
+    CHECK(track::live == 0);
+  }
+}
+
+// ------------------------------------------------------------------
+// 21. insert_counted_range_ (single-growth path)
+// ------------------------------------------------------------------
+static void test_insert_counted_range()
+{
+  SECTION("insert_counted_range_");
+  {
+    // count == 0 is a no-op; front/middle in-place insertion
+    fix<int, 8> f(std::allocator<int>{});
+    int src[3] = { 10, 20, 30 };
+    f.insert_counted_range_(0, src, 0);
+    CHECK(f.empty() && f.is_stack());
+    f.insert_counted_range_(0, src, 3);
+    CHECK(int_content_matches_(f, { 10, 20, 30 }));
+    int mid[2] = { 11, 12 };
+    f.insert_counted_range_(1, mid, 2);
+    CHECK(int_content_matches_(f, { 10, 11, 12, 20, 30 }));
+  }
+  {
+    // single element, count <= tail ([1,2,3,4] insert 5 at pos 2)
+    fix<int, 8> f(std::allocator<int>{});
+    for (int i = 1; i <= 4; ++i) f.emplace_one_at_back_(i);
+    int five[1] = { 5 };
+    f.insert_counted_range_(2, five, 1);
+    CHECK(int_content_matches_(f, { 1, 2, 5, 3, 4 }) && f.is_stack());
+  }
+  {
+    // spill in place (count > tail, fits) and count == tail boundary
+    fix<int, 8> f(std::allocator<int>{});
+    for (int i = 1; i <= 4; ++i) f.emplace_one_at_back_(i);
+    int src[4] = { 10, 11, 12, 13 };
+    f.insert_counted_range_(1, src, 4);
+    CHECK(int_content_matches_(f, { 1, 10, 11, 12, 13, 2, 3, 4 }) && f.is_stack());
+  }
+  {
+    // append-at-end in place (tail == 0 pure spill construction)
+    fix<int, 8> f(std::allocator<int>{});
+    for (int i = 1; i <= 4; ++i) f.emplace_one_at_back_(i);
+    int tail[2] = { 20, 21 };
+    f.insert_counted_range_(4, tail, 2);
+    CHECK(int_content_matches_(f, { 1, 2, 3, 4, 20, 21 }) && f.is_stack());
+  }
+  {
+    // stack -> heap and heap -> heap reallocation preserve order
+    fix<int, 4> f(std::allocator<int>{});
+    int a[2] = { 1, 2 };
+    f.insert_counted_range_(0, a, 2);
+    int b[5] = { 7, 8, 9, 10, 11 };
+    f.insert_counted_range_(1, b, 5);
+    CHECK(f.is_heap() && int_content_matches_(f, { 1, 7, 8, 9, 10, 11, 2 }));
+    int c[4] = { 21, 22, 23, 24 };
+    f.insert_counted_range_(0, c, 4);
+    CHECK(int_content_matches_(f, { 21, 22, 23, 24, 1, 7, 8, 9, 10, 11, 2 }));
+  }
+  {
+    // self-insert across reallocation: source aliases old storage
+    fix<int, 4> f(std::allocator<int>{});
+    for (int i = 1; i <= 4; ++i) f.emplace_one_at_back_(i);
+    f.insert_counted_range_(2, f.data(), 2);
+    CHECK(f.is_heap() && int_content_matches_(f, { 1, 2, 1, 2, 3, 4 }));
+  }
+  {
+    // fitting self-insert reroutes to realloc (alias-safe), still exact
+    fix<int, 8> f(std::allocator<int>{});
+    for (int i = 1; i <= 4; ++i) f.emplace_one_at_back_(i);
+    f.insert_counted_range_(1, f.data(), 2);
+    CHECK(f.is_heap() && int_content_matches_(f, { 1, 1, 2, 2, 3, 4 }));
+  }
+  {
+    // N == 0 pure-heap counted insert
+    fix<int, 0> z(std::allocator<int>{});
+    int src[3] = { 5, 6, 7 };
+    z.insert_counted_range_(0, src, 3);
+    CHECK(z.size() == 3 && z.is_heap() && z.data()[2] == 7);
+    int more[2] = { 8, 9 };
+    z.insert_counted_range_(1, more, 2);
+    CHECK(z.size() == 5 && z.data()[0] == 5 && z.data()[1] == 8 && z.data()[3] == 6);
+    CHECK(z.invariants());
+  }
+  {
+    // length_error leaves state untouched
+    fix<int, 4, capped_alloc<int, 10>> f((capped_alloc<int, 10>{}));
+    f.emplace_one_at_back_(1);
+    int src[3] = { 1, 2, 3 };
+    bool threw = false;
+    try {
+      f.insert_counted_range_(0, src, 10);
+    } catch (std::length_error const&) { threw = true; }
+    CHECK(threw && f.size() == 1 && f.data()[0] == 1 && f.is_stack());
+  }
+  {
+    // non-trivial elements across realloc + in-place without leaks
+    track::reset();
+    {
+      fix<track, 2> f(std::allocator<track>{});
+      track src[3]{ track(1), track(2), track(3) };
+      f.insert_counted_range_(0, src, 3);
+      CHECK(f.size() == 3 && f.is_heap());
+      track more[1]{ track(9) };
+      f.insert_counted_range_(3, more, 1);
+      CHECK(f.size() == 4 && f.data()[3].value == 9 && f.data()[0].value == 1);
+      CHECK(f.invariants());
+    }
+    CHECK(track::live == 0);
+  }
+  {
+    // allocation balance through a reallocating insert
+    leak_alloc<int>::reset();
+    {
+      fix<int, 4, leak_alloc<int>> f((leak_alloc<int>{}));
+      int src[6] = { 1, 2, 3, 4, 5, 6 };
+      f.insert_counted_range_(0, src, 6);
+      CHECK(f.size() == 6 && f.is_heap());
+    }
+    CHECK(leak_alloc<int>::allocs == leak_alloc<int>::deallocs);
+    CHECK(leak_alloc<int>::allocs > 0);
+  }
+  {
+    // throwing source copy during reallocation: old storage untouched (strong)
+    throw_copy::reset();
+    fix<throw_copy, 2> f(std::allocator<throw_copy>{});
+    f.emplace_one_at_back_(1);
+    f.emplace_one_at_back_(2);
+    throw_copy src[4]{ throw_copy(10), throw_copy(20), throw_copy(30), throw_copy(40) };
+    throw_copy::count = 0;
+    throw_copy::throw_after = 1; // second gap copy throws
+    bool threw = false;
+    try {
+      f.insert_counted_range_(1, src, 4);
+    } catch (std::runtime_error const&) { threw = true; }
+    CHECK(threw && f.size() == 2 && f.is_stack());
+    CHECK(f.data()[0].value == 1 && f.data()[1].value == 2);
+    CHECK(throw_copy::alive == 2 + 4); // container + sources, new block rolled back
+    throw_copy::reset();
+  }
+  {
+    // partial relocation move throws: inner backout destroys the half-built
+    // destination, size_ still covers the (moved-from but live) sources
+    throw_moveonly_asn::reset();
+    fix<throw_moveonly_asn, 8> f(std::allocator<throw_moveonly_asn>{});
+    f.emplace_one_at_back_(1);
+    f.emplace_one_at_back_(2);
+    f.emplace_one_at_back_(3);
+    f.emplace_one_at_back_(4);
+    throw_moveonly_asn src[2]{ throw_moveonly_asn(10), throw_moveonly_asn(20) };
+    throw_moveonly_asn::count = 0;
+    throw_moveonly_asn::throw_after = 1; // first relocation move ok, second throws
+    bool threw = false;
+    try {
+      f.insert_counted_range_(1, std::make_move_iterator(src), 2);
+    } catch (std::runtime_error const&) { threw = true; }
+    CHECK(threw && f.size() == 4);
+    CHECK(throw_moveonly_asn::alive == 4 + 2); // container + sources, all accounted
+    throw_moveonly_asn::reset();
+  }
+  {
+    // throwing suffix construction in place: the holder destroys the shifted
+    // tail, size_ still covers exactly the old elements (basic values, exact)
+    throw_copy::reset();
+    fix<throw_copy, 8> f(std::allocator<throw_copy>{});
+    f.emplace_one_at_back_(1);
+    f.emplace_one_at_back_(2);
+    f.emplace_one_at_back_(3);
+    throw_copy src[4]{ throw_copy(10), throw_copy(20), throw_copy(30), throw_copy(40) };
+    throw_copy::count = 0;
+    throw_copy::throw_after = 0; // suffix copy throws after shift + prefix assign
+    bool threw = false;
+    try {
+      f.insert_counted_range_(1, src, 4);
+    } catch (std::runtime_error const&) { threw = true; }
+    CHECK(threw && f.size() == 3);
+    CHECK(f.data()[0].value == 1 && f.data()[1].value == 10 && f.data()[2].value == 20);
+    CHECK(throw_copy::alive == 3 + 4); // container exact, source intact: no leak
+    throw_copy::reset();
+  }
+}
+
+// ------------------------------------------------------------------
+// 22. insert_range_ dispatch (sized / forward / single-pass)
+// ------------------------------------------------------------------
+static void test_insert_range_dispatch()
+{
+  SECTION("insert_range_ dispatch");
+  {
+    // sized sentinels (vector iterators): single-growth counted path
+    fix<int, 8> f(std::allocator<int>{});
+    std::vector<int> v = { 1, 2, 3 };
+    f.insert_range_(0, v.begin(), v.end());
+    CHECK(int_content_matches_(f, { 1, 2, 3 }));
+  }
+  {
+    // forward but unsized (forward_list): counted via distance
+    fix<int, 8> f(std::allocator<int>{});
+    f.emplace_one_at_back_(1);
+    std::forward_list<int> l = { 4, 5 };
+    f.insert_range_(1, l.begin(), l.end());
+    CHECK(int_content_matches_(f, { 1, 4, 5 }));
+  }
+  {
+    // single-pass input: uncounted path, growth across reallocations
+    fix<int, 4> f(2, -1);
+    int arr[10] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 };
+    f.insert_range_(1, input_only_it{ arr }, input_only_it{ arr + 10 });
+    CHECK(f.size() == 12 && f.is_heap());
+    CHECK(f.data()[0] == -1 && f.data()[1] == 0 && f.data()[10] == 9 && f.data()[11] == -1);
+    CHECK(f.invariants());
+  }
+  {
+    // empty ranges are no-ops on every dispatch path
+    fix<int, 8> f(std::allocator<int>{});
+    std::vector<int> v = { 1 };
+    f.insert_range_(0, v.begin(), v.begin());
+    std::forward_list<int> l = { 2 };
+    f.insert_range_(0, l.begin(), l.begin());
+    int arr[1] = { 0 };
+    f.insert_range_(0, input_only_it{ arr }, input_only_it{ arr });
+    CHECK(f.empty() && f.is_stack());
+  }
+}
+
+// ------------------------------------------------------------------
+// 23. source_overlaps_storage_ predicate
+// ------------------------------------------------------------------
+static void test_source_overlaps()
+{
+  SECTION("source_overlaps_storage_");
+  {
+    // empty storage and empty ranges never overlap
+    fix<int, 4> f(std::allocator<int>{});
+    int ext[4] = { 1, 2, 3, 4 };
+    CHECK(!f.source_overlaps_storage_(ext, 4));
+    CHECK(!f.source_overlaps_storage_(ext, 0));
+    fix<int, 4> g(3, 1);
+    CHECK(!g.source_overlaps_storage_(ext, 0)); // count == 0 short-circuits
+  }
+  {
+    // sources starting inside [data(), data() + size()) overlap, even when
+    // count runs past the end (no src + count is formed on this path)
+    fix<int, 4> g(3, 1);
+    CHECK(g.source_overlaps_storage_(g.data(), 2));
+    CHECK(g.source_overlaps_storage_(g.data() + 1, 2));
+    CHECK(g.source_overlaps_storage_(g.data() + 2, 100));
+    // one-past-the-end only touches: no overlap
+    CHECK(!g.source_overlaps_storage_(g.data() + 3, 2));
+  }
+  {
+    // disjoint external storage never overlaps
+    fix<int, 4> g(3, 1);
+    int ext[4] = { 1, 2, 3, 4 };
+    CHECK(!g.source_overlaps_storage_(ext, 4));
+  }
+  {
+    // non-contiguous iterators always report false, even over our own data
+    fix<int, 4> g(3, 1);
+    CHECK(!g.source_overlaps_storage_(input_only_it{ g.data() }, 2));
+  }
+  {
+    // N == 0 heap storage overlaps its own blocks
+    fix<int, 0> z(2, 5);
+    CHECK(z.source_overlaps_storage_(z.data(), 1));
+    int ext[1] = { 9 };
+    CHECK(!z.source_overlaps_storage_(ext, 1));
+  }
+}
+
+// ------------------------------------------------------------------
+// 24. destruction_guard adopt-and-release
+// ------------------------------------------------------------------
+static void test_destruction_guard()
+{
+  SECTION("destruction_guard");
+  {
+    // heap mode fires: adopted range destroyed via the allocator
+    track::reset();
+    {
+      fix<track, 4> f(std::allocator<track>{});
+      auto [blk, cap] = f.allocate_unchecked_(4);
+      track* raw      = std::to_address(blk);
+      auto& alloc     = f.test_alloc();
+      std::allocator_traits<std::allocator<track>>::construct(alloc, raw, 1);
+      std::allocator_traits<std::allocator<track>>::construct(alloc, raw + 1, 2);
+      CHECK(track::live == 2);
+      {
+        typename fix<track, 4>::destruction_guard g{ raw, raw + 2, alloc, true };
+      } // fires on scope exit
+      CHECK(track::live == 0);
+      CHECK(raw->value == 1); // storage untouched, only lifetimes ended
+      std::allocator_traits<std::allocator<track>>::deallocate(alloc, blk, cap);
+    }
+    CHECK(track::live == 0);
+  }
+  {
+    // dismiss() hands responsibility back: nothing destroyed
+    track::reset();
+    {
+      fix<track, 4> f(std::allocator<track>{});
+      auto [blk, cap] = f.allocate_unchecked_(4);
+      track* raw      = std::to_address(blk);
+      auto& alloc     = f.test_alloc();
+      std::allocator_traits<std::allocator<track>>::construct(alloc, raw, 5);
+      {
+        typename fix<track, 4>::destruction_guard g{ raw, raw + 1, alloc, true };
+        g.dismiss();
+      }
+      CHECK(track::live == 1 && raw->value == 5);
+      f.destroy_elements_unchecked_(raw, 1); // stack-active fixture: plain destroy
+      CHECK(track::live == 0);
+      std::allocator_traits<std::allocator<track>>::deallocate(alloc, blk, cap);
+    }
+    CHECK(track::live == 0);
+  }
+  {
+    // stack mode (use_allocator == false) destroys without allocator traffic
+    track::reset();
+    {
+      fix<track, 4> f(std::allocator<track>{});
+      alignas(track) unsigned char buf[2 * sizeof(track)];
+      track* slot = reinterpret_cast<track*>(buf);
+      std::construct_at(slot, 7);
+      std::construct_at(slot + 1, 8);
+      CHECK(track::live == 2);
+      {
+        typename fix<track, 4>::destruction_guard g{ slot, slot + 2, f.test_alloc(), false };
+      }
+      CHECK(track::live == 0);
+    }
+    CHECK(track::live == 0);
+  }
+  {
+    // custom-destroy allocators are honored even for trivially-destructible types
+    fancy_counting_alloc<int>::reset();
+    fix<int, 4, fancy_counting_alloc<int>> f((fancy_counting_alloc<int>{}));
+    auto [blk, cap] = f.allocate_unchecked_(2);
+    {
+      typename fix<int, 4, fancy_counting_alloc<int>>::destruction_guard g{
+        std::to_address(blk), std::to_address(blk) + 2, f.test_alloc(), true
+      };
+    }
+    CHECK(fancy_counting_alloc<int>::destroy_count == 2);
+    f.test_alloc().deallocate(blk, cap);
+  }
+  {
+    // trivially-destructible ranges: fire and dismiss are both silent no-ops
+    fix<int, 4> f(std::allocator<int>{});
+    auto [blk, cap] = f.allocate_unchecked_(4);
+    int* raw        = std::to_address(blk);
+    {
+      typename fix<int, 4>::destruction_guard g{ raw, raw + 4, f.test_alloc(), true };
+    }
+    {
+      typename fix<int, 4>::destruction_guard g{ raw, raw + 4, f.test_alloc(), false };
+      g.dismiss();
+    }
+    std::allocator_traits<std::allocator<int>>::deallocate(f.test_alloc(), blk, cap);
+    CHECK(f.invariants() && f.empty());
+  }
+  {
+    // empty range fires trivially
+    fix<int, 4> f(std::allocator<int>{});
+    auto [blk, cap] = f.allocate_unchecked_(4);
+    int* raw        = std::to_address(blk);
+    {
+      typename fix<int, 4>::destruction_guard g{ raw, raw, f.test_alloc(), true };
+    }
+    std::allocator_traits<std::allocator<int>>::deallocate(f.test_alloc(), blk, cap);
+    CHECK(true);
+  }
+}
+
+// ------------------------------------------------------------------
+// 25. resize + resize_reallocate_ + resize_impl_
+// ------------------------------------------------------------------
+static void test_resize()
+{
+  SECTION("resize");
+  {
+    // stack value-init growth, trim, equal no-op, clear to zero
+    fix<int, 4> f(std::allocator<int>{});
+    f.resize(3);
+    CHECK(f.size() == 3 && f.is_stack());
+    CHECK(f.data()[0] == 0 && f.data()[2] == 0);
+    f.resize(2, 9); // trim ignores the fill value
+    CHECK(f.size() == 2 && f.is_stack() && f.data()[1] == 0);
+    f.resize(4, 7); // grow within capacity
+    CHECK(f.size() == 4 && f.is_stack());
+    CHECK(f.data()[2] == 7 && f.data()[3] == 7 && f.data()[0] == 0);
+    f.resize(4); // equal: no-op, values untouched
+    CHECK(f.size() == 4 && f.data()[0] == 0);
+    f.resize(0);
+    CHECK(f.empty() && f.is_stack() && f.capacity() == 4);
+    CHECK(f.invariants());
+  }
+  {
+    // non-trivial lifetimes through trim and growth
+    track::reset();
+    {
+      fix<track, 4> f(std::allocator<track>{});
+      f.resize(3);
+      CHECK(track::live == 3);
+      f.resize(1);
+      CHECK(track::live == 1 && f.size() == 1);
+      f.resize(4, track(5));
+      CHECK(track::live == 4);
+      CHECK(f.data()[3].value == 5 && f.data()[0].value == 0);
+      CHECK(f.invariants());
+    }
+    CHECK(track::live == 0);
+  }
+  {
+    // stack -> heap reallocation (value-init and fill), contents preserved
+    fix<int, 4> f(std::allocator<int>{});
+    f.resize(2, 1);
+    f.resize(10);
+    CHECK(f.is_heap() && f.size() == 10);
+    CHECK(f.data()[0] == 1 && f.data()[1] == 1 && f.data()[2] == 0 && f.data()[9] == 0);
+    CHECK(f.capacity() >= 10 && f.invariants());
+    f.resize(12, 3); // heap -> heap reallocation with fill tail
+    CHECK(f.is_heap() && f.size() == 12);
+    CHECK(f.data()[0] == 1 && f.data()[10] == 3 && f.data()[11] == 3);
+    f.resize(11); // heap trim keeps heap storage and capacity
+    CHECK(f.is_heap() && f.size() == 11 && f.data()[0] == 1);
+    auto const cap = f.capacity();
+    f.resize(11, 9); // equal on heap: no-op, fill value ignored
+    CHECK(f.data()[0] == 1 && f.capacity() == cap);
+    CHECK(f.invariants());
+  }
+  {
+    // heap growth within capacity: no reallocation, storage stable
+    fix<int, 4> f(std::allocator<int>{});
+    f.resize(8, 2);
+    auto const* p   = f.data();
+    auto const cap  = f.capacity();
+    f.resize(6);
+    f.resize(7, 5);
+    CHECK(f.data() == p && f.capacity() == cap && f.is_heap());
+    CHECK(f.data()[6] == 5 && f.data()[0] == 2);
+  }
+  {
+    // fill value aliasing old storage across reallocation
+    fix<std::string, 2> f(std::allocator<std::string>{});
+    f.resize(2, std::string("ab"));
+    f.resize(6, f.data()[0]);
+    CHECK(f.size() == 6 && f.is_heap());
+    CHECK(f.data()[0] == "ab" && f.data()[2] == "ab" && f.data()[5] == "ab");
+    CHECK(f.invariants());
+  }
+  {
+    // N == 0 pure-heap paths
+    fix<int, 0> f(std::allocator<int>{});
+    f.resize(3);
+    CHECK(f.is_heap() && f.size() == 3 && f.data()[2] == 0);
+    f.resize(5, 4);
+    CHECK(f.size() == 5 && f.data()[4] == 4 && f.data()[0] == 0);
+    f.resize(2);
+    CHECK(f.size() == 2 && f.is_heap());
+    f.resize(2);
+    CHECK(f.size() == 2);
+    f.resize(0);
+    CHECK(f.empty() && f.is_heap() && f.invariants());
+  }
+  {
+    // length_error leaves state untouched (both overloads)
+    fix<int, 4, capped_alloc<int, 10>> f((capped_alloc<int, 10>{}));
+    bool threw = false;
+    try {
+      f.resize(11);
+    } catch (std::length_error const&) { threw = true; }
+    CHECK(threw && f.empty() && f.is_stack());
+    threw = false;
+    try {
+      f.resize(11, 1);
+    } catch (std::length_error const&) { threw = true; }
+    CHECK(threw && f.empty() && f.is_stack());
+  }
+  {
+    // throwing fill during reallocation: old stack contents intact
+    throw_copy::reset();
+    fix<throw_copy, 2> f(std::allocator<throw_copy>{});
+    f.emplace_one_at_back_(1);
+    f.emplace_one_at_back_(2);
+    throw_copy bad(999);
+    throw_copy::count = 0;
+    throw_copy::throw_after = 0;
+    bool threw = false;
+    try {
+      f.resize(5, bad);
+    } catch (std::runtime_error const&) { threw = true; }
+    CHECK(threw && f.size() == 2 && f.is_stack());
+    CHECK(f.data()[0].value == 1 && f.data()[1].value == 2);
+    CHECK(throw_copy::alive == 3); // 2 in f + bad; new block fully rolled back
+    throw_copy::reset();
+  }
+  {
+    // throwing fill in place (heap, spare capacity): size/contents stable
+    throw_copy::reset();
+    fix<throw_copy, 2> f(std::allocator<throw_copy>{});
+    f.emplace_one_at_back_(1);
+    f.emplace_one_at_back_(2);
+    f.reserve(8);
+    throw_copy bad(7);
+    throw_copy::count = 0;
+    throw_copy::throw_after = 0;
+    bool threw = false;
+    try {
+      f.resize(5, bad);
+    } catch (std::runtime_error const&) { threw = true; }
+    CHECK(threw && f.size() == 2 && f.is_heap());
+    CHECK(f.data()[0].value == 1 && f.data()[1].value == 2);
+    CHECK(throw_copy::alive == 3);
+    throw_copy::reset();
+  }
+  {
+    // throwing move with viable copy: transfer copies, old storage intact
+    throw_move::reset();
+    fix<throw_move, 2> f(std::allocator<throw_move>{});
+    f.emplace_one_at_back_(1);
+    f.emplace_one_at_back_(2);
+    throw_move::throw_after = 0; // moves throw, copies do not
+    f.resize(8); // value-init tail cannot throw; transfer falls back to copy
+    CHECK(f.size() == 8 && f.is_heap());
+    CHECK(f.data()[0].value == 1 && f.data()[1].value == 2);
+    CHECK(throw_move::alive == 8);
+    throw_move::reset();
+  }
+  {
+    // resize_reallocate_ directly: value-init and fill, stack -> heap
+    fix<int, 4> f(2, 5);
+    f.resize_reallocate_(6);
+    CHECK(f.is_heap() && f.size() == 6);
+    CHECK(f.data()[0] == 5 && f.data()[1] == 5 && f.data()[5] == 0);
+    CHECK(f.invariants());
+    fix<int, 4> g(2, 5);
+    g.resize_reallocate_(6, 7);
+    CHECK(g.is_heap() && g.size() == 6);
+    CHECK(g.data()[0] == 5 && g.data()[2] == 7 && g.data()[5] == 7);
+    CHECK(g.invariants());
+  }
+  {
+    // resize_reallocate_ directly: heap -> heap keeps old contents
+    fix<int, 4> f(6, 1);
+    auto const old_cap = f.capacity();
+    (void) old_cap;
+    f.resize_reallocate_(9);
+    CHECK(f.is_heap() && f.size() == 9 && f.capacity() >= 9);
+    for (std::size_t i = 0; i < 6; ++i) CHECK(f.data()[i] == 1);
+    CHECK(f.data()[8] == 0 && f.invariants());
+  }
+  {
+    // resize_impl_ directly: trim, in-place growth (both arities), reallocation
+    fix<int, 4> f(2, 5);
+    f.resize_impl_(4, 7);
+    CHECK(f.is_stack() && f.size() == 4);
+    CHECK(f.data()[0] == 5 && f.data()[2] == 7);
+    f.resize_impl_(1);
+    CHECK(f.size() == 1 && f.data()[0] == 5);
+    f.resize_impl_(6);
+    CHECK(f.is_heap() && f.size() == 6 && f.data()[0] == 5 && f.data()[5] == 0);
+    CHECK(f.invariants());
+  }
+  {
+    // allocation balance through a reallocating resize
+    leak_alloc<int>::reset();
+    {
+      fix<int, 4, leak_alloc<int>> f((leak_alloc<int>{}));
+      f.resize(2, 1);
+      f.resize(10);
+      CHECK(f.size() == 10 && f.is_heap());
+    }
+    CHECK(leak_alloc<int>::allocs == leak_alloc<int>::deallocs);
+    CHECK(leak_alloc<int>::allocs > 0);
+  }
+}
+
+// ------------------------------------------------------------------
+// 26. reallocation_guard adopt-and-release
+// ------------------------------------------------------------------
+static void test_reallocation_guard()
+{
+  SECTION("reallocation_guard");
+  {
+    // fires: adopted tail destroyed via the allocator, block deallocated
+    track::reset();
+    leak_alloc<track>::reset();
+    {
+      fix<track, 4, leak_alloc<track>> f((leak_alloc<track>{}));
+      auto [blk, cap] = f.allocate_unchecked_(4);
+      track* raw      = std::to_address(blk);
+      auto& alloc     = f.test_alloc();
+      std::allocator_traits<leak_alloc<track>>::construct(alloc, raw, 1);
+      std::allocator_traits<leak_alloc<track>>::construct(alloc, raw + 1, 2);
+      std::allocator_traits<leak_alloc<track>>::construct(alloc, raw + 2, 3);
+      CHECK(track::live == 3);
+      {
+        typename fix<track, 4, leak_alloc<track>>::reallocation_guard g{ blk, cap, raw, raw + 3, alloc };
+      } // fires: destroys 3 + deallocates
+      CHECK(track::live == 0);
+    }
+    CHECK(track::live == 0);
+    CHECK(leak_alloc<track>::allocs == leak_alloc<track>::deallocs);
+    CHECK(leak_alloc<track>::allocs > 0);
+  }
+  {
+    // partial adopted range: only the covered suffix is destroyed
+    track::reset();
+    {
+      fix<track, 4> f(std::allocator<track>{});
+      auto [blk, cap] = f.allocate_unchecked_(4);
+      track* raw      = std::to_address(blk);
+      auto& alloc     = f.test_alloc();
+      std::allocator_traits<std::allocator<track>>::construct(alloc, raw, 1);
+      std::allocator_traits<std::allocator<track>>::construct(alloc, raw + 1, 2);
+      std::allocator_traits<std::allocator<track>>::construct(alloc, raw + 2, 3);
+      {
+        typename fix<track, 4>::reallocation_guard g{ blk, cap, raw + 1, raw + 3, alloc };
+      } // fires: destroys [1, 3), deallocates
+      CHECK(track::live == 1 && raw->value == 1);
+      std::allocator_traits<std::allocator<track>>::destroy(alloc, raw);
+      CHECK(track::live == 0);
+    }
+    CHECK(track::live == 0);
+  }
+  {
+    // dismiss(): neither destroys nor deallocates; owner keeps both duties
+    track::reset();
+    leak_alloc<track>::reset();
+    {
+      fix<track, 4, leak_alloc<track>> f((leak_alloc<track>{}));
+      auto [blk, cap] = f.allocate_unchecked_(4);
+      track* raw      = std::to_address(blk);
+      auto& alloc     = f.test_alloc();
+      std::allocator_traits<leak_alloc<track>>::construct(alloc, raw, 9);
+      {
+        typename fix<track, 4, leak_alloc<track>>::reallocation_guard g{ blk, cap, raw, raw + 1, alloc };
+        g.dismiss();
+      }
+      CHECK(track::live == 1 && raw->value == 9);
+      CHECK(leak_alloc<track>::deallocs == 0);
+      std::allocator_traits<leak_alloc<track>>::destroy(alloc, raw);
+      std::allocator_traits<leak_alloc<track>>::deallocate(alloc, blk, cap);
+    }
+    CHECK(track::live == 0);
+    CHECK(leak_alloc<track>::allocs == leak_alloc<track>::deallocs);
+  }
+  {
+    // custom-destroy allocators are honored even for trivially-destructible types
+    fancy_counting_alloc<int>::reset();
+    fix<int, 4, fancy_counting_alloc<int>> f((fancy_counting_alloc<int>{}));
+    auto [blk, cap] = f.allocate_unchecked_(4);
+    {
+      typename fix<int, 4, fancy_counting_alloc<int>>::reallocation_guard g{
+        blk, cap, std::to_address(blk) + 1, std::to_address(blk) + 3, f.test_alloc()
+      };
+    } // fires: destroys covered pair through the allocator, frees the block
+    CHECK(fancy_counting_alloc<int>::destroy_count == 2);
+  }
+  {
+    // trivially-destructible, default allocator: fire is deallocate-only
+    leak_alloc<int>::reset();
+    {
+      fix<int, 4, leak_alloc<int>> f((leak_alloc<int>{}));
+      auto [blk, cap] = f.allocate_unchecked_(4);
+      {
+        typename fix<int, 4, leak_alloc<int>>::reallocation_guard g{
+          blk, cap, std::to_address(blk), std::to_address(blk) + 4, f.test_alloc()
+        };
+      }
+      CHECK(leak_alloc<int>::allocs == 1 && leak_alloc<int>::deallocs == 1);
+    }
+    CHECK(leak_alloc<int>::allocs == leak_alloc<int>::deallocs);
+  }
+  {
+    // empty adopted range fires as deallocate-only (block already freed)
+    fix<int, 4> f(std::allocator<int>{});
+    auto [blk, cap] = f.allocate_unchecked_(4);
+    int* raw        = std::to_address(blk);
+    {
+      typename fix<int, 4>::reallocation_guard g{ blk, cap, raw, raw, f.test_alloc() };
+    }
+    CHECK(true); // reached without touching an empty range
+  }
+}
+
+// ------------------------------------------------------------------
 // 19. constexpr evaluation (heap paths only; stack constexpr needs
 //     C++26 start_lifetime, unavailable in this toolchain)
 // ------------------------------------------------------------------
@@ -1932,6 +2739,13 @@ int main()
   test_swap();
   test_equal_compare();
   test_exceptions();
+  test_insert_uncounted_range();
+  test_insert_counted_range();
+  test_insert_range_dispatch();
+  test_source_overlaps();
+  test_destruction_guard();
+  test_resize();
+  test_reallocation_guard();
   test_fancy();
   test_boundary();
   test_fuzz();
