@@ -433,7 +433,11 @@ protected:
   template <std::input_iterator InIt>
   [[nodiscard]] constexpr bool source_overlaps_storage_(InIt first, size_type const count) const noexcept
   {
-    if constexpr (std::contiguous_iterator<InIt>) {
+    // Same value type only: cross-type contiguous sources (e.g. narrower
+    // unsigned block ranges) have no element-pointer conversion, and cannot
+    // alias through well-defined code, so there is nothing to detect.
+    if constexpr (std::contiguous_iterator<InIt> &&
+                  std::same_as<std::remove_cv_t<std::iter_value_t<InIt>>, value_type>) {
       if (count == 0 || empty()) return false;
       value_type const *const src_first = std::to_address(first);
       value_type const *const dst_first = data();
@@ -541,7 +545,9 @@ protected:
     if constexpr (std::sized_sentinel_for<InSent, InIt>) {
       insert_counted_range_(pos, first, static_cast<size_type>(last - first));
     } else if constexpr (std::forward_iterator<InIt>) {
-      insert_counted_range_(pos, first, static_cast<size_type>(std::distance(first, last)));
+      // ranges::distance: the sentinel may differ from the iterator
+      // (non-common forward ranges); std::distance requires one type.
+      insert_counted_range_(pos, first, static_cast<size_type>(std::ranges::distance(first, last)));
     } else {
       insert_uncounted_range_(pos, first, last);
     }
@@ -771,7 +777,9 @@ protected:
     if constexpr (std::sized_sentinel_for<InSent, InIt>) {
       assign_counted_range_(first, static_cast<size_type>(last - first));
     } else if constexpr (std::forward_iterator<InIt>) {
-      assign_counted_range_(first, static_cast<size_type>(std::distance(first, last)));
+      // ranges::distance: the sentinel may differ from the iterator
+      // (non-common forward ranges); std::distance requires one type.
+      assign_counted_range_(first, static_cast<size_type>(std::ranges::distance(first, last)));
     } else {
       assign_uncounted_range_(first, last);
     }
