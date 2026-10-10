@@ -21,8 +21,8 @@
 // `_ALLOCA_S_THRESHOLD`, `_MarkAllocaS`, and `_MallocaComputeSize`.
 
 #include <cassert> // assert
-#include <cstddef> // size_t、std::max_align_t
-#include <cstdint> // uint32_t、uintptr_t
+#include <cstddef> // std::size_t、std::max_align_t
+#include <cstdint> // std::uint32_t、uintptr_t
 #include <cstdlib> // std::malloc、std::free
 #include <cstring> // std::memcpy
 #include <limits>  // std::numeric_limits
@@ -48,51 +48,51 @@ namespace stdex
 
 namespace hybrid_alloc_detail
 {
-inline constexpr size_t kHybridMaxAlign = alignof(std::max_align_t);
+inline constexpr std::size_t kHybridMaxAlign = alignof(std::max_align_t);
 
 struct alignas(kHybridMaxAlign) hybrid_alloc_header
 {
-  uint32_t marker;   // origin and state of this allocation
-  void *raw_ptr;     // base pointer used for free (may differ from user ptr)
-  size_t alloc_size; // total allocated size
-  size_t alignment;  // alignment used for this allocation
+  std::uint32_t marker;        // origin and state of this allocation
+  void *raw_ptr;          // base pointer used for free (may differ from user ptr)
+  std::size_t alloc_size; // total allocated size
+  std::size_t alignment;  // alignment used for this allocation
 };
 
-inline constexpr size_t kHybridAllocHeaderSize = sizeof(hybrid_alloc_header);
+inline constexpr std::size_t kHybridAllocHeaderSize = sizeof(hybrid_alloc_header);
 
 static_assert(kHybridAllocHeaderSize % kHybridMaxAlign == 0, "hybrid_alloc_header size must be multiple of max_align_t");
 
 /// Marker values distinguish stack vs heap origin and detect double-frees.
-inline constexpr uint32_t kAllocStackMarker        = 0xCC'CC;
-inline constexpr uint32_t kAllocHeapMarker         = 0xDD'DD;
-inline constexpr uint32_t kAlignedAllocStackMarker = 0xEE'EE;
-inline constexpr uint32_t kAlignedAllocHeapMarker  = 0xFF'FF;
-inline constexpr uint32_t kAllocFreedHeapMarker    = 0xDE'AD;
-inline constexpr uint32_t kAllocFreedStackMarker   = 0xBE'EF;
+inline constexpr std::uint32_t kAllocStackMarker        = 0xCC'CC;
+inline constexpr std::uint32_t kAllocHeapMarker         = 0xDD'DD;
+inline constexpr std::uint32_t kAlignedAllocStackMarker = 0xEE'EE;
+inline constexpr std::uint32_t kAlignedAllocHeapMarker  = 0xFF'FF;
+inline constexpr std::uint32_t kAllocFreedHeapMarker    = 0xDE'AD;
+inline constexpr std::uint32_t kAllocFreedStackMarker   = 0xBE'EF;
 
-inline constexpr bool is_stack_marker(uint32_t marker) noexcept
+inline constexpr bool is_stack_marker(std::uint32_t marker) noexcept
 {
   return marker == kAllocStackMarker || marker == kAlignedAllocStackMarker;
 }
 
-inline constexpr bool is_heap_marker(uint32_t marker) noexcept
+inline constexpr bool is_heap_marker(std::uint32_t marker) noexcept
 {
   return marker == kAllocHeapMarker || marker == kAlignedAllocHeapMarker;
 }
 
-inline constexpr bool is_freed_marker(uint32_t marker) noexcept
+inline constexpr bool is_freed_marker(std::uint32_t marker) noexcept
 {
   return marker == kAllocFreedHeapMarker || marker == kAllocFreedStackMarker;
 }
 
 // Raises sub-max_align_t alignments up to kHybridMaxAlign so that the header
 // placement logic stays uniform.
-inline constexpr size_t normalize_alignment(size_t alignment) noexcept
+inline constexpr std::size_t normalize_alignment(std::size_t alignment) noexcept
 {
   return alignment < kHybridMaxAlign ? kHybridMaxAlign : alignment;
 }
 
-inline constexpr bool is_valid_alignment(size_t alignment) noexcept
+inline constexpr bool is_valid_alignment(std::size_t alignment) noexcept
 {
   return alignment && !(alignment & (alignment - 1));
 }
@@ -101,14 +101,14 @@ inline constexpr bool is_valid_alignment(size_t alignment) noexcept
 ///
 /// Includes the user payload, header, and enough padding to satisfy alignment.
 /// Returns false for invalid alignment or overflow.
-inline constexpr bool total_size(size_t size, size_t alignment, size_t *total) noexcept
+inline constexpr bool total_size(std::size_t size, std::size_t alignment, std::size_t *total) noexcept
 {
   if (!is_valid_alignment(alignment)) return false;
 
   alignment = normalize_alignment(alignment);
 
-  size_t const padding = alignment - 1;
-  if (size > std::numeric_limits<size_t>::max() - kHybridAllocHeaderSize - padding) {
+  std::size_t const padding = alignment - 1;
+  if (size > std::numeric_limits<std::size_t>::max() - kHybridAllocHeaderSize - padding) {
     return false;
   }
 
@@ -117,22 +117,22 @@ inline constexpr bool total_size(size_t size, size_t alignment, size_t *total) n
 }
 
 // Like total_size but returns 0 on overflow.
-inline constexpr size_t total_size_or_zero(size_t size, size_t alignment) noexcept
+inline constexpr std::size_t total_size_or_zero(std::size_t size, std::size_t alignment) noexcept
 {
-  size_t total = 0;
+  std::size_t total = 0;
   total_size(size, alignment, &total);
   return total;
 }
 
 // Whether the request fits the stack threshold after accounting for overhead.
-inline bool is_use_stack(size_t size, size_t threshold, size_t alignment) noexcept
+inline bool is_use_stack(std::size_t size, std::size_t threshold, std::size_t alignment) noexcept
 {
-  size_t total;
+  std::size_t total;
   return size <= threshold && total_size(size, alignment, &total);
 }
 
 // Debug assertion that the requested alignment is within the stack limit.
-inline void check_stack_alignment(size_t alignment) noexcept
+inline void check_stack_alignment(std::size_t alignment) noexcept
 {
   assert(normalize_alignment(alignment) <= HYBRID_ALLOC_MAX_STACK_ALIGNMENT && "hybrid allocation stack alignment is too large");
 }
@@ -143,14 +143,14 @@ inline void check_stack_alignment(size_t alignment) noexcept
 /// null for stack storage and the heap base pointer otherwise.
 inline void *init_hybrid_alloc(
     void *raw,
-    size_t alignment,
-    uint32_t marker,
+    std::size_t alignment,
+    std::uint32_t marker,
     void *free_ptr,
-    size_t alloc_size) noexcept
+    std::size_t alloc_size) noexcept
 {
   if (raw == nullptr) return nullptr;
 
-  size_t const normalized_alignment = normalize_alignment(alignment);
+  std::size_t const normalized_alignment = normalize_alignment(alignment);
   assert(is_valid_alignment(alignment));
 
   auto *base = static_cast<unsigned char *>(raw) + kHybridAllocHeaderSize;
@@ -167,22 +167,22 @@ inline void *init_hybrid_alloc(
 }
 
 // Wrapper for the common stack-allocation path; raw_ptr is set to nullptr.
-inline void *init_stack_alloc(void *raw, size_t alignment, uint32_t marker, size_t alloc_size) noexcept
+inline void *init_stack_alloc(void *raw, std::size_t alignment, std::uint32_t marker, std::size_t alloc_size) noexcept
 {
   return init_hybrid_alloc(raw, alignment, marker, nullptr, alloc_size);
 }
 
 // Allocates total bytes via malloc and initialises the header.
-inline void *init_heap_alloc_with_total(size_t total, size_t alignment, uint32_t marker) noexcept
+inline void *init_heap_alloc_with_total(std::size_t total, std::size_t alignment, std::uint32_t marker) noexcept
 {
   void *raw = std::malloc(total);
   return init_hybrid_alloc(raw, alignment, marker, raw, total);
 }
 
 // Computes total size, then allocates on the heap.
-inline void *init_heap_alloc(size_t size, size_t alignment, uint32_t marker) noexcept
+inline void *init_heap_alloc(std::size_t size, std::size_t alignment, std::uint32_t marker) noexcept
 {
-  size_t total;
+  std::size_t total;
   if (!total_size(size, alignment, &total)) return nullptr;
 
   return init_heap_alloc_with_total(total, alignment, marker);
@@ -232,7 +232,7 @@ inline void hybrid_free(void *ptr) noexcept
 }
 
 /// Returns the recorded allocation size, including header and padding.
-inline size_t hybrid_get_total_size(void const *ptr) noexcept
+inline std::size_t hybrid_get_total_size(void const *ptr) noexcept
 {
   if (ptr == nullptr) return 0;
   return hybrid_alloc_detail::get_hybrid_alloc_header(ptr)->alloc_size;
@@ -242,7 +242,7 @@ inline size_t hybrid_get_total_size(void const *ptr) noexcept
 ///
 /// Heap allocations are returned unchanged. Stack allocations are copied to a
 /// new heap buffer; the original stack storage is left in place.
-inline void *hybrid_mark_persistent(void *ptr, size_t size) noexcept
+inline void *hybrid_mark_persistent(void *ptr, std::size_t size) noexcept
 {
   if (ptr == nullptr) return nullptr;
 
@@ -277,32 +277,32 @@ inline void *hybrid_mark_persistent(void *ptr, size_t size) noexcept
 /// The returned pointer is compatible with hybrid_free(). On MSVC, avoid
 /// passing expressions with side effects.
 #if defined(__GNUC__) || defined(__clang__)
-#  define HYBRID_ALLOC_THRESHOLD(size, threshold)                                        \
-    __extension__({                                                                      \
-      size_t const stdex_hybrid_size      = (size);                                      \
-      size_t const stdex_hybrid_threshold = (threshold);                                 \
-      size_t const stdex_hybrid_alignment = stdex::hybrid_alloc_detail::kHybridMaxAlign; \
-      size_t stdex_hybrid_total           = 0;                                           \
-      void *stdex_hybrid_result           = nullptr;                                     \
-      if (stdex::hybrid_alloc_detail::total_size(                                        \
-              stdex_hybrid_size,                                                         \
-              stdex_hybrid_alignment,                                                    \
-              &stdex_hybrid_total)) {                                                    \
-        if (stdex_hybrid_size <= stdex_hybrid_threshold) {                               \
-          stdex::hybrid_alloc_detail::check_stack_alignment(stdex_hybrid_alignment);     \
-          stdex_hybrid_result = stdex::hybrid_alloc_detail::init_stack_alloc(            \
-              __builtin_alloca(stdex_hybrid_total),                                      \
-              stdex_hybrid_alignment,                                                    \
-              stdex::hybrid_alloc_detail::kAllocStackMarker,                             \
-              stdex_hybrid_total);                                                       \
-        } else {                                                                         \
-          stdex_hybrid_result = stdex::hybrid_alloc_detail::init_heap_alloc_with_total(  \
-              stdex_hybrid_total,                                                        \
-              stdex_hybrid_alignment,                                                    \
-              stdex::hybrid_alloc_detail::kAllocHeapMarker);                             \
-        }                                                                                \
-      }                                                                                  \
-      stdex_hybrid_result;                                                               \
+#  define HYBRID_ALLOC_THRESHOLD(size, threshold)                                             \
+    __extension__({                                                                           \
+      std::size_t const stdex_hybrid_size      = (size);                                      \
+      std::size_t const stdex_hybrid_threshold = (threshold);                                 \
+      std::size_t const stdex_hybrid_alignment = stdex::hybrid_alloc_detail::kHybridMaxAlign; \
+      std::size_t stdex_hybrid_total           = 0;                                           \
+      void *stdex_hybrid_result                = nullptr;                                     \
+      if (stdex::hybrid_alloc_detail::total_size(                                             \
+              stdex_hybrid_size,                                                              \
+              stdex_hybrid_alignment,                                                         \
+              &stdex_hybrid_total)) {                                                         \
+        if (stdex_hybrid_size <= stdex_hybrid_threshold) {                                    \
+          stdex::hybrid_alloc_detail::check_stack_alignment(stdex_hybrid_alignment);          \
+          stdex_hybrid_result = stdex::hybrid_alloc_detail::init_stack_alloc(                 \
+              __builtin_alloca(stdex_hybrid_total),                                           \
+              stdex_hybrid_alignment,                                                         \
+              stdex::hybrid_alloc_detail::kAllocStackMarker,                                  \
+              stdex_hybrid_total);                                                            \
+        } else {                                                                              \
+          stdex_hybrid_result = stdex::hybrid_alloc_detail::init_heap_alloc_with_total(       \
+              stdex_hybrid_total,                                                             \
+              stdex_hybrid_alignment,                                                         \
+              stdex::hybrid_alloc_detail::kAllocHeapMarker);                                  \
+        }                                                                                     \
+      }                                                                                       \
+      stdex_hybrid_result;                                                                    \
     })
 #elif defined(_MSC_VER)
 #  define HYBRID_ALLOC_THRESHOLD(size, threshold)                              \
@@ -335,11 +335,11 @@ inline void *hybrid_mark_persistent(void *ptr, size_t size) noexcept
 #if defined(__GNUC__) || defined(__clang__)
 #  define HYBRID_ALIGNED_ALLOC_THRESHOLD(size, alignment, threshold)                    \
     __extension__({                                                                     \
-      size_t const stdex_hybrid_size      = (size);                                     \
-      size_t const stdex_hybrid_threshold = (threshold);                                \
-      size_t const stdex_hybrid_alignment = (alignment);                                \
-      size_t stdex_hybrid_total           = 0;                                          \
-      void *stdex_hybrid_result           = nullptr;                                    \
+      std::size_t const stdex_hybrid_size      = (size);                                \
+      std::size_t const stdex_hybrid_threshold = (threshold);                           \
+      std::size_t const stdex_hybrid_alignment = (alignment);                           \
+      std::size_t stdex_hybrid_total           = 0;                                     \
+      void *stdex_hybrid_result                = nullptr;                               \
       if (stdex::hybrid_alloc_detail::total_size(                                       \
               stdex_hybrid_size,                                                        \
               stdex_hybrid_alignment,                                                   \

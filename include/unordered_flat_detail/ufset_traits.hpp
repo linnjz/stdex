@@ -18,7 +18,7 @@
 
 namespace stdex::unordered_flat_detail
 {
-template <class KeyType, size_t N>
+template <class KeyType, std::size_t N>
 struct ufset_traits
 {
   using key_type        = KeyType;
@@ -26,7 +26,7 @@ struct ufset_traits
   using reference       = value_type &;
   using const_reference = value_type const &;
 
-  static constexpr size_t inline_capacity = N;
+  static constexpr std::size_t inline_capacity = N;
 
   static constexpr reference to_reference(value_type &val) noexcept { return val; }
 

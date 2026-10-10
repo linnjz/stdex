@@ -25,7 +25,7 @@
 
 namespace stdex
 {
-template <class KeyType, class ValueType, size_t N = 0,
+template <class KeyType, class ValueType, std::size_t N = 0,
           class Hasher = stdex::hash<KeyType>,
           class KeyEqual = std::equal_to<KeyType>,
           class Allocator = std::allocator<std::pair<KeyType, ValueType>>>
@@ -582,7 +582,7 @@ unordered_flat_map<unordered_flat_detail::range_key_t<Rng>, unordered_flat_detai
 #endif // __cpp_lib_containers_ranges
 
 // ---------- non-member swap ----------
-template <class KeyType, class ValueType, size_t N, class Hasher, class KeyEqual, class Allocator>
+template <class KeyType, class ValueType, std::size_t N, class Hasher, class KeyEqual, class Allocator>
 constexpr void swap(unordered_flat_map<KeyType, ValueType, N, Hasher, KeyEqual, Allocator> &a,
                     unordered_flat_map<KeyType, ValueType, N, Hasher, KeyEqual, Allocator> &b)
     noexcept(noexcept(a.swap(b)))
@@ -591,7 +591,7 @@ constexpr void swap(unordered_flat_map<KeyType, ValueType, N, Hasher, KeyEqual, 
 }
 
 // ---------- erase_if ----------
-template <class KeyType, class ValueType, size_t N, class Hasher, class KeyEqual, class Allocator, class Pred>
+template <class KeyType, class ValueType, std::size_t N, class Hasher, class KeyEqual, class Allocator, class Pred>
 typename unordered_flat_map<KeyType, ValueType, N, Hasher, KeyEqual, Allocator>::size_type
 erase_if(unordered_flat_map<KeyType, ValueType, N, Hasher, KeyEqual, Allocator> &c, Pred pred)
 {
@@ -609,7 +609,7 @@ erase_if(unordered_flat_map<KeyType, ValueType, N, Hasher, KeyEqual, Allocator> 
 #include <memory_resource>
 namespace stdex::pmr
 {
-template <class KeyType, class ValueType, size_t N = 0, class Hasher = stdex::hash<KeyType>, class KeyEqual = std::equal_to<KeyType>>
+template <class KeyType, class ValueType, std::size_t N = 0, class Hasher = stdex::hash<KeyType>, class KeyEqual = std::equal_to<KeyType>>
 using unordered_flat_map = stdex::unordered_flat_map<
     KeyType,
     ValueType,

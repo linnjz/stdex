@@ -17,7 +17,7 @@
 #pragma once
 
 #include <cassert> // assert
-#include <cstdint> // size_t
+#include <cstdint> // std::size_t
 #include <memory>  // std::construct_at
 #include <type_traits> // std::is_constant_evaluated
 
@@ -70,7 +70,7 @@ public:
       std::construct_at(&g.slot_fp_words_);
       // The scalar layout interleaves slot bits across 16-bit lanes, so the
       // sentinel mark at slot N-1 lands on bit N-1 of the first word.
-      g.slot_fp_words_[0] = uint64_t(slot_sentinel_mark) << (capacity() - 1);
+      g.slot_fp_words_[0] = std::uint64_t(slot_sentinel_mark) << (capacity() - 1);
       g.slot_fp_words_[1] = 0;
     }
 
@@ -80,7 +80,7 @@ public:
 
 private:
 #if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (_M_IX86_FP >= 2)
-  static constexpr uint32_t fingerprint_table[] = {
+  static constexpr std::uint32_t fingerprint_table[] = {
     0x08080808u,0x09090909u,0x02020202u,0x03030303u,0x04040404u,0x05050505u,
     0x06060606u,0x07070707u,0x08080808u,0x09090909u,0x0A0A0A0Au,0x0B0B0B0Bu,
     0x0C0C0C0Cu,0x0D0D0D0Du,0x0E0E0E0Eu,0x0F0F0F0Fu,0x10101010u,0x11111111u,
@@ -126,12 +126,12 @@ private:
     0xFCFCFCFCu,0xFDFDFDFDu,0xFEFEFEFEu,0xFFFFFFFFu,
   };
 
-  static constexpr int broadcast_fingerprint(size_t hash) noexcept
+  static constexpr int broadcast_fingerprint(std::size_t hash) noexcept
   {
     return static_cast<int>(fingerprint_table[static_cast<unsigned char>(hash)]);
   }
 
-  static constexpr unsigned char get_fingerprint_byte(size_t hash) noexcept
+  static constexpr unsigned char get_fingerprint_byte(std::size_t hash) noexcept
   {
     return static_cast<unsigned char>(broadcast_fingerprint(hash));
   }
@@ -155,26 +155,26 @@ private:
     240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255,
   };
 
-  static constexpr unsigned char get_fingerprint_byte(size_t hash) noexcept
+  static constexpr unsigned char get_fingerprint_byte(std::size_t hash) noexcept
   {
     return fingerprint_table[static_cast<unsigned char>(hash)];
   }
 #endif
 
 public:
-  static constexpr size_t capacity() noexcept { return 15; }
+  static constexpr std::size_t capacity() noexcept { return 15; }
 
   [[nodiscard]]
 #if !defined(DEBUG) && !defined(_DEBUG)
   [[msvc::forceinline, gnu::always_inline]]
 #endif
-  constexpr int fingerprint_mask(size_t hash) const noexcept
+  constexpr int fingerprint_mask(std::size_t hash) const noexcept
   {
     if constexpr (is_simd_enabled) {
       if (std::is_constant_evaluated()) {
         auto fp  = get_fingerprint_byte(hash);
         int mask = 0;
-        for (size_t i = 0; i < capacity(); ++i) {
+        for (std::size_t i = 0; i < capacity(); ++i) {
           if (slot_fp_bytes_[i] == fp) mask |= (1 << i);
         }
         return mask;
@@ -186,7 +186,7 @@ public:
 #endif
       }
     } else {
-      constexpr uint64_t fp_match_slot_mask[] = {
+      constexpr std::uint64_t fp_match_slot_mask[] = {
         0x00'00'00'00'00'00'00'00ull,
         0x00'00'00'00'00'00'ff'ffull,
         0x00'00'00'00'ff'ff'00'00ull,
@@ -205,15 +205,15 @@ public:
         0xff'ff'ff'ff'ff'ff'ff'ffull,
       };
 
-      size_t code = static_cast<size_t>(get_fingerprint_byte(hash));
+      std::size_t code = static_cast<std::size_t>(get_fingerprint_byte(hash));
 
       auto const low_nibble  = code & 0xFu;
       auto const high_nibble = code >> 4;
-      uint64_t masked_low    = slot_fp_words_[0] ^ fp_match_slot_mask[low_nibble];
-      uint64_t masked_high   = slot_fp_words_[1] ^ fp_match_slot_mask[high_nibble];
-      uint64_t combined      = ~(masked_high | masked_low);
+      std::uint64_t masked_low    = slot_fp_words_[0] ^ fp_match_slot_mask[low_nibble];
+      std::uint64_t masked_high   = slot_fp_words_[1] ^ fp_match_slot_mask[high_nibble];
+      std::uint64_t combined      = ~(masked_high | masked_low);
 
-      uint32_t folded = static_cast<uint32_t>(combined & (combined >> 32));
+      std::uint32_t folded = static_cast<std::uint32_t>(combined & (combined >> 32));
       folded &= folded >> 16;
 
       return folded & 0x7F'FF;
@@ -224,12 +224,12 @@ public:
   {
     if constexpr (is_simd_enabled) {
       if (std::is_constant_evaluated()) {
-        for (size_t i = 0; i < (sizeof(slot_fp_bytes_) / sizeof(slot_fp_bytes_[0])); ++i) slot_fp_bytes_[i] = 0;
+        for (std::size_t i = 0; i < (sizeof(slot_fp_bytes_) / sizeof(slot_fp_bytes_[0])); ++i) slot_fp_bytes_[i] = 0;
       } else {
 #if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (_M_IX86_FP >= 2)
         _mm_store_si128(reinterpret_cast<__m128i *>(slot_fp_bytes_), _mm_setzero_si128());
 #elif (defined(__ARM_NEON__) || defined(__ARM_NEON)) && !defined(__ARM_BIG_ENDIAN)
-        vst1q_u8(reinterpret_cast<uint8_t *>(slot_fp_bytes_), vdupq_n_u8(0));
+        vst1q_u8(reinterpret_cast<std::uint8_t *>(slot_fp_bytes_), vdupq_n_u8(0));
 #endif
       }
     } else {
@@ -237,7 +237,7 @@ public:
     }
   }
 
-  constexpr void reset(size_t slot_index) noexcept
+  constexpr void reset(std::size_t slot_index) noexcept
   {
     assert(slot_index < capacity() && "slot index out of range");
 #if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (_M_IX86_FP >= 2) || \
@@ -260,7 +260,7 @@ public:
         // expression.  Consteval callers must clear via reset(group, slot).
         throw;
       } else {
-        size_t pos = reinterpret_cast<uintptr_t>(byte) % sizeof(group15);
+        std::size_t pos = reinterpret_cast<uintptr_t>(byte) % sizeof(group15);
         reinterpret_cast<group15 *>(byte - pos)->reset(pos);
       }
     }
@@ -270,7 +270,7 @@ public:
 #if !defined(DEBUG) && !defined(_DEBUG)
   [[msvc::forceinline, gnu::always_inline]]
 #endif
-  constexpr void set_fingerprint_hash(size_t slot_index, size_t hash) noexcept
+  constexpr void set_fingerprint_hash(std::size_t slot_index, std::size_t hash) noexcept
   {
     assert(slot_index < capacity() && "slot index out of range");
 #if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (_M_IX86_FP >= 2) || \
@@ -285,7 +285,7 @@ public:
 #if !defined(DEBUG) && !defined(_DEBUG)
   [[msvc::forceinline, gnu::always_inline]]
 #endif
-  constexpr void set_overflow_mark(size_t hash) noexcept
+  constexpr void set_overflow_mark(std::size_t hash) noexcept
   {
     if constexpr (is_simd_enabled) {
       overflow() |= static_cast<unsigned char>(1u << (hash % 8));
@@ -293,13 +293,13 @@ public:
       if (std::is_constant_evaluated()) {
         // Scalar layout: the overflow flag of lane j = hash % 8 lives at bit 15
         // of the j-th 16-bit lane, i.e. bit 15 + 16 * (j % 4) of word j / 4.
-        auto const lane = uint64_t(0x80'00u) << (16 * (hash % 4));
+        auto const lane = std::uint64_t(0x80'00u) << (16 * (hash % 4));
         if ((hash % 8) < 4)
           slot_fp_words_[0] |= lane;
         else
           slot_fp_words_[1] |= lane;
       } else {
-        reinterpret_cast<uint16_t *>(slot_fp_words_)[hash % 8] |= 0x80'00u;
+        reinterpret_cast<std::uint16_t *>(slot_fp_words_)[hash % 8] |= 0x80'00u;
       }
     }
   }
@@ -308,31 +308,31 @@ public:
 #if !defined(DEBUG) && !defined(_DEBUG)
   [[msvc::forceinline, gnu::always_inline]]
 #endif
-  constexpr bool is_overflow_by_hash(size_t hash) const noexcept
+  constexpr bool is_overflow_by_hash(std::size_t hash) const noexcept
   {
     if constexpr (is_simd_enabled) {
       constexpr unsigned char shift[] = { 1, 2, 4, 8, 16, 32, 64, 128 };
       return (overflow() & shift[hash % 8]) != 0;
     } else {
       if (std::is_constant_evaluated()) {
-        auto const lane = uint64_t(0x80'00u) << (16 * (hash % 4));
+        auto const lane = std::uint64_t(0x80'00u) << (16 * (hash % 4));
         return (((hash % 8) < 4 ? slot_fp_words_[0] : slot_fp_words_[1]) & lane) != 0;
       } else {
-        return reinterpret_cast<uint16_t const *>(slot_fp_words_)[hash % 8] & 0x80'00u;
+        return reinterpret_cast<std::uint16_t const *>(slot_fp_words_)[hash % 8] & 0x80'00u;
       }
     }
   }
 
-  constexpr bool is_overflow_by_slot(size_t slot_index) const noexcept
+  constexpr bool is_overflow_by_slot(std::size_t slot_index) const noexcept
   {
     if constexpr (is_simd_enabled) {
-      return is_overflow_by_hash(static_cast<size_t>(slot_fp_bytes_[slot_index]));
+      return is_overflow_by_hash(static_cast<std::size_t>(slot_fp_bytes_[slot_index]));
     } else {
       if (std::is_constant_evaluated()) {
-        auto const lane = uint64_t(0x80'00u) << (16 * (slot_index % 4));
+        auto const lane = std::uint64_t(0x80'00u) << (16 * (slot_index % 4));
         return (((slot_index % 8) < 4 ? slot_fp_words_[0] : slot_fp_words_[1]) & lane) != 0;
       } else {
-        return reinterpret_cast<uint16_t const *>(slot_fp_words_)[slot_index % 8] & 0x80'00u;
+        return reinterpret_cast<std::uint16_t const *>(slot_fp_words_)[slot_index % 8] & 0x80'00u;
       }
     }
   }
@@ -340,14 +340,14 @@ public:
   /*
   static bool is_overflow(unsigned char const *byte)
   {
-    size_t pos = reinterpret_cast<uintptr_t>(byte) % sizeof(group15);
+    std::size_t pos = reinterpret_cast<uintptr_t>(byte) % sizeof(group15);
     auto *ptr  = reinterpret_cast<group15 const *>(byte - pos);
     if constexpr (is_simd_enabled) {
-      return ptr->is_overflow_by_hash(static_cast<size_t>(*byte));
+      return ptr->is_overflow_by_hash(static_cast<std::size_t>(*byte));
     } else {
-      uint64_t x = ((ptr->slot_fp_words_[0]) >> pos) & 0x00'01'00'01'00'01ull;
-      uint32_t y = static_cast<uint32_t>(x | (x >> 15) | (x >> 30));
-      return ptr->is_overflow_by_hash(static_cast<size_t>(y));
+      std::uint64_t x = ((ptr->slot_fp_words_[0]) >> pos) & 0x00'01'00'01'00'01ull;
+      std::uint32_t y = static_cast<std::uint32_t>(x | (x >> 15) | (x >> 30));
+      return ptr->is_overflow_by_hash(static_cast<std::size_t>(y));
     }
   }
   */
@@ -362,15 +362,15 @@ public:
 #endif
   }
 
-  constexpr bool is_sentinel_by_slot(size_t slot_index) const noexcept
+  constexpr bool is_sentinel_by_slot(std::size_t slot_index) const noexcept
   {
     assert(slot_index < capacity() && "slot index out of range");
     if constexpr (is_simd_enabled) {
       return slot_index == capacity() - 1 && slot_fp_bytes_[slot_index] == slot_sentinel_mark;
     } else {
       return slot_index == capacity() - 1 &&
-             (slot_fp_words_[0] & uint64_t(0x40'00'40'00'40'00'40'00ull)) == uint64_t(0x40'00ull) &&
-             (slot_fp_words_[1] & uint64_t(0x40'00'40'00'40'00'40'00ull)) == 0;
+             (slot_fp_words_[0] & std::uint64_t(0x40'00'40'00'40'00'40'00ull)) == std::uint64_t(0x40'00ull) &&
+             (slot_fp_words_[1] & std::uint64_t(0x40'00'40'00'40'00'40'00ull)) == 0;
     }
   }
 
@@ -381,7 +381,7 @@ public:
   }
   */
 
-  constexpr bool is_occupied_by_slot(size_t slot_index) const noexcept
+  constexpr bool is_occupied_by_slot(std::size_t slot_index) const noexcept
   {
     assert(slot_index < capacity() && "slot index out of range");
     if constexpr (is_simd_enabled) {
@@ -413,7 +413,7 @@ public:
     if constexpr (is_simd_enabled) {
       if (std::is_constant_evaluated()) {
         int mask = 0;
-        for (size_t i = 0; i < capacity(); ++i) {
+        for (std::size_t i = 0; i < capacity(); ++i) {
           if (slot_fp_bytes_[i] == slot_available_mark) mask |= (1 << i);
         }
         return mask;
@@ -425,8 +425,8 @@ public:
 #endif
       }
     } else {
-      uint64_t x = ~(slot_fp_words_[0] | slot_fp_words_[1]);
-      uint32_t y = static_cast<uint32_t>(x & (x >> 32));
+      std::uint64_t x = ~(slot_fp_words_[0] | slot_fp_words_[1]);
+      std::uint32_t y = static_cast<std::uint32_t>(x & (x >> 32));
       y &= y >> 16;
       return y & 0x7F'FF;
     }
@@ -437,7 +437,7 @@ public:
     if constexpr (is_simd_enabled) {
       if (std::is_constant_evaluated()) {
         int mask = 0;
-        for (size_t i = 0; i < capacity(); ++i) {
+        for (std::size_t i = 0; i < capacity(); ++i) {
           if (slot_fp_bytes_[i] != slot_available_mark) mask |= (1 << i);
         }
         return mask;
@@ -449,8 +449,8 @@ public:
 #endif
       }
     } else {
-      uint64_t x = slot_fp_words_[0] | slot_fp_words_[1];
-      uint32_t y = static_cast<uint32_t>(x | (x >> 32));
+      std::uint64_t x = slot_fp_words_[0] | slot_fp_words_[1];
+      std::uint32_t y = static_cast<std::uint32_t>(x | (x >> 32));
       y |= y >> 16;
       return y & 0x7F'FF;
     }
@@ -465,12 +465,12 @@ private:
 #elif (defined(__ARM_NEON__) || defined(__ARM_NEON)) && !defined(__ARM_BIG_ENDIAN)
   uint8x16_t load_fp_vector() const
   {
-    return vld1q_u8(reinterpret_cast<uint8_t const *>(slot_fp_bytes_));
+    return vld1q_u8(reinterpret_cast<std::uint8_t const *>(slot_fp_bytes_));
   }
 
   static int simde_mm_movemask_epi8(uint8x16_t input_vec)
   {
-    static constexpr uint8_t bit_weights[16] = {
+    static constexpr std::uint8_t bit_weights[16] = {
       1 << 0, 1 << 1, 1 << 2, 1 << 3, 1 << 4, 1 << 5, 1 << 6, 1 << 7,
       1 << 0, 1 << 1, 1 << 2, 1 << 3, 1 << 4, 1 << 5, 1 << 6, 1 << 7,
     };
@@ -493,9 +493,9 @@ private:
   // The scalar bit layout is expressed with plain integer masks so that the
   // constant-evaluated and runtime paths share one representation on platforms
   // without SIMD.
-  constexpr void set_fingerprint_hash_impl(size_t slot_index, unsigned char fp_hash) noexcept
+  constexpr void set_fingerprint_hash_impl(std::size_t slot_index, unsigned char fp_hash) noexcept
   {
-    constexpr uint64_t write_masks[] = {
+    constexpr std::uint64_t write_masks[] = {
       0x00'00'00'00'00'00'00'00ull,
       0x00'00'00'00'00'00'00'01ull,
       0x00'00'00'00'00'01'00'00ull,
@@ -513,7 +513,7 @@ private:
       0x00'01'00'01'00'01'00'00ull,
       0x00'01'00'01'00'01'00'01ull,
     };
-    constexpr uint64_t clear_masks[] = {
+    constexpr std::uint64_t clear_masks[] = {
       0x00'01'00'01'00'01'00'01ull,
       0x00'01'00'01'00'01'00'00ull,
       0x00'01'00'01'00'00'00'01ull,
@@ -549,7 +549,7 @@ private:
   union
   {
     alignas(16) unsigned char slot_fp_bytes_[16];
-    alignas(16) uint64_t slot_fp_words_[2];
+    alignas(16) std::uint64_t slot_fp_words_[2];
   };
 };
 } // namespace stdex::unordered_flat_detail

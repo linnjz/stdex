@@ -90,7 +90,7 @@ struct inline_storage : public Traits
     group_type::make_dummy_group(), group_type::make_dummy_group()
   };*/
 
-  enum class storage_mode : uint8_t { heap = 0, stack = 1 };
+  enum class storage_mode : std::uint8_t { heap = 0, stack = 1 };
 
   struct alignas(16) heap_block;
   struct alignas(16) stack_block;
@@ -194,7 +194,7 @@ struct inline_storage : public Traits
   constexpr void allocate_unchecked_(size_type capacity)
   {
     assert(is_heap() && "allocate_unchecked_() requires heap mode");
-    group_index_shift_ = static_cast<uint8_t>(group_index_shift_by_(capacity));
+    group_index_shift_ = static_cast<std::uint8_t>(group_index_shift_by_(capacity));
     group_count_mask_  = group_count_by_(static_cast<size_type>(group_index_shift_)) - 1; // Power of 2 alignment
     max_load_          = initial_max_load_(capacity_unchecked_());                        // Depends on group_count
 
@@ -360,7 +360,7 @@ struct inline_storage : public Traits
 #endif
       initial_group_array_(stack_.groups_, (inline_capacity + 1) / group_size_());
       storage_mode_      = storage_mode::stack;
-      group_index_shift_ = static_cast<uint8_t>(group_index_shift_by_(inline_capacity));
+      group_index_shift_ = static_cast<std::uint8_t>(group_index_shift_by_(inline_capacity));
       group_count_mask_  = (inline_capacity + 1) / group_size_() - 1;
       size_              = 0;
       max_load_          = inline_capacity;
@@ -390,7 +390,7 @@ struct inline_storage : public Traits
       heap_.elements_ptr_ = pointer {};
       heap_.groups_ptr_   = group_pointer {};
       storage_mode_       = storage_mode::heap;
-      group_index_shift_  = static_cast<uint8_t>(group_index_shift_by_(0));
+      group_index_shift_  = static_cast<std::uint8_t>(group_index_shift_by_(0));
       group_count_mask_   = min_group_count - 1;
       size_               = 0;
       max_load_           = initial_max_load_(0);
@@ -408,7 +408,7 @@ struct inline_storage : public Traits
       // (elements_ stays raw storage and is constructed on insert).
       initial_group_array_(stack_.groups_, (inline_capacity + 1) / group_size_());
       storage_mode_      = storage_mode::stack;
-      group_index_shift_ = static_cast<uint8_t>(group_index_shift_by_(inline_capacity));
+      group_index_shift_ = static_cast<std::uint8_t>(group_index_shift_by_(inline_capacity));
       group_count_mask_  = (inline_capacity + 1) / group_size_() - 1;
       size_              = 0;
       max_load_          = inline_capacity;
@@ -459,11 +459,11 @@ struct inline_storage : public Traits
 
   struct triangular_probing
   {
-    constexpr triangular_probing(size_t pos) noexcept : pos_ { pos } , step_ { } {}
+    constexpr triangular_probing(std::size_t pos) noexcept : pos_ { pos } , step_ { } {}
 
-    constexpr size_t position() const noexcept { return pos_; }
+    constexpr std::size_t position() const noexcept { return pos_; }
 
-    constexpr bool next(size_t group_count_mask) noexcept
+    constexpr bool next(std::size_t group_count_mask) noexcept
     {
       ++step_;
       pos_ = (pos_ + step_) & group_count_mask;
@@ -471,7 +471,7 @@ struct inline_storage : public Traits
     }
 
   private:
-    size_t pos_, step_;
+    std::size_t pos_, step_;
   };
   using prober_type = triangular_probing;
 
@@ -631,7 +631,7 @@ struct inline_storage : public Traits
   };
 
   storage_mode storage_mode_;
-  uint8_t group_index_shift_;
+  std::uint8_t group_index_shift_;
   size_type group_count_mask_;
   size_type size_;
   size_type max_load_;

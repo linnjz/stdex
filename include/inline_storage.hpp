@@ -53,7 +53,7 @@ struct stay_on_heap_t
 
 inline constexpr stay_on_heap_t stay_on_heap {};
 
-template <class T, size_t N, class Allocator = std::allocator<T>>
+template <class T, std::size_t N, class Allocator = std::allocator<T>>
 struct inline_storage
 {
 public:
@@ -908,7 +908,7 @@ public:
   }
 
 protected:
-  template <size_t M, class OtherAlloc>
+  template <std::size_t M, class OtherAlloc>
   [[nodiscard]] constexpr bool storage_equal_(inline_storage<value_type, M, OtherAlloc> const &other) const
       noexcept(requires (value_type const &a, value_type const &b) { { a == b } noexcept; })
   {
@@ -925,7 +925,7 @@ protected:
     return true;
   }
 
-  template <size_t M, class OtherAlloc>
+  template <std::size_t M, class OtherAlloc>
   requires std::three_way_comparable<value_type>
   [[nodiscard]] constexpr auto storage_compare_(inline_storage<value_type, M, OtherAlloc> const &other) const
       noexcept(requires (value_type const &a, value_type const &b) { { a <=> b } noexcept; })

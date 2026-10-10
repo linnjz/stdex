@@ -45,7 +45,7 @@ using range_mapped_t = std::tuple_element_t<1, std::ranges::range_value_t<Rng>>;
 template <class A>
 concept is_allocator = requires (A &a) {
   typename A::value_type;
-  a.deallocate(a.allocate(size_t{1}), size_t{1});
+  a.deallocate(a.allocate(std::size_t{1}), std::size_t{1});
 };
 
 template <class Alloc>
@@ -358,7 +358,7 @@ private:
     this->max_load_          = other.max_load_;
 
     other.heap_              = {};
-    other.group_index_shift_ = static_cast<uint8_t>(group_index_shift_by_(0));
+    other.group_index_shift_ = static_cast<std::uint8_t>(group_index_shift_by_(0));
     other.group_count_mask_  = group_count_by_(static_cast<size_type>(other.group_index_shift_)) - 1;
     other.size_              = 0;
     other.max_load_          = other.initial_max_load_(other.capacity_unchecked_());

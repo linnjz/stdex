@@ -36,7 +36,7 @@ namespace basic_fixed_string_detail
 
 /// Mandates check: the last element of the array must be a null terminator (see proposal sections [P3094R5]/9.4.3.4/9.4.3.8/9.4.3.9).
 /// Only called in a consteval context, using throw to trigger a compile-time error.
-template <class charT, size_t N>
+template <class charT, std::size_t N>
 consteval void fixed_string_require_nt(charT const (&arr)[N], char const *what)
 {
   if (arr[N - 1] != charT()) {
@@ -61,7 +61,7 @@ consteval void fixed_string_require_nt(charT const (&arr)[N], char const *what)
 /// To resolve this, this implementation explicitly guarantees the terminator
 /// by writing "out[Size-1] = charT{}". This allows the class to remain trivial,
 /// as documented in the notes on "data_" and the defaulted default constructor.
-template <class charT, size_t Size, size_t... Is, std::convertible_to<charT>... Chars>
+template <class charT, std::size_t Size, std::size_t... Is, std::convertible_to<charT>... Chars>
 constexpr void fixed_string_init(charT (&out)[Size], std::index_sequence<Is...> /*unused*/, Chars... chars) noexcept
 {
   ((out[Is] = static_cast<charT>(chars)), ...);
@@ -89,10 +89,10 @@ constexpr void fixed_string_init(charT (&out)[Size], std::index_sequence<Is...> 
 ///   "error: is not a constant expression because it refers to an
 ///    incompletely initialized variable"
 /// when used in "constexpr std::inplace_vector" (observed on GCC 16.2).
-template <class charT, size_t Size, std::input_iterator It, std::sentinel_for<It> S>
+template <class charT, std::size_t Size, std::input_iterator It, std::sentinel_for<It> S>
 constexpr void fixed_string_copy(charT (&out)[Size], It first, S last) noexcept
 {
-  size_t i = 0;
+  std::size_t i = 0;
   for (; first != last && i < Size - 1; ++first, ++i) {
     out[i] = static_cast<charT>(*first);
   }
@@ -103,7 +103,7 @@ constexpr void fixed_string_copy(charT (&out)[Size], It first, S last) noexcept
 
 } // namespace basic_fixed_string_detail
 
-template <std::integral charT, size_t N>
+template <std::integral charT, std::size_t N>
 class basic_fixed_string
 {
 public:
@@ -153,8 +153,8 @@ public:
   using iterator               = const_iterator;
   using const_reverse_iterator = std::reverse_iterator<const_iterator>;
   using reverse_iterator       = const_reverse_iterator;
-  using size_type              = size_t;
-  using difference_type        = ptrdiff_t;
+  using size_type              = std::size_t;
+  using difference_type        = std::ptrdiff_t;
 
   /// @brief Trivial default constructor -- deviation from P3094R5:6.1 (see "data_" note).
   /// Required to keep the type trivial and to satisfy "std::inplace_vector"'s "is_trivial_v" / "_Tp()" initialization path.
@@ -253,11 +253,11 @@ public:
 
   constexpr operator std::basic_string_view<charT>() const noexcept { return view(); }
 
-  template <size_t N2>
+  template <std::size_t N2>
   friend constexpr basic_fixed_string<charT, N + N2>
   operator+ (basic_fixed_string const &lhs, basic_fixed_string<charT, N2> const &rhs) noexcept
   {
-    return [&]<size_t... Is>(std::index_sequence<Is...>)
+    return [&]<std::size_t... Is>(std::index_sequence<Is...>)
     {
       return basic_fixed_string<charT, N + N2> { (Is < N ? lhs[Is] : rhs[Is - N])... };
     }(std::make_index_sequence<N + N2> {});
@@ -266,7 +266,7 @@ public:
   friend constexpr basic_fixed_string<charT, N + 1>
   operator+ (basic_fixed_string const &lhs, charT rhs) noexcept
   {
-    return [&]<size_t... Is>(std::index_sequence<Is...>)
+    return [&]<std::size_t... Is>(std::index_sequence<Is...>)
     {
       return basic_fixed_string<charT, N + 1> { (Is < N ? lhs[Is] : rhs)... };
     }(std::make_index_sequence<N + 1> {});
@@ -275,55 +275,55 @@ public:
   friend constexpr basic_fixed_string<charT, 1 + N>
   operator+ (charT lhs, basic_fixed_string const &rhs) noexcept
   {
-    return [&]<size_t... Is>(std::index_sequence<Is...>)
+    return [&]<std::size_t... Is>(std::index_sequence<Is...>)
     {
       return basic_fixed_string<charT, 1 + N> { (Is == 0 ? lhs : rhs[Is - 1])... };
     }(std::make_index_sequence<1 + N> {});
   }
 
-  template <size_t N2>
+  template <std::size_t N2>
   consteval friend basic_fixed_string<charT, N + N2 - 1>
   operator+ (basic_fixed_string const &lhs, charT const (&rhs)[N2]) noexcept
   {
     basic_fixed_string_detail::fixed_string_require_nt(rhs, "basic_fixed_string: array argument must be null-terminated");
-    return [&]<size_t... Is>(std::index_sequence<Is...>)
+    return [&]<std::size_t... Is>(std::index_sequence<Is...>)
     {
       return basic_fixed_string<charT, N + N2 - 1> { (Is < N ? lhs[Is] : rhs[Is - N])... };
     }(std::make_index_sequence<N + N2 - 1> {});
   }
 
-  template <size_t N1>
+  template <std::size_t N1>
   consteval friend basic_fixed_string<charT, N1 + N - 1>
   operator+ (charT const (&lhs)[N1], basic_fixed_string const &rhs) noexcept
   {
     basic_fixed_string_detail::fixed_string_require_nt(lhs, "basic_fixed_string: array argument must be null-terminated");
-    return [&]<size_t... Is>(std::index_sequence<Is...>)
+    return [&]<std::size_t... Is>(std::index_sequence<Is...>)
     {
       return basic_fixed_string<charT, N1 + N - 1> { (Is < N1 - 1 ? lhs[Is] : rhs[Is - (N1 - 1)])... };
     }(std::make_index_sequence<N1 + N - 1> {});
   }
 
   // non-member comparison functions
-  template <size_t N2>
+  template <std::size_t N2>
   friend constexpr bool operator== (basic_fixed_string const &lhs, basic_fixed_string<charT, N2> const &rhs)
   {
     return lhs.view() == rhs.view();
   }
 
-  template <size_t N2>
+  template <std::size_t N2>
   friend consteval bool operator== (basic_fixed_string const &lhs, charT const (&rhs)[N2])
   {
     basic_fixed_string_detail::fixed_string_require_nt(rhs, "basic_fixed_string: array argument must be null-terminated");
     return lhs.view() == basic_string_view<charT>(rhs, rhs + N2 - 1);
   }
 
-  template <size_t N2>
+  template <std::size_t N2>
   friend constexpr auto operator<=> (basic_fixed_string const &lhs, basic_fixed_string<charT, N2> const &rhs)
   {
     return lhs.view() <=> rhs.view();
   }
 
-  template <size_t N2>
+  template <std::size_t N2>
   friend consteval auto operator<=> (basic_fixed_string const &lhs, charT const (&rhs)[N2])
   {
     basic_fixed_string_detail::fixed_string_require_nt(rhs, "basic_fixed_string: array argument must be null-terminated");
@@ -341,31 +341,31 @@ public:
 template <typename CharT, std::convertible_to<CharT>... Rest>
 basic_fixed_string(CharT, Rest...) -> basic_fixed_string<CharT, 1 + sizeof...(Rest)>;
 
-template <typename charT, size_t N>
+template <typename charT, std::size_t N>
 basic_fixed_string(charT const (&str)[N]) -> basic_fixed_string<charT, N - 1>;
 
 #ifdef __cpp_lib_containers_ranges
-template <typename CharT, size_t N>
+template <typename CharT, std::size_t N>
 basic_fixed_string(std::from_range_t, std::array<CharT, N>) -> basic_fixed_string<CharT, N>;
 #endif // __cpp_lib_containers_ranges
 
 // specialized algorithms
-template <class charT, size_t N>
+template <class charT, std::size_t N>
 constexpr void swap(basic_fixed_string<charT, N> &x, basic_fixed_string<charT, N> &y) noexcept
 {
   x.swap(y);
 }
 
 // basic_fixed_string typedef-names
-template <size_t N>
+template <std::size_t N>
 using fixed_string = basic_fixed_string<char, N>;
-template <size_t N>
+template <std::size_t N>
 using fixed_u8string = basic_fixed_string<char8_t, N>;
-template <size_t N>
+template <std::size_t N>
 using fixed_u16string = basic_fixed_string<char16_t, N>;
-template <size_t N>
+template <std::size_t N>
 using fixed_u32string = basic_fixed_string<char32_t, N>;
-template <size_t N>
+template <std::size_t N>
 using fixed_wstring = basic_fixed_string<wchar_t, N>;
 
 // The UDL proposal was rejected [P3094R5]/6.8
@@ -428,33 +428,33 @@ namespace std
 {
 
 // hash support
-template <size_t N>
+template <std::size_t N>
 struct hash<std::fixed_string<N>> : hash<string_view>
 {
 };
 
-template <size_t N>
+template <std::size_t N>
 struct hash<std::fixed_u8string<N>> : hash<u8string_view>
 {
 };
 
-template <size_t N>
+template <std::size_t N>
 struct hash<std::fixed_u16string<N>> : hash<u16string_view>
 {
 };
 
-template <size_t N>
+template <std::size_t N>
 struct hash<std::fixed_u32string<N>> : hash<u32string_view>
 {
 };
 
-template <size_t N>
+template <std::size_t N>
 struct hash<std::fixed_wstring<N>> : hash<wstring_view>
 {
 };
 
 // formatting support (debug-enabled string type specialization)
-template <class charT, size_t N>
+template <class charT, std::size_t N>
 struct formatter<std::basic_fixed_string<charT, N>, charT> : formatter<basic_string_view<charT>, charT>
 {
 };
