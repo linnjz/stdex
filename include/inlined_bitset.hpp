@@ -1262,7 +1262,10 @@ public:
       if (checked_block_count_(n, alloc) == 0) [[unlikely]] return;
 
       if constexpr (inline_capacity != 0) {
-        if (try_construct_stack_n_unchecked_(n, first, last)) return;
+        if (try_construct_stack_n_unchecked_(n, first, last)) {
+          bit_size_ = n * bits_per_block;
+          return;
+        }
         promote_to_heap_();
       }
       construct_heap_n_unchecked_(n, first, last);
