@@ -18,6 +18,7 @@
 
 #include <bit>         // std::bit_cast
 #include <concepts>    // std::integral, std::floating_point
+#include <climits>     // CHAR_BIT
 #include <cstdint>     // std::uint64_t, std::uint32_t, std::uint16_t, std::uint8_t
 #include <type_traits> // std::remove_cv_t, std::is_enum_v, std::make_unsigned_t, std::underlying_type_t, std::conditional_t
 

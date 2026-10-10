@@ -19,7 +19,7 @@
 #include <concepts>    // std::convertible_to
 #include <iterator>    // std::random_access_iterator_tag, std::contiguous_iterator_tag
 #include <memory>      // std::pointer_traits
-#include <type_traits> // std::conditional_t, std::is_const_v, ...
+#include <type_traits> // std::is_const_v, std::is_same_v, ...
 
 namespace stdex
 {
@@ -33,10 +33,7 @@ struct pointer_iterator
   using pointer           = Pointer;
   using reference         = decltype(*std::declval<Pointer const &>());
   using iterator_category = std::random_access_iterator_tag;
-  using iterator_concept  = std::conditional_t<
-      std::contiguous_iterator<pointer>,
-      std::contiguous_iterator_tag,
-      std::random_access_iterator_tag>;
+  using iterator_concept  = std::contiguous_iterator_tag;
 
   constexpr pointer_iterator() noexcept = default;
 
@@ -198,3 +195,20 @@ requires requires (P1 const &a, P2 const &b) { a < b; }
   return !(a < b);
 }
 } // namespace stdex
+
+namespace std
+{
+template <class V, class P, class C>
+struct pointer_traits<stdex::pointer_iterator<V, P, C>>
+{
+  using pointer         = stdex::pointer_iterator<V, P, C>;
+  using element_type    = typename pointer_traits<P>::element_type;
+  using difference_type = typename pointer::difference_type;
+
+  [[nodiscard]] static constexpr element_type *to_address(pointer const &it) noexcept(
+      noexcept(std::to_address(it.base())))
+  {
+    return std::to_address(it.base());
+  }
+};
+} // namespace std

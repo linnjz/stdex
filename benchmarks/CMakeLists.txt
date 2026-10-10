@@ -57,3 +57,28 @@ stdex_add_bench(bench_hash_table bench_hash_table.cpp
     INCLUDES "${CMAKE_SOURCE_DIR}/include/unordered_flat_detail"
     LIBS Boost::unordered absl::flat_hash_map
 )
+
+# Optional third-party comparison for bench_inlined_bitset.
+# Default OFF: no network access, nothing is fetched, and the benchmark only
+# compares stdex::inlined_bitset against std::bitset. Turn ON to also compare
+# against sul::dynamic_bitset; the header is fetched from GitHub into the
+# build directory (never into the source tree) and enabled in the TU via
+# STDEX_BENCH_HAS_DYNAMIC_BITSET.
+option(STDEX_BENCH_DYNAMIC_BITSET
+    "Fetch sul::dynamic_bitset from GitHub for bench_inlined_bitset heap comparison" OFF)
+
+stdex_add_bench(bench_inlined_bitset bench_inlined_bitset.cpp)
+
+if(STDEX_BENCH_DYNAMIC_BITSET)
+    include(FetchContent)
+    FetchContent_Declare(dynamic_bitset
+        GIT_REPOSITORY https://github.com/pinam45/dynamic_bitset.git
+        GIT_TAG master
+        GIT_SHALLOW TRUE
+    )
+    FetchContent_MakeAvailable(dynamic_bitset)
+    target_include_directories(bench_inlined_bitset PRIVATE
+        ${dynamic_bitset_SOURCE_DIR}/include)
+    target_compile_definitions(bench_inlined_bitset PRIVATE
+        STDEX_BENCH_HAS_DYNAMIC_BITSET=1)
+endif()
