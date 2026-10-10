@@ -2589,9 +2589,13 @@ static void test_reallocation_guard()
       {
         typename fix<track, 4>::reallocation_guard g{ blk, cap, raw + 1, raw + 3, alloc };
       } // fires: destroys [1, 3), deallocates
-      CHECK(track::live == 1 && raw->value == 1);
-      std::allocator_traits<std::allocator<track>>::destroy(alloc, raw);
-      CHECK(track::live == 0);
+      // Element 0 sits outside the adopted range, so the guard leaves it
+      // constructed and track::live proves exactly it survived. The guard
+      // frees the whole block, so raw now dangles: neither its value may be
+      // read nor its destructor run through the allocator. The survivor is
+      // therefore released by clearing the tracker instead of the storage.
+      CHECK(track::live == 1);
+      track::reset();
     }
     CHECK(track::live == 0);
   }
