@@ -20,7 +20,7 @@
 
 namespace stdex::unordered_flat_detail
 {
-template <class KeyType, class ValueType, size_t N>
+template <class KeyType, class ValueType, std::size_t N>
 struct ufmap_traits
 {
   using key_type        = KeyType;
@@ -29,7 +29,7 @@ struct ufmap_traits
   using reference       = std::pair<key_type const &, mapped_type &>;
   using const_reference = std::pair<key_type const &, mapped_type const &>;
 
-  static constexpr size_t inline_capacity = N;
+  static constexpr std::size_t inline_capacity = N;
 
   static constexpr reference to_reference(value_type &val) noexcept
   {

@@ -114,13 +114,13 @@ namespace stdex
  *
  * # Performance considerations
  *
- * ## 32-bit keys (e.g., `uint32_t`)
+ * ## 32-bit keys (e.g., `std::uint32_t`)
  *
  *   - LSD with 8-bit chunks: only 4 passes, each pass scans the whole array.
  *   - Very predictable memory access, minimal recursion overhead.
  *   - Usually faster than MSD on modern CPUs (better cache and SIMD friendly).
  *
- * ## 64-bit keys (e.g., `uint64_t`)
+ * ## 64-bit keys (e.g., `std::uint64_t`)
  *
  *   - LSD with 8-bit chunks needs 8 passes -> more memory writes.
  *   - LSD with 16-bit chunks reduces passes to 4 but uses 65536 buckets,
@@ -268,9 +268,9 @@ struct radix_sort_options
   radix_nans_assumption nans_assumption               = radix_nans_assumption::non_existence;
 
   /// MSD sub-problem size below which LSD is used
-  size_t msd_fallback_to_lsd_threshold = 256U * 256U;
+  std::size_t msd_fallback_to_lsd_threshold   = 256U * 256U;
   /// Stack-allocate histogram if under this
-  size_t histogram_stack_threshold_bytes = 16U * 1024U;
+  std::size_t histogram_stack_threshold_bytes = 16U * 1024U;
 };
 
 namespace stable_radix_sort_detail
@@ -499,7 +499,7 @@ struct sign_bit_traits
   static_assert(std::is_arithmetic_v<T>, "arithmetic type required");
   using type                             = T;
   using uint_t                           = unsigned_of_bits_t<sizeof(T) * CHAR_BIT>;
-  static constexpr size_t sign_bit_index = (sizeof(T) * CHAR_BIT) - 1;
+  static constexpr std::size_t sign_bit_index = (sizeof(T) * CHAR_BIT) - 1;
   static constexpr uint_t all_bit_mask   = ~uint_t(0);
   static constexpr uint_t sign_bit_mask  = all_bit_mask << sign_bit_index;
 };
@@ -532,14 +532,14 @@ struct radix_sort_traits : sign_bit_traits<std::invoke_result_t<KeyMap, T>>
       std::uint64_t>;
 
   // Radix parameters
-  static constexpr size_t bits_per_pass = static_cast<std::underlying_type_t<radix_bits_per_pass>>(RadixOptions.bits_per_pass);
-  static constexpr size_t num_passes    = sizeof(uint_t) * CHAR_BIT / bits_per_pass;
-  static constexpr size_t num_buckets   = size_t { 1 } << bits_per_pass;
-  static constexpr size_t radix_mask    = num_buckets - 1U;
+  static constexpr std::size_t bits_per_pass = static_cast<std::underlying_type_t<radix_bits_per_pass>>(RadixOptions.bits_per_pass);
+  static constexpr std::size_t num_passes    = sizeof(uint_t) * CHAR_BIT / bits_per_pass;
+  static constexpr std::size_t num_buckets   = std::size_t { 1 } << bits_per_pass;
+  static constexpr std::size_t radix_mask    = num_buckets - 1U;
 
   // Pass order (for LSD vs MSD)
-  static constexpr size_t first_pass = sort_strategy == radix_sort_strategy::lsd ? 0 : num_passes - 1;
-  static constexpr size_t last_pass  = sort_strategy == radix_sort_strategy::lsd ? num_passes - 1 : 0;
+  static constexpr std::size_t first_pass = sort_strategy == radix_sort_strategy::lsd ? 0 : num_passes - 1;
+  static constexpr std::size_t last_pass  = sort_strategy == radix_sort_strategy::lsd ? num_passes - 1 : 0;
 
   // Whether sign correction is applied on the first pass
   static constexpr bool is_sign_handling_on_first_pass =
@@ -650,7 +650,7 @@ template <typename RadixTraits>
 #if !defined(DEBUG) && !defined(_DEBUG)
 RADIX_SORT_ALWAYS_INLINE
 #endif
-    constexpr auto nth_radix(typename RadixTraits::uint_t x, size_t pass) noexcept -> size_t
+    constexpr auto nth_radix(typename RadixTraits::uint_t x, std::size_t pass) noexcept -> std::size_t
 {
   if constexpr (RadixTraits::sort_order == radix_sort_order::ascending) {
     return (x >> RadixTraits::bits_per_pass * pass) & RadixTraits::radix_mask;
@@ -668,9 +668,9 @@ RADIX_SORT_ALWAYS_INLINE
 /// Thread-chunk descriptors for distributing work across OpenMP threads.
 struct thread_chunk_info
 {
-  uint32_t threads; ///< Total OpenMP threads.
-  uint32_t remain;  ///< Threads that process one extra element.
-  size_t step;      ///< floor(n / threads) — base elements per thread.
+  std::uint32_t threads; ///< Total OpenMP threads.
+  std::uint32_t remain;  ///< Threads that process one extra element.
+  std::size_t step;      ///< floor(n / threads) — base elements per thread.
 };
 
 /// Per-thread chunk statistics used for sortedness detection.
@@ -686,10 +686,10 @@ struct thread_chunk_stats
 #if !defined(DEBUG) && !defined(_DEBUG)
 RADIX_SORT_ALWAYS_INLINE
 #endif
-constexpr auto compute_thread_chunk_range(size_t tid, size_t step, size_t remain) noexcept
-    -> std::pair<size_t, size_t>
+constexpr auto compute_thread_chunk_range(std::size_t tid, std::size_t step, std::size_t remain) noexcept
+    -> std::pair<std::size_t, std::size_t>
 {
-  size_t beg_index, end_index;
+  std::size_t beg_index, end_index;
   if (tid < remain) {
     beg_index = tid * (step + 1);
     end_index = beg_index + (step + 1);
@@ -704,18 +704,18 @@ constexpr auto compute_thread_chunk_range(size_t tid, size_t step, size_t remain
 
 /// Maximum element count for which insertion sort is used instead of radix
 /// sort.
-inline constexpr size_t kRadixSortThreshold = 64U;
+inline constexpr std::size_t kRadixSortThreshold = 64U;
 
 /// partitions boolean values into false/true groups in a single pass.
 template <std::random_access_iterator RandIter, bool Descending>
 constexpr void sort_bool(RandIter first, RandIter last)
 {
-  size_t cnt = 0;
+  std::size_t cnt = 0;
   for (auto curr = first; curr < last; ++curr) {
     auto const v   = *curr;
     *curr          = !Descending;
     *(first + cnt) = v;
-    cnt += static_cast<size_t>(Descending ? v : !v);
+    cnt += static_cast<std::size_t>(Descending ? v : !v);
   }
 }
 
@@ -748,29 +748,29 @@ template <
     bool IsSignBitHandling = false>
 constexpr void integer_radix_sort(
     typename RadixTraits::value_t *RADIX_SORT_RESTRICT data,
-    size_t const n,
+    std::size_t const n,
     typename RadixTraits::value_t *RADIX_SORT_RESTRICT buffer,
-    size_t const passes,
+    std::size_t const passes,
     typename RadixTraits::hist_t *RADIX_SORT_RESTRICT hist1d,
     Projection proj,
-    size_t depth = 0)
+    std::size_t depth = 0)
 {
   if (n == 0) return;
 
-  for (size_t pass = 0; pass < passes; ++pass) {
+  for (std::size_t pass = 0; pass < passes; ++pass) {
     using hist_t = typename RadixTraits::hist_t;
     std::fill_n(hist1d, RadixTraits::num_buckets, hist_t { 0 });
 
-    for (size_t i = 0; i < n; i++) {
+    for (std::size_t i = 0; i < n; i++) {
       auto x = proj.template operator()<IsSignBitHandling>(data[i]);
       ++hist1d[nth_radix<RadixTraits>(x, pass)];
     }
 
-    for (size_t i = 1; i < RadixTraits::num_buckets; i++) {
+    for (std::size_t i = 1; i < RadixTraits::num_buckets; i++) {
       hist1d[i] += hist1d[i - 1];
     }
 
-    for (size_t i = n; i-- > 0;) {
+    for (std::size_t i = n; i-- > 0;) {
       auto x = proj.template operator()<IsSignBitHandling>(data[i]);
 
       buffer[--hist1d[nth_radix<RadixTraits>(x, pass)]] = std::move(data[i]);
@@ -819,7 +819,7 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
 
   /// Single-pass histogram builder and sortedness checker.
   /// Returns true if the input is already in the desired order.
-  static constexpr auto build_histogram(value_t const *data, size_t const n, hist2d_t hist2d, Projection proj)
+  static constexpr auto build_histogram(value_t const *data, std::size_t const n, hist2d_t hist2d, Projection proj)
       -> bool
   {
     // Choose the comparison that indicates "not out of order":
@@ -832,7 +832,7 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
     auto const &key_map = proj.get_key_map();
     bool is_sorted      = true;
 
-    for (size_t i = 0; i < n; ++i) {
+    for (std::size_t i = 0; i < n; ++i) {
       auto const key = key_map(data[i]);
       is_sorted      = is_sorted && comp(key, prev);
       prev           = key;
@@ -840,7 +840,7 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
       // Build histograms for all passes in a single scan (fold over
       // pass_indices at compile time). Scanning once instead of num_passes
       // times keeps the loop in L1 cache.
-      [&]<size_t... Is>(std::index_sequence<Is...>) {
+      [&]<std::size_t... Is>(std::index_sequence<Is...>) {
         ((++hist2d[Is][nth_radix<RadixTraits>(Projection::transform(key), Is)]), ...);
       }(pass_indices);
     }
@@ -849,12 +849,12 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
 
   /// Converts per-pass bucket counts to prefix-sum offsets.
   /// Returns non-empty bucket count per pass (used to skip trivial passes).
-  template <size_t... Is>
-  static constexpr void prefix_sum(hist2d_t hist2d, std::index_sequence<Is...> /*unused*/, size_t (&non_empty_counts)[sizeof...(Is)])
+  template <std::size_t... Is>
+  static constexpr void prefix_sum(hist2d_t hist2d, std::index_sequence<Is...> /*unused*/, std::size_t (&non_empty_counts)[sizeof...(Is)])
   {
-    auto process = [&](size_t index) -> void {
+    auto process = [&](std::size_t index) -> void {
       non_empty_counts[index] = (hist2d[index][0] != 0);
-      for (size_t i = 1; i < num_buckets; ++i) {
+      for (std::size_t i = 1; i < num_buckets; ++i) {
         non_empty_counts[index] += (hist2d[index][i] != 0);
         hist2d[index][i] += hist2d[index][i - 1];
       }
@@ -867,18 +867,18 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
   /// pass-count parity).
   static constexpr auto do_scatter(
       value_t *RADIX_SORT_RESTRICT data,
-      size_t const n,
+      std::size_t const n,
       value_t *RADIX_SORT_RESTRICT buffer,
-      size_t const (&non_empty_counts)[num_passes],
+      std::size_t const (&non_empty_counts)[num_passes],
       hist2d_t hist2d,
       Projection proj) -> value_t *
   {
     // All passes except the last one: sign-bit correction is not needed.
-    for (size_t pass = 0; pass < last_pass; ++pass) {
+    for (std::size_t pass = 0; pass < last_pass; ++pass) {
       if (non_empty_counts[pass] <= 1) {
         continue; // All elements have the same digit; no reordering needed.
       }
-      for (size_t i = n; i-- > 0;) {
+      for (std::size_t i = n; i-- > 0;) {
         auto const x = proj.template operator()<false>(data[i]);
 
         buffer[--hist2d[pass][nth_radix<RadixTraits>(x, pass)]] = std::move(data[i]);
@@ -888,7 +888,7 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
 
     // Last pass: apply full sign-bit handling if the key type is signed.
     if (non_empty_counts[last_pass] > 1) {
-      for (size_t i = n; i-- > 0;) {
+      for (std::size_t i = n; i-- > 0;) {
         auto const x = proj(data[i]); // uses the default `IsSignBitHandling`
 
         buffer[--hist2d[last_pass][nth_radix<RadixTraits>(x, last_pass)]] = std::move(data[i]);
@@ -902,7 +902,7 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
   /// Always leaves the sorted result in the original array.
   static constexpr void sort(
       value_t *RADIX_SORT_RESTRICT data,
-      size_t const n,
+      std::size_t const n,
       Allocator const &allocator,
       Projection proj)
   {
@@ -919,7 +919,7 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
       }
 
       // Step 2: convert counts to offsets and get non-empty bucket counts.
-      size_t non_empty_counts[num_passes];
+      std::size_t non_empty_counts[num_passes];
       prefix_sum(hist2d, pass_indices, non_empty_counts);
 
       // Step 3: scatter all passes.
@@ -931,7 +931,7 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
       if (result != original) std::move(result, result + n, original);
     };
 
-    size_t const hist_bytes = num_passes * num_buckets * sizeof(hist_t);
+    std::size_t const hist_bytes = num_passes * num_buckets * sizeof(hist_t);
     if constexpr (hist_bytes <= histogram_stack_threshold_bytes) {
       aligned_hist2d_t hist2d {}; // init
       run_sort(hist2d.storage_);
@@ -976,8 +976,8 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
 
   /// First-pass scan: builds MSB histogram, checks sortedness, computes msb.
   /// Returns {msb index, is sorted}.
-  static constexpr auto first_pass_scan(value_t const *data, size_t const n, hist2d_t hist2d, Projection proj)
-      -> std::pair<size_t, bool>
+  static constexpr auto first_pass_scan(value_t const *data, std::size_t const n, hist2d_t hist2d, Projection proj)
+      -> std::pair<std::size_t, bool>
   {
     auto prev = sort_order == radix_sort_order::ascending
                   ? std::numeric_limits<key_t>::lowest()
@@ -987,7 +987,7 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
     auto const &key_map = proj.get_key_map();
     uint_t combined     = 0;
     bool sorted         = true;
-    for (size_t i = 0; i < n; ++i) {
+    for (std::size_t i = 0; i < n; ++i) {
       auto const key = key_map(data[i]);
       sorted         = sorted && comp(key, prev);
       prev           = key;
@@ -1005,23 +1005,23 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
   /// Builds the histogram for a given non-first pass.
   static constexpr void build_histogram(
       value_t const *data,
-      size_t const n,
+      std::size_t const n,
       hist2d_t hist2d,
-      size_t const pass,
+      std::size_t const pass,
       Projection proj)
   {
-    for (size_t i = 0; i < n; ++i) {
+    for (std::size_t i = 0; i < n; ++i) {
       auto x = proj.template operator()<false>(data[i]);
       ++hist2d[pass][nth_radix<RadixTraits>(x, pass)];
     }
   }
 
   /// Converts bucket counts to prefix-sum offsets for a pass.
-  static constexpr auto prefix_sum(hist2d_t hist2d, size_t const pass)
-      -> size_t
+  static constexpr auto prefix_sum(hist2d_t hist2d, std::size_t const pass)
+      -> std::size_t
   {
-    size_t non_empty_count = (hist2d[pass][0] != 0);
-    for (size_t i = 1; i < num_buckets; ++i) {
+    std::size_t non_empty_count = (hist2d[pass][0] != 0);
+    for (std::size_t i = 1; i < num_buckets; ++i) {
       non_empty_count += (hist2d[pass][i] != 0);
       hist2d[pass][i] += hist2d[pass][i - 1];
     }
@@ -1032,13 +1032,13 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
   template <bool IsSignBitHandling = is_sign_handling_on_first_pass>
   static constexpr void do_scatter(
       value_t *RADIX_SORT_RESTRICT data,
-      size_t const n,
+      std::size_t const n,
       value_t *RADIX_SORT_RESTRICT buffer,
-      size_t const pass,
+      std::size_t const pass,
       hist2d_t hist2d,
       Projection proj)
   {
-    for (size_t i = n; i-- > 0;) {
+    for (std::size_t i = n; i-- > 0;) {
       auto x = proj.template operator()<IsSignBitHandling>(data[i]);
 
       buffer[--hist2d[pass][nth_radix<RadixTraits>(x, pass)]] = std::move(data[i]);
@@ -1048,18 +1048,18 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
   /// Iterates over buckets after scatter; recurses into multi-element buckets.
   static constexpr void recurse_buckets(
       value_t *RADIX_SORT_RESTRICT data,
-      size_t const n,
+      std::size_t const n,
       value_t *RADIX_SORT_RESTRICT buffer,
-      size_t const pass,
+      std::size_t const pass,
       hist2d_t hist2d,
       Projection proj,
-      size_t depth = 0)
+      std::size_t depth = 0)
   {
-    for (size_t i = 0; i < num_buckets; ++i) {
-      size_t chunk_beg = hist2d[pass][i];
-      size_t chunk_end = (i + 1 < num_buckets) ? hist2d[pass][i + 1] : n;
+    for (std::size_t i = 0; i < num_buckets; ++i) {
+      std::size_t chunk_beg = hist2d[pass][i];
+      std::size_t chunk_end = (i + 1 < num_buckets) ? hist2d[pass][i + 1] : n;
 
-      if (size_t chunk_size = chunk_end - chunk_beg; chunk_size > 1) {
+      if (std::size_t chunk_size = chunk_end - chunk_beg; chunk_size > 1) {
         // Recurse to the next lower digit, increasing depth.
         do_msd_recursion(
             buffer + chunk_beg,
@@ -1081,12 +1081,12 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
   /// Falls back to LSD if sub-problem is small or no lower digits remain.
   static constexpr void do_msd_recursion(
       value_t *RADIX_SORT_RESTRICT data,
-      size_t const n,
+      std::size_t const n,
       value_t *RADIX_SORT_RESTRICT buffer,
-      size_t const pass,
+      std::size_t const pass,
       hist2d_t hist2d,
       Projection proj,
-      size_t depth = 0)
+      std::size_t depth = 0)
   {
     auto *hist1d = hist2d[pass];
     // Fallback to LSD when the sub-problem is small or no lower digits remain.
@@ -1103,7 +1103,7 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
     build_histogram(data, n, hist2d, pass, proj);
 
     // Step 3 :
-    if (size_t non_empty_count = prefix_sum(hist2d, pass); non_empty_count <= 1) {
+    if (std::size_t non_empty_count = prefix_sum(hist2d, pass); non_empty_count <= 1) {
       // If all elements share the same digit, skip scatter and go to next pass.
       return do_msd_recursion(data, n, buffer, pass - 1, hist2d, proj, depth);
     }
@@ -1119,7 +1119,7 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
   /// Always leaves the sorted result in the original array.
   static constexpr void sort(
       value_t *RADIX_SORT_RESTRICT data,
-      size_t const n,
+      std::size_t const n,
       Allocator const &allocator,
       Projection proj)
   {
@@ -1151,7 +1151,7 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
       }
     };
 
-    size_t const hist_bytes = num_passes * num_buckets * sizeof(hist_t);
+    std::size_t const hist_bytes = num_passes * num_buckets * sizeof(hist_t);
     // Pre-allocate histogram memory for all passes at once,
     // prevent memory allocation overhead in every recursion.
     if constexpr (hist_bytes <= histogram_stack_threshold_bytes) {
@@ -1189,7 +1189,7 @@ struct radix_sort_par_helpers : RadixTraits
       value_t const *data,
       thread_chunk_info const info,
       hist2d_t hist2d,
-      Projection proj) -> std::pair<size_t, bool>
+      Projection proj) -> std::pair<std::size_t, bool>
   {
     auto comp = std::conditional_t<
         sort_order == radix_sort_order::ascending,
@@ -1197,9 +1197,9 @@ struct radix_sort_par_helpers : RadixTraits
         std::less_equal<>> {};
 
     auto const &key_map              = proj.get_key_map();
-    uint32_t const threads           = info.threads;
-    uint32_t const remain            = info.remain;
-    size_t const step                = info.step;
+    std::uint32_t const threads           = info.threads;
+    std::uint32_t const remain            = info.remain;
+    std::size_t const step                = info.step;
     using thread_chunk_stats_wrapped = thread_chunk_stats<key_t>;
     auto const thread_bytes          = threads * sizeof(thread_chunk_stats_wrapped);
     histogram_heap_holder<thread_chunk_stats_wrapped> stats_array {
@@ -1224,7 +1224,7 @@ struct radix_sort_par_helpers : RadixTraits
                        ? std::numeric_limits<key_t>::lowest()
                        : std::numeric_limits<key_t>::max();
 
-      for (size_t i = beg; i < end; ++i) {
+      for (std::size_t i = beg; i < end; ++i) {
         auto const key = key_map(data[i]);
         sorted         = sorted && comp(key, prev);
         prev           = key;
@@ -1247,7 +1247,7 @@ struct radix_sort_par_helpers : RadixTraits
     auto &[sorted_1, min_val_1, max_val_1] = stats_array[0];
     uint_t combined                        = 0;
     combined |= std::bit_cast<uint_t>(min_val_1) | std::bit_cast<uint_t>(max_val_1);
-    for (size_t i = 1; i < threads; ++i) {
+    for (std::size_t i = 1; i < threads; ++i) {
       auto const [sorted, min_val, max_val] = stats_array[i];
       combined |= std::bit_cast<uint_t>(min_val) | std::bit_cast<uint_t>(max_val);
       sorted_1 = sorted_1 && sorted;
@@ -1266,18 +1266,18 @@ struct radix_sort_par_helpers : RadixTraits
       value_t *data,
       thread_chunk_info const info,
       hist2d_t hist2d,
-      size_t const pass,
+      std::size_t const pass,
       Projection proj)
   {
-    uint32_t const threads = info.threads;
-    uint32_t const remain  = info.remain;
-    size_t const step      = info.step;
+    std::uint32_t const threads = info.threads;
+    std::uint32_t const remain  = info.remain;
+    std::size_t const step      = info.step;
 #  pragma omp parallel num_threads((int) threads)
     {
       int const tid         = omp_get_thread_num();
       auto const [beg, end] = compute_thread_chunk_range(tid, step, remain);
 
-      for (size_t i = beg; i < end; ++i) {
+      for (std::size_t i = beg; i < end; ++i) {
         auto const x = proj.template operator()<IsSignBitHandling>(data[i]);
         ++hist2d[tid][nth_radix<RadixTraits>(x, pass)];
       }
@@ -1287,18 +1287,18 @@ struct radix_sort_par_helpers : RadixTraits
   /// Merges per-thread histogram into global prefix-sum offsets (N-shaped
   /// scan). After this, hist2d[tid][bucket] is the global start offset for that
   /// thread and bucket. Returns the number of non-empty buckets.
-  static auto prefix_sum(hist2d_t hist2d, size_t threads) -> size_t
+  static auto prefix_sum(hist2d_t hist2d, std::size_t threads) -> std::size_t
   {
-    for (size_t tid = 1; tid < threads; ++tid) {
+    for (std::size_t tid = 1; tid < threads; ++tid) {
       hist2d[tid][0] += hist2d[tid - 1][0];
     }
 
-    size_t non_empty = (hist2d[threads - 1][0] != 0);
-    for (size_t i = 1; i < num_buckets; ++i) {
+    std::size_t non_empty = (hist2d[threads - 1][0] != 0);
+    for (std::size_t i = 1; i < num_buckets; ++i) {
       auto const last = hist2d[threads - 1][i - 1];
       hist2d[0][i] += last;
 
-      for (size_t tid = 1; tid < threads; ++tid) {
+      for (std::size_t tid = 1; tid < threads; ++tid) {
         hist2d[tid][i] += hist2d[tid - 1][i];
       }
 
@@ -1313,18 +1313,18 @@ struct radix_sort_par_helpers : RadixTraits
       value_t *RADIX_SORT_RESTRICT data,
       thread_chunk_info const info,
       value_t *RADIX_SORT_RESTRICT buffer,
-      size_t const pass,
+      std::size_t const pass,
       hist2d_t hist2d,
       Projection proj)
   {
-    uint32_t const threads = info.threads;
-    uint32_t const remain  = info.remain;
-    size_t const step      = info.step;
+    std::uint32_t const threads = info.threads;
+    std::uint32_t const remain  = info.remain;
+    std::size_t const step      = info.step;
 #  pragma omp parallel num_threads((int) threads)
     {
       int tid         = omp_get_thread_num();
       auto [beg, end] = compute_thread_chunk_range(tid, step, remain);
-      for (size_t i = end; i-- > beg;) {
+      for (std::size_t i = end; i-- > beg;) {
         auto const x = proj.template operator()<IsSignBitHandling>(data[i]);
 
         buffer[--hist2d[tid][nth_radix<RadixTraits>(x, pass)]] = std::move(data[i]);
@@ -1366,7 +1366,7 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
   /// histograms and prefix_sum merging for parallel passes.
   static void sort(
       value_t *RADIX_SORT_RESTRICT data,
-      size_t const n,
+      std::size_t const n,
       Allocator const &allocator,
       Projection proj)
   {
@@ -1374,10 +1374,10 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
     allocator_holder<Allocator> holder(n, allocator);
     auto *RADIX_SORT_RESTRICT buffer = holder.data();
 
-    size_t const threads = ::omp_get_max_threads();
+    std::size_t const threads = ::omp_get_max_threads();
     // Per-thread histogram: hist2d[tid][bucket] avoids atomic contention.
-    size_t const hist_size  = threads * num_buckets;
-    size_t const hist_bytes = hist_size * sizeof(hist_t);
+    std::size_t const hist_size  = threads * num_buckets;
+    std::size_t const hist_bytes = hist_size * sizeof(hist_t);
     thread_chunk_info const chunk_info(threads, n % threads, n / threads);
 
     histogram_heap_holder<hist_t> hist_storage {
@@ -1396,7 +1396,7 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
     auto [msb, sorted] = first_pass_scan(data, chunk_info, hist2d, proj);
     if (sorted) return;
 
-    if (size_t num_empty_count = prefix_sum(hist2d, threads); num_empty_count > 1) {
+    if (std::size_t num_empty_count = prefix_sum(hist2d, threads); num_empty_count > 1) {
       base::template do_scatter<is_sign_handling_on_first_pass>(data, chunk_info, buffer, first_pass, hist2d, proj);
       std::swap(data, buffer);
     }
@@ -1404,7 +1404,7 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
     auto const passes = (msb + bits_per_pass) / bits_per_pass;
 
     // Process remaining passes (from 1 to passes-1).
-    for (size_t pass = 1; pass < passes; ++pass) {
+    for (std::size_t pass = 1; pass < passes; ++pass) {
       std::memset(hist_storage.data(), 0, hist_bytes);
 
       if (pass != passes - 1 || passes != num_passes) {
@@ -1462,13 +1462,13 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
   /// Iterates buckets after scatter, parallelized at the bucket level.
   static void recurse_buckets(
       value_t *RADIX_SORT_RESTRICT data,
-      size_t const n,
+      std::size_t const n,
       value_t *RADIX_SORT_RESTRICT buffer,
-      size_t const pass,
+      std::size_t const pass,
       hist2d_t hist2d,
       thread_chunk_info const info,
       Projection proj,
-      size_t depth = 0)
+      std::size_t depth = 0)
   {
     // static schedule: bucket sizes vary but static avoids steal overhead
 #  pragma omp parallel for schedule(static) \
@@ -1477,10 +1477,10 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
     //   MSVC provides '/openmp' '/openmp:experimental' '/openmp:llvm'
     //   '/openmp' needs a signed index variable
     for (int i = 0; i < static_cast<int>(num_buckets); ++i) {
-      size_t chunk_beg = hist2d[0][i];
-      size_t chunk_end = (i + 1 < num_buckets) ? hist2d[0][i + 1] : n;
+      std::size_t chunk_beg = hist2d[0][i];
+      std::size_t chunk_end = (i + 1 < num_buckets) ? hist2d[0][i + 1] : n;
 
-      if (size_t chunk_size = chunk_end - chunk_beg; chunk_size > 1) {
+      if (std::size_t chunk_size = chunk_end - chunk_beg; chunk_size > 1) {
         do_msd_recursion(
             buffer + chunk_beg,
             chunk_size,
@@ -1499,18 +1499,18 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
   /// parallelism once inside a parallel region.
   static void do_msd_recursion(
       value_t *RADIX_SORT_RESTRICT data,
-      size_t const n,
+      std::size_t const n,
       value_t *RADIX_SORT_RESTRICT buffer,
-      size_t const pass,
+      std::size_t const pass,
       thread_chunk_info const info,
       Projection proj,
-      size_t depth = 0)
+      std::size_t depth = 0)
   {
     // Disable nested parallelism once inside a parallel region. Recursing
     // with all threads would oversubscribe and hurt cache locality.
-    uint32_t const threads  = omp_in_parallel() ? 1U : info.threads;
-    size_t const hist_size  = size_t { threads } * num_buckets;
-    size_t const hist_bytes = hist_size * sizeof(hist_t);
+    std::uint32_t const threads  = omp_in_parallel() ? 1U : info.threads;
+    std::size_t const hist_size  = std::size_t { threads } * num_buckets;
+    std::size_t const hist_bytes = hist_size * sizeof(hist_t);
 
     histogram_heap_holder<hist_t> hist_storage {
       hybrid_alloc_tag {},
@@ -1546,16 +1546,16 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
   /// scan; recursion falls back to sequential once inside a parallel region.
   static void sort(
       value_t *RADIX_SORT_RESTRICT data,
-      size_t const n,
+      std::size_t const n,
       Allocator const &allocator,
       Projection proj)
   {
     allocator_holder<Allocator> holder(n, allocator);
     auto *RADIX_SORT_RESTRICT buffer = holder.data();
 
-    size_t const threads    = ::omp_get_max_threads();
-    size_t const hist_size  = threads * num_buckets;
-    size_t const hist_bytes = hist_size * sizeof(hist_t);
+    std::size_t const threads    = ::omp_get_max_threads();
+    std::size_t const hist_size  = threads * num_buckets;
+    std::size_t const hist_bytes = hist_size * sizeof(hist_t);
     thread_chunk_info const chunk_info(threads, n % threads, n / threads);
 
     histogram_heap_holder<hist_t> hist_storage {
@@ -1625,7 +1625,7 @@ constexpr void stable_radix_sort_impl(
     // Invert order if descending is requested.
     sort_bool<RandIter, RadixTraits::sort_order != radix_sort_order::ascending>(first, last);
   } else {
-    size_t const size = last - first;
+    std::size_t const size = last - first;
 
     // 2. Small-array fallback: insertion sort avoids radix-sort overhead.
     if (size <= kRadixSortThreshold) [[unlikely]] {

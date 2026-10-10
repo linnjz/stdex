@@ -17,7 +17,7 @@
 #pragma once
 
 #include <bit>          // std::countr_zero
-#include <cstddef>      // std::size_t / size_t
+#include <cstddef>      // std::size_t / std::size_t
 #include <iterator>     // std::forward_iterator_tag
 #include <memory>       // std::to_address, std::addressof, std::pointer_traits
 #include <type_traits>  // std::conditional_t
@@ -162,7 +162,7 @@ public:
   }
 
 private:
-  constexpr explicit hash_table_iterator(value_type *element_ptr, group_type *group_ptr, size_t slot_index) noexcept
+  constexpr explicit hash_table_iterator(value_type *element_ptr, group_type *group_ptr, std::size_t slot_index) noexcept
       : element_ptr_ { element_ptr }
       , group_ptr_ { group_ptr }
       , slot_index_ { slot_index }
@@ -231,7 +231,7 @@ private:
 
   value_type *element_ptr_;
   group_type *group_ptr_;
-  size_t slot_index_;
+  std::size_t slot_index_;
 };
 
 template <class HashTableIterator>

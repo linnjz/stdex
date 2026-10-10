@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Copyright (c) 2026 LinnJz
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -45,7 +45,7 @@ struct storage_meta
   static constexpr auto nonstatic_data_members {
     std::define_static_array(std::meta::nonstatic_data_members_of(^^T, std::meta::access_context::unchecked()))
   };
-  static constexpr size_t member_count = nonstatic_data_members.size();
+  static constexpr std::size_t member_count = nonstatic_data_members.size();
   /// Tag width sized to the member count.
   using tag_type = std::conditional_t<
       (member_count <= 255),
@@ -59,9 +59,9 @@ struct storage_meta
               std::uint64_t>>>;
 
 
-  template <size_t I>
+  template <std::size_t I>
   using member_type = typename[:std::meta::type_of(nonstatic_data_members[I]):];
-  template <size_t... Is>
+  template <std::size_t... Is>
   static auto member_tuple_impl(std::index_sequence<Is...>) -> std::tuple<member_type<Is>...>;
   using member_types = decltype(member_tuple_impl(std::make_index_sequence<member_count> {}));
 
@@ -72,24 +72,24 @@ struct storage_meta
   template <class U, class... Ts>
   struct index_of_impl<U, std::tuple<Ts...>>
   {
-    static constexpr size_t count = (size_t { std::is_same_v<U, Ts> } + ...);
+    static constexpr std::size_t count = (std::size_t { std::is_same_v<U, Ts> } + ...);
 
-    template <size_t... Is>
-    static constexpr size_t get_index(std::index_sequence<Is...>) noexcept
+    template <std::size_t... Is>
+    static constexpr std::size_t get_index(std::index_sequence<Is...>) noexcept
     {
-      size_t idx = member_count;
+      std::size_t idx = member_count;
       ((std::is_same_v<U, Ts> ? (idx = Is) : 0), ...);
       return idx;
     }
 
-    static constexpr size_t value = count == 1
+    static constexpr std::size_t value = count == 1
                                       ? get_index(std::make_index_sequence<sizeof...(Ts)> {})
                                       : member_count;
   };
   /// Index of the unique member of type U; member_count serves as the
   /// sentinel when U is absent or matches more than one member.
   template <class U>
-  static constexpr size_t index_of = index_of_impl<U, member_types>::value;
+  static constexpr std::size_t index_of = index_of_impl<U, member_types>::value;
   template <class U>
   static constexpr bool has_member_type = index_of_impl<U, member_types>::count >= 1;
 
@@ -103,10 +103,10 @@ struct storage_meta
   /// Once fixed, the scan may terminate early via `break` instead of
   /// carrying the sentinel to the end.
   template <fixed_string Fs>
-  static consteval size_t index_of_name() noexcept
+  static consteval std::size_t index_of_name() noexcept
   {
     constexpr std::string_view target = Fs.view();
-    size_t found                      = member_count;
+    std::size_t found                      = member_count;
     template for (constexpr auto I : std::views::iota(0zu, member_count))
     {
       constexpr std::string_view id = std::meta::identifier_of(nonstatic_data_members[I]);
@@ -141,7 +141,7 @@ struct storage_meta
     using type = std::remove_reference_t<M> *;
   };
 
-  template <size_t I>
+  template <std::size_t I>
   using storage_type = typename storage_of<member_type<I>>::type;
 
 
@@ -149,8 +149,8 @@ struct storage_meta
   {
     struct metadata
     {
-      size_t max_size                                = 0;
-      size_t max_align                               = 1;
+      std::size_t max_size                           = 0;
+      std::size_t max_align                          = 1;
       bool are_all_mems_copy_assignment_nothrow      = true;
       bool are_all_mems_copy_constructor_nothrow     = true;
       bool are_all_mems_move_assignment_nothrow      = true;
@@ -171,15 +171,15 @@ struct storage_meta
       bool are_all_mems_move_assignable              = true;
       bool are_all_mems_trivially_move_assignable    = true;
       bool are_all_mems_hashable                     = true;
-      size_t ref_tag_bits                            = std::numeric_limits<size_t>::digits;
-      size_t ref_tag_mask                            = 0;
-      size_t bool_type_index                         = 0;
-      size_t bool_type_cnt                           = 0;
-      size_t empty_type_cnt                          = 0;
+      std::size_t ref_tag_bits                       = std::numeric_limits<std::size_t>::digits;
+      std::size_t ref_tag_mask                       = 0;
+      std::size_t bool_type_index                    = 0;
+      std::size_t bool_type_cnt                      = 0;
+      std::size_t empty_type_cnt                     = 0;
       /// Code table: 0/1 denote bool (false/true), 2..N denote empty members
       /// in declaration order, and N+1 denotes the disengaged state;
       /// the valid codes are exactly 0..N+1, N+2 in total.
-      std::array<size_t, member_count + 2> index_of_code;
+      std::array<std::size_t, member_count + 2> index_of_code;
     } m;
     template for (constexpr auto I : std::views::iota(0zu, member_count))
     {
@@ -222,7 +222,7 @@ struct storage_meta
       if constexpr (std::is_reference_v<member_type<I>> && requires { sizeof(storage_plain_t); }) {
         /// An aligned address is a multiple of alignof (a power of two),
         /// so its low log2(alignof) bits are always zero.
-        m.ref_tag_bits = std::min<size_t>(m.ref_tag_bits, std::countr_zero(alignof(storage_plain_t)));
+        m.ref_tag_bits = std::min<std::size_t>(m.ref_tag_bits, std::countr_zero(alignof(storage_plain_t)));
       } else if constexpr (std::is_reference_v<member_type<I>>) {
         m.are_all_mems_ref_qualified = false; ///< Points to an incomplete type; the niche is abandoned.
       }
@@ -259,7 +259,7 @@ struct storage_meta
     /// Empty members contribute zero size; clamp to 1 byte, since a
     /// zero-length storage array is not permitted.
     m.max_size     = m.max_size ? m.max_size : 1;
-    m.ref_tag_mask = m.ref_tag_bits >= std::numeric_limits<size_t>::digits
+    m.ref_tag_mask = m.ref_tag_bits >= std::numeric_limits<std::size_t>::digits
                        ? 0
                        : (1uz << m.ref_tag_bits) - 1;
     return m;
@@ -270,7 +270,7 @@ struct storage_meta
   /// Reference niche: every member is a reference.
   static constexpr bool niche_ref_capable =
       niche_opt_in && metadata.are_all_mems_ref_qualified &&
-      (metadata.ref_tag_bits >= std::numeric_limits<size_t>::digits ||
+      (metadata.ref_tag_bits >= std::numeric_limits<std::size_t>::digits ||
        member_count <= (1uz << metadata.ref_tag_bits));
   /// Bool niche: exactly one bool member; all others are empty classes.
   /// The bool's two states, one state per empty member, and the disengaged
@@ -291,9 +291,9 @@ struct storage_base<T> : storage_meta<T>
 {
   using base     = storage_meta<T>;
   using tag_type = typename base::tag_type;
-  template <size_t I>
+  template <std::size_t I>
   using member_type = typename base::template member_type<I>;
-  template <size_t I>
+  template <std::size_t I>
   using storage_type = typename base::template storage_type<I>;
   using base::member_count;
   using base::metadata;
@@ -322,7 +322,7 @@ struct storage_base<T> : storage_meta<T>
   }
   field_union_type u_ {};
 
-  template <size_t I>
+  template <std::size_t I>
   static consteval std::meta::info member_refl() noexcept
   {
     return std::meta::nonstatic_data_members_of(^^field_union_type, std::meta::access_context::unchecked())[I];
@@ -334,15 +334,15 @@ struct storage_base<T> : storage_meta<T>
 
   constexpr std::size_t index() const noexcept
   {
-    return static_cast<size_t>(tag);
+    return static_cast<std::size_t>(tag);
   }
 
   constexpr bool has_value() const noexcept
   {
-    return static_cast<size_t>(tag) != member_count;
+    return static_cast<std::size_t>(tag) != member_count;
   }
 
-  template <size_t I>
+  template <std::size_t I>
   constexpr decltype(auto) get(this auto &&self) noexcept
   {
     static_assert(I < member_count, "Index out of range");
@@ -365,7 +365,7 @@ struct storage_base<T> : storage_meta<T>
     }
   }
 
-  template <size_t I, class... Args>
+  template <std::size_t I, class... Args>
   constexpr decltype(auto) construct(Args &&...args) noexcept(
       std::is_reference_v<member_type<I>> ||
       (std::is_array_v<storage_type<I>>
@@ -405,7 +405,7 @@ struct storage_base<T> : storage_meta<T>
     return (*this).template get<I>();
   }
 
-  template <size_t I>
+  template <std::size_t I>
   constexpr void destroy() noexcept(std::is_nothrow_destructible_v<storage_type<I>>)
   {
     static_assert(I < member_count, "Index out of range");
@@ -431,9 +431,9 @@ requires (storage_meta<T>::niche_ref_capable)
 struct storage_base<T> : storage_meta<T>
 {
   using base = storage_meta<T>;
-  template <size_t I>
+  template <std::size_t I>
   using member_type = typename base::template member_type<I>;
-  template <size_t I>
+  template <std::size_t I>
   using storage_type = typename base::template storage_type<I>;
   using base::member_count;
   using base::metadata;
@@ -450,7 +450,7 @@ struct storage_base<T> : storage_meta<T>
     /// With a single member, ref_tag_mask == 0: an engaged slot always
     /// yields index 0, while a disengaged slot yields member_count.
     return slot == 0 ? member_count
-                     : static_cast<size_t>(slot & metadata.ref_tag_mask);
+                     : static_cast<std::size_t>(slot & metadata.ref_tag_mask);
   }
 
   constexpr bool has_value() const noexcept
@@ -458,7 +458,7 @@ struct storage_base<T> : storage_meta<T>
     return slot != 0;
   }
 
-  template <size_t I>
+  template <std::size_t I>
   decltype(auto) get(this auto &&self) noexcept
   {
     static_assert(I < member_count, "Index out of range");
@@ -467,7 +467,7 @@ struct storage_base<T> : storage_meta<T>
     return *reinterpret_cast<storage_type<I>>(self.slot & ~metadata.ref_tag_mask);
   }
 
-  template <size_t I, class... Args>
+  template <std::size_t I, class... Args>
   decltype(auto) construct(Args &&...args) noexcept
   {
     static_assert(I < member_count, "Index out of range");
@@ -481,7 +481,7 @@ struct storage_base<T> : storage_meta<T>
     return (*this).template get<I>();
   }
 
-  template <size_t I>
+  template <std::size_t I>
   constexpr void destroy() noexcept
   {
     static_assert(I < member_count, "Index out of range");
@@ -498,7 +498,7 @@ requires (storage_meta<T>::niche_bool_capable)
 struct storage_base<T> : storage_meta<T>
 {
   using base = storage_meta<T>;
-  template <size_t I>
+  template <std::size_t I>
   using member_type = typename base::template member_type<I>;
   using base::member_count; ///< Fits one byte (codes 0..255): at most 254
                             ///< members, leaving codes for the bool states
@@ -509,7 +509,7 @@ struct storage_base<T> : storage_meta<T>
 
   /// Code 0/1 are reserved for bool; empty members start at 2, skipping
   /// the bool slot.
-  static constexpr unsigned char code_of_member(size_t I) noexcept
+  static constexpr unsigned char code_of_member(std::size_t I) noexcept
   {
     return static_cast<unsigned char>(2 + I - (I > metadata.bool_type_index));
   }
@@ -533,7 +533,7 @@ struct storage_base<T> : storage_meta<T>
     return std::bit_cast<unsigned char>(u_) != disengaged;
   }
 
-  template <size_t I>
+  template <std::size_t I>
   constexpr decltype(auto) get(this auto &&self) noexcept
   {
     static_assert(I < member_count, "Index out of range");
@@ -545,7 +545,7 @@ struct storage_base<T> : storage_meta<T>
     }
   }
 
-  template <size_t I, class... Args>
+  template <std::size_t I, class... Args>
   constexpr decltype(auto) construct(Args &&...args) noexcept
   {
     static_assert(I < member_count, "Index out of range");
@@ -559,7 +559,7 @@ struct storage_base<T> : storage_meta<T>
     return (*this).template get<I>();
   }
 
-  template <size_t I>
+  template <std::size_t I>
   constexpr void destroy() noexcept
   {
     static_assert(I < member_count, "Index out of range");
@@ -595,11 +595,11 @@ struct storage_base<T> : storage_meta<T>
 /// function-pointer table (with a disengaged slot) for larger N. Both are
 /// usable in constant evaluation, since calling a constexpr function
 /// through a function pointer is a constant expression.
-#define MV_CASE(n)                                                      \
-  case (n) :                                                            \
-    if constexpr ((n) < N) {                                            \
-      return static_cast<R>(f(std::integral_constant<size_t, (n)> {})); \
-    }                                                                   \
+#define MV_CASE(n)                                                           \
+  case (n) :                                                                 \
+    if constexpr ((n) < N) {                                                 \
+      return static_cast<R>(f(std::integral_constant<std::size_t, (n)> {})); \
+    }                                                                        \
     std::unreachable();
 
 #define MV_CASE2(n)   MV_CASE(n) MV_CASE(n + 1)
@@ -611,7 +611,7 @@ struct storage_base<T> : storage_meta<T>
 #define MV_CASE128(n) MV_CASE64(n) MV_CASE64(n + 64)
 #define MV_CASE256(n) MV_CASE128(n) MV_CASE128(n + 128)
 
-template <size_t Stamped, size_t N, class R, class Self, class F>
+template <std::size_t Stamped, std::size_t N, class R, class Self, class F>
 constexpr R at_index_switch(Self &&self, F &&f)
 {
   if constexpr (Stamped == 4) {
@@ -663,10 +663,10 @@ constexpr R at_index_switch(Self &&self, F &&f)
 #pragma pop_macro("MV_CASE")
 
 /// Calls f with the compile-time index I; the uniform table entry signature.
-template <size_t I, class R, class Self, class F>
+template <std::size_t I, class R, class Self, class F>
 constexpr R at_dispatch(Self &&self, F &&f)
 {
-  return static_cast<R>(f(std::integral_constant<size_t, I> {}));
+  return static_cast<R>(f(std::integral_constant<std::size_t, I> {}));
 }
 
 /// Last table slot, never selected by valid callers (all reach at_index
@@ -677,10 +677,10 @@ template <class R, class Self, class F>
   std::unreachable();
 }
 
-template <size_t N, class R, class Self, class F>
+template <std::size_t N, class R, class Self, class F>
 constexpr R at_index_table(Self &&self, F &&f)
 {
-  return [&]<size_t... Is>(std::index_sequence<Is...>)
+  return [&]<std::size_t... Is>(std::index_sequence<Is...>)
   {
     using dispatch_fn                  = R (*)(Self &&, F &&);
     constexpr dispatch_fn table[N + 1] = { &at_dispatch<Is, R, Self, F>..., &at_dispatch_disengaged<R, Self, F> };
@@ -688,12 +688,12 @@ constexpr R at_index_table(Self &&self, F &&f)
   }(std::make_index_sequence<N> {});
 }
 
-template <size_t N, class Self, class F>
+template <std::size_t N, class Self, class F>
 constexpr decltype(auto) at_index(Self &&self, F &&f)
 {
-  return [&]<size_t... Is>(std::index_sequence<Is...>) -> decltype(auto)
+  return [&]<std::size_t... Is>(std::index_sequence<Is...>) -> decltype(auto)
   {
-    using R = std::common_reference_t<decltype(f(std::integral_constant<size_t, Is> {}))...>;
+    using R = std::common_reference_t<decltype(f(std::integral_constant<std::size_t, Is> {}))...>;
     if constexpr (N <= 4) {
       return at_index_switch<4, N, R>(self, f);
     } else if constexpr (N <= 8) {
@@ -739,14 +739,14 @@ constexpr decltype(auto) visit_2(Visitor &&vis, A &&a, B &&b)
   constexpr std::size_t NB = std::remove_cvref_t<B>::size();
   constexpr std::size_t K  = NA * NB;
   if constexpr (K <= MV_FLAT_LIMIT) {
-    return at_index<K>(flat_self { a.index() * NB + b.index() }, [&]<size_t n>(std::integral_constant<size_t, n>) -> decltype(auto)
+    return at_index<K>(flat_self { a.index() * NB + b.index() }, [&]<std::size_t n>(std::integral_constant<std::size_t, n>) -> decltype(auto)
     {
       return vis(std::forward_like<A>(a).template get<n / NB>(), std::forward_like<B>(b).template get<n % NB>());
     });
   } else {
-    return at_index<NA>(a, [&]<size_t I>(std::integral_constant<size_t, I>) -> decltype(auto)
+    return at_index<NA>(a, [&]<std::size_t I>(std::integral_constant<std::size_t, I>) -> decltype(auto)
     {
-      return at_index<NB>(b, [&]<size_t J>(std::integral_constant<size_t, J>) -> decltype(auto)
+      return at_index<NB>(b, [&]<std::size_t J>(std::integral_constant<std::size_t, J>) -> decltype(auto)
       {
         return vis(std::forward_like<A>(a).template get<I>(), std::forward_like<B>(b).template get<J>());
       });
@@ -759,7 +759,7 @@ template <class V, class Visitor>
 constexpr decltype(auto) visit_impl(Visitor &&vis, V &&v)
 {
   using VV = std::remove_cvref_t<V>;
-  return at_index<VV::size()>(v, [&]<size_t I>(std::integral_constant<size_t, I>) -> decltype(auto)
+  return at_index<VV::size()>(v, [&]<std::size_t I>(std::integral_constant<std::size_t, I>) -> decltype(auto)
   {
     return vis(std::forward_like<V>(v).template get<I>());
   });
@@ -774,7 +774,7 @@ constexpr decltype(auto) visit_impl(Visitor &&vis, V &&v, W &&w, Rest &&...rest)
     return visit_2(vis, v, w);
   } else {
     using VV = std::remove_cvref_t<V>;
-    return at_index<VV::size()>(v, [&]<size_t I>(std::integral_constant<size_t, I>) -> decltype(auto)
+    return at_index<VV::size()>(v, [&]<std::size_t I>(std::integral_constant<std::size_t, I>) -> decltype(auto)
     {
       return visit_impl(
           [&](auto &&...vals) -> decltype(auto)
@@ -845,9 +845,9 @@ class field_variant
 
 public:
   using member_types = typename meta::member_types;
-  template <size_t I>
+  template <std::size_t I>
   using member_type = typename meta::template member_type<I>;
-  template <size_t I>
+  template <std::size_t I>
   using storage_type = typename meta::template storage_type<I>;
 
   constexpr field_variant() = default;
@@ -861,7 +861,7 @@ public:
   requires (!meta::metadata.are_all_mems_trivially_destructible && meta::metadata.are_all_mems_destructible)
   {
     if (s_.has_value()) {
-      field_variant_detail::at_index<size()>(s_, [&]<size_t I>(std::integral_constant<size_t, I>) noexcept(noexcept(s_.template destroy<I>())) -> void
+      field_variant_detail::at_index<size()>(s_, [&]<std::size_t I>(std::integral_constant<std::size_t, I>) noexcept(noexcept(s_.template destroy<I>())) -> void
       {
         s_.template destroy<I>();
       });
@@ -882,7 +882,7 @@ public:
       : s_()
   {
     if (other.s_.has_value()) {
-      field_variant_detail::at_index<size()>(other.s_, [&]<size_t I>(std::integral_constant<size_t, I>) noexcept(noexcept(s_.template construct<I>(other.s_.template get<I>()))) -> void
+      field_variant_detail::at_index<size()>(other.s_, [&]<std::size_t I>(std::integral_constant<std::size_t, I>) noexcept(noexcept(s_.template construct<I>(other.s_.template get<I>()))) -> void
       {
         s_.template construct<I>(other.s_.template get<I>());
       });
@@ -903,7 +903,7 @@ public:
       : s_()
   {
     if (other.s_.has_value()) {
-      field_variant_detail::at_index<size()>(other.s_, [&]<size_t I>(std::integral_constant<size_t, I>) noexcept(std::is_reference_v<member_type<I>> || std::is_nothrow_move_constructible_v<storage_type<I>>) -> void
+      field_variant_detail::at_index<size()>(other.s_, [&]<std::size_t I>(std::integral_constant<std::size_t, I>) noexcept(std::is_reference_v<member_type<I>> || std::is_nothrow_move_constructible_v<storage_type<I>>) -> void
       {
         if constexpr (std::is_reference_v<member_type<I>>) {
           s_.template construct<I>(other.s_.template get<I>()); ///< Reference members are always copied.
@@ -928,20 +928,20 @@ public:
   {
     if (s_.index() == other.s_.index()) {
       if (s_.has_value()) {
-        field_variant_detail::at_index<size()>(s_, [&]<size_t I>(std::integral_constant<size_t, I>) noexcept(noexcept(s_.template get<I>() = other.s_.template get<I>())) -> void
+        field_variant_detail::at_index<size()>(s_, [&]<std::size_t I>(std::integral_constant<std::size_t, I>) noexcept(noexcept(s_.template get<I>() = other.s_.template get<I>())) -> void
         {
           s_.template get<I>() = other.s_.template get<I>();
         });
       }
     } else {
       if (s_.has_value()) {
-        field_variant_detail::at_index<size()>(s_, [&]<size_t I>(std::integral_constant<size_t, I>) noexcept(noexcept(s_.template destroy<I>())) -> void
+        field_variant_detail::at_index<size()>(s_, [&]<std::size_t I>(std::integral_constant<std::size_t, I>) noexcept(noexcept(s_.template destroy<I>())) -> void
         {
           s_.template destroy<I>();
         });
       }
       if (other.s_.has_value()) {
-        field_variant_detail::at_index<size()>(other.s_, [&]<size_t I>(std::integral_constant<size_t, I>) noexcept(noexcept(s_.template construct<I>(other.s_.template get<I>()))) -> void
+        field_variant_detail::at_index<size()>(other.s_, [&]<std::size_t I>(std::integral_constant<std::size_t, I>) noexcept(noexcept(s_.template construct<I>(other.s_.template get<I>()))) -> void
         {
           s_.template construct<I>(other.s_.template get<I>());
         });
@@ -964,20 +964,20 @@ public:
   {
     if (s_.index() == other.s_.index()) {
       if (s_.has_value()) {
-        field_variant_detail::at_index<size()>(s_, [&]<size_t I>(std::integral_constant<size_t, I>) noexcept(noexcept(s_.template get<I>() = std::move(other.s_.template get<I>()))) -> void
+        field_variant_detail::at_index<size()>(s_, [&]<std::size_t I>(std::integral_constant<std::size_t, I>) noexcept(noexcept(s_.template get<I>() = std::move(other.s_.template get<I>()))) -> void
         {
           s_.template get<I>() = std::move(other.s_.template get<I>());
         });
       }
     } else {
       if (s_.has_value()) {
-        field_variant_detail::at_index<size()>(s_, [&]<size_t I>(std::integral_constant<size_t, I>) noexcept(noexcept(s_.template destroy<I>())) -> void
+        field_variant_detail::at_index<size()>(s_, [&]<std::size_t I>(std::integral_constant<std::size_t, I>) noexcept(noexcept(s_.template destroy<I>())) -> void
         {
           s_.template destroy<I>();
         });
       }
       if (other.s_.has_value()) {
-        field_variant_detail::at_index<size()>(other.s_, [&]<size_t I>(std::integral_constant<size_t, I>) noexcept(std::is_reference_v<member_type<I>> || std::is_nothrow_move_constructible_v<storage_type<I>>) -> void
+        field_variant_detail::at_index<size()>(other.s_, [&]<std::size_t I>(std::integral_constant<std::size_t, I>) noexcept(std::is_reference_v<member_type<I>> || std::is_nothrow_move_constructible_v<storage_type<I>>) -> void
         {
           if constexpr (std::is_reference_v<member_type<I>>) {
             s_.template construct<I>(other.s_.template get<I>());
@@ -1012,7 +1012,7 @@ public:
     return meta::template index_of_name<Fs>() != meta::member_count;
   }
 
-  template <size_t I>
+  template <std::size_t I>
   constexpr decltype(auto) get(this auto &&self) noexcept
   {
     return std::forward_like<decltype(self)>(self).s_.template get<I>();
@@ -1021,7 +1021,7 @@ public:
   template <class U>
   constexpr decltype(auto) get(this auto &&self) noexcept
   {
-    constexpr size_t I = meta::template index_of<U>;
+    constexpr std::size_t I = meta::template index_of<U>;
     static_assert(I != meta::member_count, "get<U>: U must match exactly one member type");
     return self.template get<I>();
   }
@@ -1029,20 +1029,20 @@ public:
   template <fixed_string Fs>
   constexpr decltype(auto) get(this auto &&self) noexcept
   {
-    constexpr size_t I = meta::template index_of_name<Fs>();
+    constexpr std::size_t I = meta::template index_of_name<Fs>();
     static_assert(I != meta::member_count, "get<Fs>: no member with this name");
     return self.template get<I>();
   }
 
   /// Destroys the active member, then constructs index I in place.
-  template <size_t I, class... Args>
+  template <std::size_t I, class... Args>
   constexpr decltype(auto) emplace(Args &&...args) noexcept(
       std::is_reference_v<member_type<I>> ||
       std::is_nothrow_constructible_v<storage_type<I>, Args...>)
   requires (I < meta::member_count)
   {
     if (s_.has_value()) {
-      field_variant_detail::at_index<size()>(s_, [&]<size_t J>(std::integral_constant<size_t, J>) noexcept(noexcept(s_.template destroy<J>())) -> void
+      field_variant_detail::at_index<size()>(s_, [&]<std::size_t J>(std::integral_constant<std::size_t, J>) noexcept(noexcept(s_.template destroy<J>())) -> void
       {
         s_.template destroy<J>();
       });
@@ -1060,7 +1060,7 @@ public:
   {
     using cmp_t = typename field_variant_detail::compare_cat_of<typename meta::member_types>::type;
     if (s_.has_value() && other.s_.has_value() && s_.index() == other.s_.index()) {
-      return field_variant_detail::at_index<size()>(s_, [&]<size_t I>(std::integral_constant<size_t, I>) -> cmp_t
+      return field_variant_detail::at_index<size()>(s_, [&]<std::size_t I>(std::integral_constant<std::size_t, I>) -> cmp_t
       {
         if constexpr (std::is_empty_v<std::remove_cvref_t<member_type<I>>>) {
           return cmp_t(std::strong_ordering::equal); ///< Empty member (value or reference): trivially equal.
@@ -1111,7 +1111,7 @@ public:
   {
     if (s_.index() == other.s_.index()) {
       if (s_.has_value()) {
-        field_variant_detail::at_index<size()>(s_, [&]<size_t I>(std::integral_constant<size_t, I>) -> void
+        field_variant_detail::at_index<size()>(s_, [&]<std::size_t I>(std::integral_constant<std::size_t, I>) -> void
         {
           if constexpr (std::is_reference_v<member_type<I>> || !std::is_empty_v<std::remove_cvref_t<member_type<I>>>) {
             using std::swap;
@@ -1150,7 +1150,7 @@ struct hash<field_variant<T>>
     if (!v.has_value()) {
       return field_variant_detail::hash_combine(v.index(), 0);
     }
-    return field_variant_detail::at_index<std::remove_cvref_t<decltype(v)>::size()>(v, [&]<size_t I>(std::integral_constant<size_t, I>) -> std::size_t
+    return field_variant_detail::at_index<std::remove_cvref_t<decltype(v)>::size()>(v, [&]<std::size_t I>(std::integral_constant<std::size_t, I>) -> std::size_t
     {
       using M = typename field_variant<T>::template member_type<I>;
       if constexpr (std::is_reference_v<M> || !std::is_empty_v<std::remove_cvref_t<M>>) {

@@ -20,6 +20,7 @@
 #include <bit>              // std::popcount
 #include <cassert>          // assert
 #include <concepts>         // std::convertible_to, std::unsigned_integral
+#include <cstdint>          // std::uint32_t, std::uint64_t
 #include <cstdlib>          // std::abort
 #include <initializer_list> // std::initializer_list
 #include <iosfwd>           // std::basic_istream, std::basic_ostream
@@ -34,6 +35,38 @@
 #include <type_traits>      // std::remove_cv_t, std::remove_cvref_t
 #include <utility>          // std::forward
 
+#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_AMD64) || (defined(_M_IX86) && _M_IX86_FP >= 2))
+#  include <immintrin.h> // MSVC: every intrinsic is usable without /arch; dispatch is the caller's job
+#  include <intrin.h>    // MSVC: __cpuid/__cpuidex/_xgetbv for runtime dispatch
+#elif defined(__AVX2__)
+#  include <immintrin.h> // _mm256_*: AVX2 target implies SSSE3 shuffle
+#else
+#  if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (_M_IX86_FP >= 2)
+#    include <emmintrin.h> // _mm_*: x64 always provides SSE2
+#  endif
+#  if defined(__SSSE3__)
+#    include <tmmintrin.h> // _mm_shuffle_epi8
+#  endif
+#endif
+#if (defined(__ARM_NEON) || defined(__ARM_NEON__)) && !defined(__ARM_BIG_ENDIAN)
+#  include <arm_neon.h> // vld1q_u8, vceqq_u8, vcntq_u8
+#endif
+
+// https://learn.microsoft.com/en-us/cpp/build/reference/arch-x64?view=msvc-170
+// https://learn.microsoft.com/en-us/cpp/preprocessor/predefined-macros?view=msvc-170
+// MSVC never defines __SSE3__/__SSSE3__/__SSE4_* (not even with /arch:SSE4.2;
+// only __AVX__/__AVX2__ exist, and only with /arch:AVX or /arch:AVX2), so code
+// below that needs SSSE3/AVX2 selects its path at run time on MSVC x86/x64.
+// Clang(-cl) and clang-based compilers also define _MSC_VER/_M_X64 on Windows
+// but, unlike MSVC, reject intrinsics whose target feature is not enabled at
+// compile time ("requires target feature 'avx2'"); they are excluded here and
+// keep the __AVX2__/__SSSE3__ compile-time paths (their runtime-dispatch
+// spelling would be __attribute__((target(...))), deliberately not used here).
+#if defined(_MSC_VER) && !defined(__clang__) \
+    && (defined(_M_X64) || defined(_M_AMD64) || (defined(_M_IX86) && _M_IX86_FP >= 2))
+#  define STDEX_MSVC_RT_INSTRUCTION_SET_ARCHITECTURE_DISPATCH_ 1
+#endif
+
 #include "inline_storage.hpp"
 
 namespace stdex
@@ -47,7 +80,7 @@ struct from_blocks_t
 
 inline constexpr from_blocks_t from_blocks {};
 
-template <std::unsigned_integral Block = uint64_t, size_t N = 0, class Allocator = std::allocator<Block>>
+template <std::unsigned_integral Block = std::uint64_t, std::size_t N = 0, class Allocator = std::allocator<Block>>
 class inlined_bitset : private inline_storage<Block, N, Allocator>
 {
   using base = inline_storage<Block, N, Allocator>;
@@ -459,7 +492,433 @@ private:
     clear_tail_bits_(nbits, blocks_for_bits_(nbits));
   }
 
-public:
+private:
+  // ---------- SIMD byte kernels for any/all/count/pack ----------
+  //
+  // OR/AND/popcount summation are width-agnostic, so the hot loops run over the
+  // raw byte stream (block_count * sizeof(block_type)); only tail masking and
+  // bit deposit depend on bits_per_block. Every load is unaligned: stack
+  // storage carries only alignof(block_type) alignment.
+  //
+  // Each kernel keeps the scalar loop for std::is_constant_evaluated()
+  // (intrinsics are not constant expressions) and for targets without the ISA
+  // extension, so any/all/count stay constexpr and pack keeps its throw.
+
+#if (defined(__ARM_NEON) || defined(__ARM_NEON__)) && !defined(__ARM_BIG_ENDIAN)
+  // NEON has no movemask: fold the 16 high bits with pairwise adds
+  static int neon_movemask_(uint8x16_t v) noexcept
+  {
+    static constexpr unsigned char weights[16] = {
+      1u << 0, 1u << 1, 1u << 2, 1u << 3, 1u << 4, 1u << 5, 1u << 6, 1u << 7,
+      1u << 0, 1u << 1, 1u << 2, 1u << 3, 1u << 4, 1u << 5, 1u << 6, 1u << 7,
+    };
+    uint8x16_t const weighted = vandq_u8(vld1q_u8(weights), v);
+    uint8x8x2_t const zipped  = vzip_u8(vget_low_u8(weighted), vget_high_u8(weighted));
+    uint16x8_t const combined = vreinterpretq_u16_u8(vcombine_u8(zipped.val[0], zipped.val[1]));
+#  if defined(__ARM_ARCH_ISA_A64)
+    return static_cast<int>(vaddvq_u16(combined));
+#  else
+    std::uint64x2_t const summed = vpaddlq_u32(vpaddlq_u16(combined));
+    return static_cast<int>(vgetq_lane_u64(summed, 0) + vgetq_lane_u64(summed, 1));
+#  endif
+  }
+#endif
+
+  // Bit j of a movemask addresses ascending byte j, while block bit (rel + W-1-j)
+  // addresses ascending char s+j: the ones mask needs a bit reversal per chunk.
+  static constexpr unsigned reverse_bits16_(unsigned v) noexcept
+  {
+    v = ((v & 0x55'55u) << 1u) | ((v >> 1u) & 0x55'55u);
+    v = ((v & 0x33'33u) << 2u) | ((v >> 2u) & 0x33'33u);
+    v = ((v & 0x0F'0Fu) << 4u) | ((v >> 4u) & 0x0F'0Fu);
+    // v lives in a 32-bit lane: mask the byte swap down to 16 bits.
+    return ((v << 8u) & 0xFF'00u) | ((v >> 8u) & 0x00'FFu);
+  }
+
+  static constexpr std::uint32_t reverse_bits32_(std::uint32_t v) noexcept
+  {
+    v = ((v & 0x55'55'55'55u) << 1u) | ((v >> 1u) & 0x55'55'55'55u);
+    v = ((v & 0x33'33'33'33u) << 2u) | ((v >> 2u) & 0x33'33'33'33u);
+    v = ((v & 0x0F'0F'0F'0Fu) << 4u) | ((v >> 4u) & 0x0F'0F'0F'0Fu);
+    v = ((v & 0x00'FF'00'FFu) << 8u) | ((v >> 8u) & 0x00'FF'00'FFu);
+    return (v << 16u) | (v >> 16u);
+  }
+
+#if defined(__AVX2__) || defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (_M_IX86_FP >= 2)
+  // Loads 16 chars, throws on any char outside {zero, one}, and reports the
+  // ones mask (bit j set iff byte j equals one).
+  static void pack16_sse_(unsigned char const *s, unsigned char zero, unsigned char one, unsigned &ones)
+  {
+    __m128i const v   = _mm_loadu_si128(reinterpret_cast<__m128i const *>(s));
+    __m128i const z   = _mm_set1_epi8(static_cast<char>(zero));
+    __m128i const o   = _mm_set1_epi8(static_cast<char>(one));
+    unsigned const mz = static_cast<unsigned>(_mm_movemask_epi8(_mm_cmpeq_epi8(v, z)));
+    unsigned const mo = static_cast<unsigned>(_mm_movemask_epi8(_mm_cmpeq_epi8(v, o)));
+    if (((mz | mo) & 0xFF'FFu) != 0xFF'FFu) throw_invalid_argument_();
+    ones = mo & 0xFF'FFu;
+  }
+#endif
+
+#if defined(__AVX2__)
+  static void pack32_avx2_(unsigned char const *s, unsigned char zero, unsigned char one, std::uint32_t &ones)
+  {
+    __m256i const v   = _mm256_loadu_si256(reinterpret_cast<__m256i const *>(s));
+    __m256i const z   = _mm256_set1_epi8(static_cast<char>(zero));
+    __m256i const o   = _mm256_set1_epi8(static_cast<char>(one));
+    std::uint32_t const mz = static_cast<std::uint32_t>(_mm256_movemask_epi8(_mm256_cmpeq_epi8(v, z)));
+    std::uint32_t const mo = static_cast<std::uint32_t>(_mm256_movemask_epi8(_mm256_cmpeq_epi8(v, o)));
+    if ((mz | mo) != 0xFF'FF'FF'FFu) throw_invalid_argument_();
+    ones = mo;
+  }
+#endif
+
+#if (defined(__ARM_NEON) || defined(__ARM_NEON__)) && !defined(__ARM_BIG_ENDIAN)
+  static void pack16_neon_(unsigned char const *s, unsigned char zero, unsigned char one, unsigned &ones)
+  {
+    uint8x16_t const v  = vld1q_u8(s);
+    uint8x16_t const mz = vceqq_u8(v, vdupq_n_u8(zero));
+    uint8x16_t const mo = vceqq_u8(v, vdupq_n_u8(one));
+    if ((static_cast<unsigned>(neon_movemask_(vorrq_u8(mz, mo))) & 0xFF'FFu) != 0xFF'FFu) throw_invalid_argument_();
+    ones = static_cast<unsigned>(neon_movemask_(mo)) & 0xFF'FFu;
+  }
+#endif
+
+  static constexpr bool any_blocks_scalar_(block_type const *blocks, size_type nblocks) noexcept
+  {
+    // Padding is always zero, so the tail block needs no masking: nonzero
+    // anywhere (full or tail) implies a set bit.
+    for (size_type i = 0; i < nblocks; ++i) {
+      if (blocks[i] != block_type { 0 }) return true;
+    }
+    return false;
+  }
+
+  static constexpr bool any_blocks_(block_type const *blocks, size_type nblocks) noexcept
+  {
+    if (nblocks == 0) return false;
+    if (!std::is_constant_evaluated()) {
+      // Below ~256B the SIMD setup (gate math, broadcasts, movemasks) costs more
+      // than the scalar scan it replaces (measured break-even ~150-200B on
+      // MSVC/AVX2; 256B leaves margin); stay scalar.
+      if (nblocks * static_cast<size_type>(sizeof(block_type)) < size_type { 256 }) {
+        return any_blocks_scalar_(blocks, nblocks);
+      }
+      // Scalar peek at the first block: early-true inputs return without
+      // paying any SIMD setup. The full scan below resumes past it.
+      if (blocks[0] != block_type { 0 }) return true;
+      ++blocks;
+      --nblocks;
+      if (nblocks == 0) return false;
+#if defined(__AVX2__)
+      unsigned char const *b = reinterpret_cast<unsigned char const *>(blocks);
+      size_type n            = nblocks * static_cast<size_type>(sizeof(block_type));
+      __m256i const zero256  = _mm256_setzero_si256();
+      __m128i const zero128  = _mm_setzero_si128();
+      while (n >= size_type { 32 }) {
+        __m256i const v = _mm256_loadu_si256(reinterpret_cast<__m256i const *>(b));
+        if (static_cast<std::uint32_t>(_mm256_movemask_epi8(_mm256_cmpeq_epi8(v, zero256))) != 0xFF'FF'FF'FFu) {
+          return true;
+        }
+        b += 32;
+        n -= size_type { 32 };
+      }
+      while (n >= size_type { 16 }) {
+        __m128i const v = _mm_loadu_si128(reinterpret_cast<__m128i const *>(b));
+        if (static_cast<std::uint32_t>(_mm_movemask_epi8(_mm_cmpeq_epi8(v, zero128))) != 0xFF'FFu) {
+          return true;
+        }
+        b += 16;
+        n -= size_type { 16 };
+      }
+      for (size_type i = 0; i < n; ++i) {
+        if (b[i] != 0) return true;
+      }
+      return false;
+#elif defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (_M_IX86_FP >= 2)
+      unsigned char const *b = reinterpret_cast<unsigned char const *>(blocks);
+      size_type n            = nblocks * static_cast<size_type>(sizeof(block_type));
+      __m128i const zero     = _mm_setzero_si128();
+      while (n >= size_type { 16 }) {
+        __m128i const v = _mm_loadu_si128(reinterpret_cast<__m128i const *>(b));
+        if (static_cast<std::uint32_t>(_mm_movemask_epi8(_mm_cmpeq_epi8(v, zero))) != 0xFF'FFu) {
+          return true;
+        }
+        b += 16;
+        n -= size_type { 16 };
+      }
+      for (size_type i = 0; i < n; ++i) {
+        if (b[i] != 0) return true;
+      }
+      return false;
+#elif (defined(__ARM_NEON) || defined(__ARM_NEON__)) && !defined(__ARM_BIG_ENDIAN)
+      unsigned char const *b = reinterpret_cast<unsigned char const *>(blocks);
+      size_type n            = nblocks * static_cast<size_type>(sizeof(block_type));
+      uint8x16_t const zero  = vdupq_n_u8(0);
+      while (n >= size_type { 16 }) {
+        if ((static_cast<unsigned>(neon_movemask_(vceqq_u8(vld1q_u8(b), zero))) & 0xFF'FFu) != 0xFF'FFu) {
+          return true;
+        }
+        b += 16;
+        n -= size_type { 16 };
+      }
+      for (size_type i = 0; i < n; ++i) {
+        if (b[i] != 0) return true;
+      }
+      return false;
+#else
+      return any_blocks_scalar_(blocks, nblocks);
+#endif
+    }
+    return any_blocks_scalar_(blocks, nblocks);
+  }
+
+  static constexpr bool all_blocks_(block_type const *blocks, size_type bit_size) noexcept
+  {
+    size_type const orig_full = bit_size / bits_per_block;
+    size_type full            = orig_full;
+    block_type const *p       = blocks;
+    if (!std::is_constant_evaluated()) {
+      // Sub-vector inputs stay scalar (all wins from 64B up, measured).
+      // The gate implies orig_full >= 1, so p[0] below is a whole block and
+      // the scalar peek is exact; the scan resumes past it (p[full] still
+      // addresses the original tail block for the masked check at the end).
+      if (orig_full * static_cast<size_type>(sizeof(block_type)) >= size_type { 64 }) {
+        if (p[0] != static_cast<block_type>(~block_type { 0 })) return false;
+        ++p;
+        --full;
+#if defined(__AVX2__)
+        // Early exit per chunk keeps the sparse-false case as cheap as scalar.
+        unsigned char const *b = reinterpret_cast<unsigned char const *>(p);
+        size_type n            = full * static_cast<size_type>(sizeof(block_type));
+        __m256i const all256   = _mm256_set1_epi8(static_cast<char>(0xFF));
+        while (n >= size_type { 32 }) {
+          __m256i const v = _mm256_loadu_si256(reinterpret_cast<__m256i const *>(b));
+          if (static_cast<std::uint32_t>(_mm256_movemask_epi8(_mm256_cmpeq_epi8(v, all256))) != 0xFF'FF'FF'FFu) {
+            return false;
+          }
+          b += 32;
+          n -= size_type { 32 };
+        }
+        // Drained 32B chunks may leave a 16B remainder; SSE2 is always present.
+        __m128i const all128 = _mm_set1_epi8(static_cast<char>(0xFF));
+        while (n >= size_type { 16 }) {
+          __m128i const v = _mm_loadu_si128(reinterpret_cast<__m128i const *>(b));
+          if (static_cast<std::uint32_t>(_mm_movemask_epi8(_mm_cmpeq_epi8(v, all128))) != 0xFF'FFu) return false;
+          b += 16;
+          n -= size_type { 16 };
+        }
+        size_type const consumed = (full * static_cast<size_type>(sizeof(block_type)) - n) / static_cast<size_type>(sizeof(block_type));
+        p += consumed;
+        full -= consumed;
+#elif defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (_M_IX86_FP >= 2)
+        unsigned char const *b = reinterpret_cast<unsigned char const *>(p);
+        size_type n            = full * static_cast<size_type>(sizeof(block_type));
+        __m128i const all      = _mm_set1_epi8(static_cast<char>(0xFF));
+        while (n >= size_type { 16 }) {
+          __m128i const v = _mm_loadu_si128(reinterpret_cast<__m128i const *>(b));
+          if (static_cast<std::uint32_t>(_mm_movemask_epi8(_mm_cmpeq_epi8(v, all))) != 0xFF'FFu) return false;
+          b += 16;
+          n -= size_type { 16 };
+        }
+        size_type const consumed = (full * static_cast<size_type>(sizeof(block_type)) - n) / static_cast<size_type>(sizeof(block_type));
+        p += consumed;
+        full -= consumed;
+#elif (defined(__ARM_NEON) || defined(__ARM_NEON__)) && !defined(__ARM_BIG_ENDIAN)
+        unsigned char const *b = reinterpret_cast<unsigned char const *>(p);
+        size_type n            = full * static_cast<size_type>(sizeof(block_type));
+        uint8x16_t const all   = vdupq_n_u8(0xFFu);
+        while (n >= size_type { 16 }) {
+          if ((static_cast<unsigned>(neon_movemask_(vceqq_u8(vld1q_u8(b), all))) & 0xFF'FFu) != 0xFF'FFu) return false;
+          b += 16;
+          n -= size_type { 16 };
+        }
+        size_type const consumed = (full * static_cast<size_type>(sizeof(block_type)) - n) / static_cast<size_type>(sizeof(block_type));
+        p += consumed;
+        full -= consumed;
+#endif
+      }
+    }
+    for (size_type i = 0; i < full; ++i) {
+      if (p[i] != static_cast<block_type>(~block_type { 0 })) return false;
+    }
+    if (size_type const r = bit_size % bits_per_block; r != 0) {
+      if ((p[full] & low_bits_mask_(r)) != low_bits_mask_(r)) return false;
+    }
+    return true;
+  }
+
+#if defined(STDEX_MSVC_RT_INSTRUCTION_SET_ARCHITECTURE_DISPATCH_)
+  // MSVC exposes no SSSE3/AVX2 step through __isa_available (its enum is
+  // X86/SSE2/SSE42/AVX/ENFSTRG/AVX2/AVX512 only), so probe CPUID directly.
+  // Cached process-wide; both helpers run before any vector instruction.
+  static bool ssse3_available_() noexcept
+  {
+    // CPUID.1:ECX bit 9. No extended CPU/OS state involved, exact.
+    static int const ecx = [] {
+      int info[4] {};
+      __cpuid(info, 1);
+      return info[2];
+    }();
+    return (ecx & 0x2'00) != 0;
+  }
+
+  static bool avx2_available_() noexcept
+  {
+    // CPU gate (CPUID.1 ECX[27]=XSAVE, [28]=AVX; CPUID.7 EBX[5]=AVX2) plus OS
+    // gate (XCR0[2:1]: XMM+YMM saved), mirroring the CRT initialization.
+    static bool const available = [] {
+      int info[4] {};
+      __cpuid(info, 1);
+      if ((info[2] & 0x18'00'00'00) != 0x18'00'00'00) return false;
+      if ((_xgetbv(0) & 0x6u) != 0x6u) return false;
+      __cpuidex(info, 7, 0);
+      return (info[1] & 0x20) != 0;
+    }();
+    return available;
+  }
+#endif
+
+#if defined(__AVX2__) || defined(__SSSE3__) || defined(STDEX_MSVC_RT_INSTRUCTION_SET_ARCHITECTURE_DISPATCH_) || \
+    ((defined(__ARM_NEON) || defined(__ARM_NEON__)) && !defined(__ARM_BIG_ENDIAN) && defined(__ARM_ARCH_ISA_A64))
+  // Nibble-shuffle popcount over whole-block bytes; the caller keeps the masked
+  // tail scalar. AVX2 implies SSSE3 on GCC/Clang (signalled via __AVX2__); on
+  // MSVC neither macro ever appears (default /O2), so the widest available
+  // width is picked at run time (see ssse3/avx2_available_ above).
+#  if defined(__AVX2__) || defined(STDEX_MSVC_RT_INSTRUCTION_SET_ARCHITECTURE_DISPATCH_)
+  // Drains 32B chunks, advancing (b, n); the horizontal sum is the caller's.
+  static void count_shuffle32_(unsigned char const *&b, size_type &n, __m256i &acc) noexcept
+  {
+    __m256i const lut = _mm256_broadcastsi128_si256(_mm_setr_epi8(0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4));
+    __m256i const low = _mm256_set1_epi8(0x0F);
+    __m256i const z   = _mm256_setzero_si256();
+    acc               = _mm256_setzero_si256();
+    while (n >= size_type { 32 }) {
+      __m256i const v = _mm256_loadu_si256(reinterpret_cast<__m256i const *>(b));
+      __m256i const c = _mm256_add_epi8(
+          _mm256_shuffle_epi8(lut, _mm256_and_si256(v, low)),
+          _mm256_shuffle_epi8(lut, _mm256_and_si256(_mm256_srli_epi16(v, 4), low)));
+      acc             = _mm256_add_epi64(acc, _mm256_sad_epu8(c, z));
+      b += 32;
+      n -= size_type { 32 };
+    }
+    // The runtime-dispatch build around here is SSE2 codegen with inline VEX;
+    // close the upper lane so later legacy-SSE code pays no transition stall.
+    _mm256_zeroupper();
+  }
+
+  static size_type horiz_sum256_(__m256i acc) noexcept
+  {
+    alignas(32) std::uint64_t lanes[4] {};
+    _mm256_store_si256(reinterpret_cast<__m256i *>(lanes), acc);
+    return static_cast<size_type>(lanes[0] + lanes[1] + lanes[2] + lanes[3]);
+  }
+#  endif
+#  if defined(__AVX2__) || defined(__SSSE3__) || defined(STDEX_MSVC_RT_INSTRUCTION_SET_ARCHITECTURE_DISPATCH_)
+  // Drains 16B chunks, advancing (b, n); the horizontal sum is the caller's.
+  static void count_shuffle16_(unsigned char const *&b, size_type &n, __m128i &acc) noexcept
+  {
+    __m128i const lut = _mm_setr_epi8(0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4);
+    __m128i const low = _mm_set1_epi8(0x0F);
+    __m128i const z   = _mm_setzero_si128();
+    acc               = _mm_setzero_si128();
+    while (n >= size_type { 16 }) {
+      __m128i const v = _mm_loadu_si128(reinterpret_cast<__m128i const *>(b));
+      __m128i const c = _mm_add_epi8(
+          _mm_shuffle_epi8(lut, _mm_and_si128(v, low)),
+          _mm_shuffle_epi8(lut, _mm_and_si128(_mm_srli_epi16(v, 4), low)));
+      acc             = _mm_add_epi64(acc, _mm_sad_epu8(c, z));
+      b += 16;
+      n -= size_type { 16 };
+    }
+  }
+
+  static size_type horiz_sum128_(__m128i acc) noexcept
+  {
+    alignas(16) std::uint64_t lanes[2] {};
+    _mm_store_si128(reinterpret_cast<__m128i *>(lanes), acc);
+    return static_cast<size_type>(lanes[0] + lanes[1]);
+  }
+#  endif
+
+  static size_type count_full_bytes_(unsigned char const *b, size_type n) noexcept
+  {
+    size_type total = size_type { 0 };
+#  if defined(__AVX2__)
+    {
+      __m256i acc;
+      count_shuffle32_(b, n, acc);
+      total += horiz_sum256_(acc);
+    }
+    {
+      __m128i acc;
+      count_shuffle16_(b, n, acc);
+      total += horiz_sum128_(acc);
+    }
+#  elif defined(STDEX_MSVC_RT_INSTRUCTION_SET_ARCHITECTURE_DISPATCH_)
+    if (avx2_available_()) {
+      __m256i acc;
+      count_shuffle32_(b, n, acc);
+      total += horiz_sum256_(acc);
+    }
+    if (ssse3_available_()) {
+      __m128i acc;
+      count_shuffle16_(b, n, acc);
+      total += horiz_sum128_(acc);
+    }
+#  elif defined(__SSSE3__)
+    {
+      __m128i acc;
+      count_shuffle16_(b, n, acc);
+      total += horiz_sum128_(acc);
+    }
+#  endif
+#  if (defined(__ARM_NEON) || defined(__ARM_NEON__)) && !defined(__ARM_BIG_ENDIAN) && defined(__ARM_ARCH_ISA_A64)
+    while (n >= size_type { 16 }) {
+      total += static_cast<size_type>(vaddlvq_u8(vcntq_u8(vld1q_u8(b))));
+      b += 16;
+      n -= size_type { 16 };
+    }
+#  endif
+    for (size_type i = 0; i < n; ++i) {
+      total += static_cast<size_type>(std::popcount(b[i]));
+    }
+    return total;
+  }
+#endif
+
+  static constexpr size_type count_blocks_(block_type const *blocks, size_type bit_size) noexcept
+  {
+    size_type const full = bit_size / bits_per_block;
+    size_type total      = size_type { 0 };
+    if (!std::is_constant_evaluated()) {
+#if defined(__AVX2__) || defined(__SSSE3__) || defined(STDEX_MSVC_RT_INSTRUCTION_SET_ARCHITECTURE_DISPATCH_) || \
+    ((defined(__ARM_NEON) || defined(__ARM_NEON__)) && !defined(__ARM_BIG_ENDIAN) && defined(__ARM_ARCH_ISA_A64))
+      // Same sub-vector gate idea as any_blocks_, but count's shuffle setup plus
+      // the horizontal lane sum break even later (~150-200B measured); gate 256B.
+      if (full * static_cast<size_type>(sizeof(block_type)) >= size_type { 256 }) {
+        total = count_full_bytes_(reinterpret_cast<unsigned char const *>(blocks), full * static_cast<size_type>(sizeof(block_type)));
+      } else {
+        for (size_type i = 0; i < full; ++i) {
+          total += static_cast<size_type>(std::popcount(blocks[i]));
+        }
+      }
+#else
+      for (size_type i = 0; i < full; ++i) {
+        total += static_cast<size_type>(std::popcount(blocks[i]));
+      }
+#endif
+    } else {
+      for (size_type i = 0; i < full; ++i) {
+        total += static_cast<size_type>(std::popcount(blocks[i]));
+      }
+    }
+    if (size_type const r = bit_size % bits_per_block; r != 0) {
+      total += static_cast<size_type>(std::popcount(static_cast<block_type>(blocks[full] & low_bits_mask_(r))));
+    }
+    return total;
+  }
+
+ public:
   // ---------- five rules ----------
   constexpr inlined_bitset() noexcept : base { allocator_type {} }  { }
 
@@ -543,15 +1002,6 @@ public:
   }
 
 private:
-  /*
-  std::uint64_t pack64_avx2(const std::uint8_t* src) {
-      __m256i a = _mm256_loadu_si256((const __m256i*)src);
-      __m256i b = _mm256_loadu_si256((const __m256i*)(src + 32));
-      a = _mm256_slli_epi16(a, 7);
-      b = _mm256_slli_epi16(b, 7);
-      return std::uint64_t(_mm256_movemask_epi8(a)) | (std::uint64_t(_mm256_movemask_epi8(b)) << 32);
-  }
-  */
   template <std::input_iterator InputIt>
   requires std::convertible_to<std::iter_reference_t<InputIt>, bool>
   static constexpr block_type pack_bits_to_block_(InputIt &src, size_type const nbits_in_block)
@@ -651,7 +1101,39 @@ private:
     block_type value {};
     size_type const lo = block_index * bits_per_block;
     size_type const hi = (std::min) (lo + bits_per_block, static_cast<size_type>(len));
-    for (size_type i = lo; i < hi; ++i) {
+    size_type i        = lo;
+    // Chars arrive last-char-first (bit 0 is the string tail), so each chunk is
+    // validated with a parallel compare and deposited with a bit reversal.
+    if constexpr (sizeof(CharT) == 1 && bits_per_block >= 16) {
+      if (!std::is_constant_evaluated()) {
+        unsigned char const *const bytes = reinterpret_cast<unsigned char const *>(str.data());
+        unsigned char const z            = static_cast<unsigned char>(zero);
+        unsigned char const o            = static_cast<unsigned char>(one);
+        size_type const pos_size         = static_cast<size_type>(pos);
+        size_type const len_size         = static_cast<size_type>(len);
+#if defined(__AVX2__)
+        for (; i + size_type { 32 } <= hi; i += size_type { 32 }) {
+          std::uint32_t ones = 0;
+          pack32_avx2_(bytes + (pos_size + (len_size - (i + size_type { 32 }))), z, o, ones);
+          value |= static_cast<block_type>(static_cast<block_type>(reverse_bits32_(ones)) << (i - lo));
+        }
+#endif
+#if defined(__AVX2__) || defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (_M_IX86_FP >= 2)
+        for (; i + size_type { 16 } <= hi; i += size_type { 16 }) {
+          unsigned ones = 0;
+          pack16_sse_(bytes + (pos_size + (len_size - (i + size_type { 16 }))), z, o, ones);
+          value |= static_cast<block_type>(static_cast<block_type>(reverse_bits16_(ones)) << (i - lo));
+        }
+#elif (defined(__ARM_NEON) || defined(__ARM_NEON__)) && !defined(__ARM_BIG_ENDIAN)
+        for (; i + size_type { 16 } <= hi; i += size_type { 16 }) {
+          unsigned ones = 0;
+          pack16_neon_(bytes + (pos_size + (len_size - (i + size_type { 16 }))), z, o, ones);
+          value |= static_cast<block_type>(static_cast<block_type>(reverse_bits16_(ones)) << (i - lo));
+        }
+#endif
+      }
+    }
+    for (; i < hi; ++i) {
       view_size const k = static_cast<view_size>(i);
       CharT const c     = str[pos + (len - view_size { 1 } - k)];
       if (c != zero && c != one) throw_invalid_argument_();
@@ -800,7 +1282,8 @@ public:
   // ---------- from_range (block-wise) ----------
 #if defined(__cpp_lib_ranges)
   template <std::ranges::input_range Rng>
-  requires std::unsigned_integral<std::remove_cvref_t<std::ranges::range_value_t<Rng>>> && std::convertible_to<std::ranges::range_reference_t<Rng>, block_type>
+  requires std::unsigned_integral<std::remove_cvref_t<std::ranges::range_value_t<Rng>>> 
+        && std::convertible_to<std::ranges::range_reference_t<Rng>, block_type>
   constexpr inlined_bitset(from_blocks_t, Rng &&rng, allocator_type const &alloc = allocator_type {})
       : inlined_bitset { from_blocks, std::ranges::begin(rng), std::ranges::end(rng), alloc }
   {
@@ -977,45 +1460,10 @@ public:
     return old;
   }
 
-  [[nodiscard]] constexpr bool all() const noexcept
-  {
-    block_type const *const blocks = data();
-    size_type const full           = bit_size_ / bits_per_block;
-    for (size_type i = 0; i < full; ++i) {
-      if (blocks[i] != static_cast<block_type>(~block_type { 0 })) return false;
-    }
-    if (size_type const r = bit_size_ % bits_per_block; r != 0) {
-      if ((blocks[full] & low_bits_mask_(r)) != low_bits_mask_(r)) return false;
-    }
-    return true;
-  }
-
-  [[nodiscard]] constexpr bool any() const noexcept
-  {
-    // Padding is always zero, so the tail block needs no masking: nonzero
-    // anywhere (full or tail) implies a set bit.
-    block_type const *const blocks    = data();
-    size_type const block_count_value = block_count();
-    for (size_type i = 0; i < block_count_value; ++i) {
-      if (blocks[i] != block_type { 0 }) return true;
-    }
-    return false;
-  }
+  [[nodiscard]] constexpr bool all() const noexcept { return all_blocks_(data(), bit_size_); }
+  [[nodiscard]] constexpr bool any() const noexcept { return any_blocks_(data(), block_count()); }
   [[nodiscard]] constexpr bool none() const noexcept { return !any(); }
-
-  [[nodiscard]] constexpr size_type count() const noexcept
-  {
-    block_type const *const blocks = data();
-    size_type total                = size_type { 0 };
-    size_type const full           = bit_size_ / bits_per_block;
-    for (size_type i = 0; i < full; ++i) {
-      total += static_cast<size_type>(std::popcount(blocks[i]));
-    }
-    if (size_type const r = bit_size_ % bits_per_block; r != 0) {
-      total += static_cast<size_type>(std::popcount(static_cast<block_type>(blocks[full] & low_bits_mask_(r))));
-    }
-    return total;
-  }
+  [[nodiscard]] constexpr size_type count() const noexcept { return count_blocks_(data(), bit_size_); }
 
 private:
   /// Applies op(block, mask) over [pos, pos + len). Requires pos + len <= bit_size_;
@@ -1613,9 +2061,9 @@ private:
   size_type bit_size_ {};
 };
 
-template <class CharT, class Traits, std::unsigned_integral Block, size_t N, class Allocator>
+template <class CharT, class Traits, std::unsigned_integral Block, std::size_t N, class Allocator>
 std::basic_ostream<CharT, Traits> &operator<< (std::basic_ostream<CharT, Traits> &os, inlined_bitset<Block, N, Allocator> const &bitset);
 
-template <class CharT, class Traits, std::unsigned_integral Block, size_t N, class Allocator>
+template <class CharT, class Traits, std::unsigned_integral Block, std::size_t N, class Allocator>
 std::basic_istream<CharT, Traits> &operator>> (std::basic_istream<CharT, Traits> &is, inlined_bitset<Block, N, Allocator> &bitset);
 } // namespace stdex

@@ -18,7 +18,7 @@
 
 #include <bit>         // std::bit_cast
 #include <concepts>    // std::integral, std::floating_point
-#include <cstdint>     // uint64_t, uint32_t, uint16_t, uint8_t
+#include <cstdint>     // std::uint64_t, std::uint32_t, std::uint16_t, std::uint8_t
 #include <type_traits> // std::remove_cv_t, std::is_enum_v, std::make_unsigned_t, std::underlying_type_t, std::conditional_t
 
 #if defined(__clang__)
@@ -68,7 +68,7 @@ struct unsigned_equivalent;
 template <>
 struct unsigned_equivalent<bool>
 {
-  using type = uint8_t;
+  using type = std::uint8_t;
 };
 
 template <std::integral T>
@@ -83,7 +83,7 @@ struct unsigned_equivalent<T>
 {
   using type = std::conditional_t<
       std::is_same_v<std::underlying_type_t<T>, bool>,
-      uint8_t,
+      std::uint8_t,
       std::make_unsigned_t<std::underlying_type_t<T>>>;
 };
 
@@ -116,7 +116,7 @@ requires (std::is_arithmetic_v<T> || std::is_enum_v<T>)
 #if !defined(DEBUG) && !defined(_DEBUG)
 [[msvc::forceinline, gnu::always_inline]]
 #endif
-constexpr size_t highest_one_bit_index(T const value) noexcept
+constexpr std::size_t highest_one_bit_index(T const value) noexcept
 {
   using uint_t = unsigned_equivalent_t<T>;
   return std::bit_width(static_cast<uint_t>(to_unsigned(value) | uint_t(1))) - 1;
