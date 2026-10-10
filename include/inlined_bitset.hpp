@@ -1978,39 +1978,322 @@ public:
   [[nodiscard]] constexpr bool is_proper_subset_of(inlined_bitset const &other) const noexcept;
   [[nodiscard]] constexpr bool intersects(inlined_bitset const &other) const noexcept;
 
-  [[nodiscard]] constexpr size_type find_first() const noexcept;
-  [[nodiscard]] constexpr size_type find_next(size_type prev) const noexcept;
-  [[nodiscard]] constexpr size_type find_last() const noexcept;
-  [[nodiscard]] constexpr size_type find_prev(size_type next) const noexcept;
+  [[nodiscard]] constexpr size_type find_first() const noexcept
+  {
+    block_type const *const blocks = data();
+    size_type const n              = block_count();
+    for (size_type i = 0; i < n; ++i) {
+      if (block_type const w = blocks[i]; w != block_type { 0 }) {
+        return i * bits_per_block + static_cast<size_type>(std::countr_zero(w));
+      }
+    }
+    return npos;
+  }
 
-  [[nodiscard]] constexpr size_type find_first_zero() const noexcept;
-  [[nodiscard]] constexpr size_type find_next_zero(size_type prev) const noexcept;
-  [[nodiscard]] constexpr size_type find_last_zero() const noexcept;
-  [[nodiscard]] constexpr size_type find_prev_zero(size_type next) const noexcept;
+  [[nodiscard]] constexpr size_type find_next(size_type prev) const noexcept
+  {
+    // Strictly after prev; npos (or the last bit) has no successor — the
+    // prev + 1 increment below must never wrap around.
+    if (prev == npos) [[unlikely]] return npos;
+    size_type const from = prev + 1;
+    if (from >= bit_size_) [[unlikely]] return npos;
+    block_type const *const blocks = data();
+    size_type const first          = from / bits_per_block;
+    size_type const shift          = from % bits_per_block;
+    if (block_type const w = static_cast<block_type>(blocks[first] & static_cast<block_type>(static_cast<block_type>(~block_type { 0 }) << shift));
+        w != block_type { 0 }) {
+      return first * bits_per_block + static_cast<size_type>(std::countr_zero(w));
+    }
+    size_type const n = block_count();
+    for (size_type i = first + 1; i < n; ++i) {
+      if (block_type const w = blocks[i]; w != block_type { 0 }) {
+        return i * bits_per_block + static_cast<size_type>(std::countr_zero(w));
+      }
+    }
+    return npos;
+  }
 
-  template <std::output_iterator<block_type> OutIt>
-  constexpr OutIt copy_blocks(OutIt out) const;
+  [[nodiscard]] constexpr size_type find_last() const noexcept
+  {
+    block_type const *const blocks = data();
+    for (size_type n = block_count(); n-- > 0;) {
+      if (block_type const w = blocks[n]; w != block_type { 0 }) {
+        return n * bits_per_block + (bits_per_block - 1 - static_cast<size_type>(std::countl_zero(w)));
+      }
+    }
+    return npos;
+  }
 
-  //[[nodiscard]] constexpr auto set_bits() const noexcept;   // view of positions where bit==1
-  //[[nodiscard]] constexpr auto unset_bits() const noexcept; // view of positions where bit==0
+  [[nodiscard]] constexpr size_type find_prev(size_type next) const noexcept
+  {
+    // Strictly before next; clamp end-of-range (and npos) to size, so
+    // find_prev(size) — and find_prev(npos) — mean "last overall".
+    size_type const bound = next <= bit_size_ ? next : bit_size_;
+    if (bound == 0) [[unlikely]] return npos;
+    block_type const *const blocks = data();
+    size_type const last          = bound - 1;
+    size_type const bl            = last / bits_per_block;
+    size_type const keep          = last - bl * bits_per_block + 1;
+    block_type w                  = blocks[bl];
+    if (keep != bits_per_block) {
+      w = static_cast<block_type>(w & low_bits_mask_(keep));
+    }
+    if (w != block_type { 0 }) {
+      return bl * bits_per_block + (bits_per_block - 1 - static_cast<size_type>(std::countl_zero(w)));
+    }
+    for (size_type i = bl; i-- > 0;) {
+      if (block_type const u = blocks[i]; u != block_type { 0 }) {
+        return i * bits_per_block + (bits_per_block - 1 - static_cast<size_type>(std::countl_zero(u)));
+      }
+    }
+    return npos;
+  }
+
+  [[nodiscard]] constexpr size_type find_first_zero() const noexcept
+  {
+    // Only real bits qualify: the tail padding is zero but must never match.
+    block_type const *const blocks = data();
+    size_type const full           = bit_size_ / bits_per_block;
+    for (size_type i = 0; i < full; ++i) {
+      if (block_type const w = static_cast<block_type>(~blocks[i]); w != block_type { 0 }) {
+        return i * bits_per_block + static_cast<size_type>(std::countr_zero(w));
+      }
+    }
+    if (size_type const r = bit_size_ % bits_per_block; r != 0) {
+      // Mask before testing: ~tail has ones exactly in the padding.
+      if (block_type const w = static_cast<block_type>(~blocks[full] & low_bits_mask_(r)); w != block_type { 0 }) {
+        return full * bits_per_block + static_cast<size_type>(std::countr_zero(w));
+      }
+    }
+    return npos;
+  }
+
+  [[nodiscard]] constexpr size_type find_next_zero(size_type prev) const noexcept
+  {
+    if (prev == npos) [[unlikely]] return npos;
+    size_type const from = prev + 1;
+    if (from >= bit_size_) [[unlikely]] return npos;
+    block_type const *const blocks = data();
+    size_type const full           = bit_size_ / bits_per_block;
+    size_type const first          = from / bits_per_block;
+    size_type const shift          = from % bits_per_block;
+    {
+      block_type mask = static_cast<block_type>(static_cast<block_type>(~block_type { 0 }) << shift);
+      if (first >= full) {
+        // from lies in the partial tail word: also exclude its zero padding,
+        // which would otherwise false-positive as "zero".
+        mask = static_cast<block_type>(mask & low_bits_mask_(bit_size_ - full * bits_per_block));
+      }
+      if (block_type const w = static_cast<block_type>(~blocks[first] & mask); w != block_type { 0 }) {
+        return first * bits_per_block + static_cast<size_type>(std::countr_zero(w));
+      }
+    }
+    for (size_type i = first + 1; i < full; ++i) {
+      if (block_type const w = static_cast<block_type>(~blocks[i]); w != block_type { 0 }) {
+        return i * bits_per_block + static_cast<size_type>(std::countr_zero(w));
+      }
+    }
+    if (size_type const r = bit_size_ % bits_per_block; r != 0 && first < full) {
+      if (block_type const w = static_cast<block_type>(~blocks[full] & low_bits_mask_(r)); w != block_type { 0 }) {
+        return full * bits_per_block + static_cast<size_type>(std::countr_zero(w));
+      }
+    }
+    return npos;
+  }
+
+  [[nodiscard]] constexpr size_type find_last_zero() const noexcept
+  {
+    block_type const *const blocks = data();
+    size_type const full           = bit_size_ / bits_per_block;
+    // Highest real bits live in the partial tail; check it first.
+    if (size_type const r = bit_size_ % bits_per_block; r != 0) {
+      if (block_type const w = static_cast<block_type>(~blocks[full] & low_bits_mask_(r)); w != block_type { 0 }) {
+        return full * bits_per_block + (bits_per_block - 1 - static_cast<size_type>(std::countl_zero(w)));
+      }
+    }
+    for (size_type i = full; i-- > 0;) {
+      if (block_type const w = static_cast<block_type>(~blocks[i]); w != block_type { 0 }) {
+        return i * bits_per_block + (bits_per_block - 1 - static_cast<size_type>(std::countl_zero(w)));
+      }
+    }
+    return npos;
+  }
+
+  [[nodiscard]] constexpr size_type find_prev_zero(size_type next) const noexcept
+  {
+    size_type const bound = next <= bit_size_ ? next : bit_size_;
+    if (bound == 0) [[unlikely]] return npos;
+    block_type const *const blocks = data();
+    size_type const last          = bound - 1;
+    size_type const bl            = last / bits_per_block;
+    size_type const keep          = last - bl * bits_per_block + 1;
+    block_type w                  = static_cast<block_type>(~blocks[bl]);
+    if (keep != bits_per_block) {
+      w = static_cast<block_type>(w & low_bits_mask_(keep));
+    }
+    if (w != block_type { 0 }) {
+      return bl * bits_per_block + (bits_per_block - 1 - static_cast<size_type>(std::countl_zero(w)));
+    }
+    for (size_type i = bl; i-- > 0;) {
+      if (block_type const u = static_cast<block_type>(~blocks[i]); u != block_type { 0 }) {
+        return i * bits_per_block + (bits_per_block - 1 - static_cast<size_type>(std::countl_zero(u)));
+      }
+    }
+    return npos;
+  }
 
 public:
-  [[nodiscard]] constexpr inlined_bitset operator& (inlined_bitset const &) const;
-  [[nodiscard]] constexpr inlined_bitset operator| (inlined_bitset const &) const;
-  [[nodiscard]] constexpr inlined_bitset operator^ (inlined_bitset const &) const;
-  [[nodiscard]] constexpr inlined_bitset operator- () const;
-  [[nodiscard]] constexpr inlined_bitset operator~ () const;
+  [[nodiscard]] constexpr inlined_bitset operator& (inlined_bitset const &other) const
+  {
+    inlined_bitset result(*this);
+    result &= other;
+    return result;
+  }
 
-  [[nodiscard]] constexpr inlined_bitset operator<< (size_type n) const;
-  [[nodiscard]] constexpr inlined_bitset operator>> (size_type n) const;
-  constexpr inlined_bitset &operator<<= (size_type n);
-  constexpr inlined_bitset &operator>>= (size_type n);
+  [[nodiscard]] constexpr inlined_bitset operator| (inlined_bitset const &other) const
+  {
+    inlined_bitset result(*this);
+    result |= other;
+    return result;
+  }
 
-  constexpr inlined_bitset &operator&= (inlined_bitset const &);
-  constexpr inlined_bitset &operator|= (inlined_bitset const &);
-  constexpr inlined_bitset &operator^= (inlined_bitset const &);
+  [[nodiscard]] constexpr inlined_bitset operator^ (inlined_bitset const &other) const
+  {
+    inlined_bitset result(*this);
+    result ^= other;
+    return result;
+  }
 
-  constexpr inlined_bitset &operator-= (inlined_bitset const &);
+  [[nodiscard]] constexpr inlined_bitset operator- (inlined_bitset const &other) const
+  {
+    inlined_bitset result(*this);
+    result -= other;
+    return result;
+  }
+
+  [[nodiscard]] constexpr inlined_bitset operator~ () const
+  {
+    inlined_bitset result(*this);
+    result.flip();
+    return result;
+  }
+
+  [[nodiscard]] constexpr inlined_bitset operator<< (size_type n) const
+  {
+    inlined_bitset result(*this);
+    result <<= n;
+    return result;
+  }
+
+  [[nodiscard]] constexpr inlined_bitset operator>> (size_type n) const
+  {
+    inlined_bitset result(*this);
+    result >>= n;
+    return result;
+  }
+
+  constexpr inlined_bitset &operator<<= (size_type n)
+  {
+    if (empty() || n == 0) [[unlikely]] return *this;
+    if (n >= bit_size_) {
+      reset();
+      return *this;
+    }
+    block_type *const blocks   = data();
+    size_type const nblocks     = block_count();
+    size_type const word_shift  = n / bits_per_block;
+    size_type const bit_shift   = n % bits_per_block;
+    if (word_shift != 0) {
+      for (size_type i = nblocks; i-- > word_shift;) {
+        blocks[i] = blocks[i - word_shift];
+      }
+      std::fill_n(blocks, word_shift, block_type { 0 });
+    }
+    if (bit_shift != 0) {
+      for (size_type i = nblocks - 1; i > 0; --i) {
+        blocks[i] = static_cast<block_type>((blocks[i] << bit_shift) | (blocks[i - 1] >> (bits_per_block - bit_shift)));
+      }
+      blocks[0] = static_cast<block_type>(blocks[0] << bit_shift);
+    }
+    // Left shift pushes ones into the tail padding.
+    clear_tail_bits_(bit_size_);
+    return *this;
+  }
+
+  constexpr inlined_bitset &operator>>= (size_type n)
+  {
+    if (empty() || n == 0) [[unlikely]] return *this;
+    if (n >= bit_size_) {
+      reset();
+      return *this;
+    }
+    block_type *const blocks   = data();
+    size_type const nblocks     = block_count();
+    size_type const word_shift  = n / bits_per_block;
+    size_type const bit_shift   = n % bits_per_block;
+    if (bit_shift != 0) {
+      for (size_type i = 0; i + 1 < nblocks; ++i) {
+        blocks[i] = static_cast<block_type>((blocks[i] >> bit_shift) | (blocks[i + 1] << (bits_per_block - bit_shift)));
+      }
+      blocks[nblocks - 1] = static_cast<block_type>(blocks[nblocks - 1] >> bit_shift);
+    }
+    if (word_shift != 0) {
+      for (size_type i = 0; i + word_shift < nblocks; ++i) {
+        blocks[i] = blocks[i + word_shift];
+      }
+      std::fill_n(blocks + nblocks - word_shift, word_shift, block_type { 0 });
+    }
+    // Right shift only introduces zeros at the top: padding stays zero.
+    return *this;
+  }
+
+  constexpr inlined_bitset &operator&= (inlined_bitset const &other)
+  {
+    if (bit_size_ != other.bit_size_) [[unlikely]] throw_invalid_argument_();
+    block_type *const blocks    = data();
+    block_type const *const rhs = other.data();
+    size_type const n           = block_count();
+    for (size_type i = 0; i < n; ++i) {
+      blocks[i] = static_cast<block_type>(blocks[i] & rhs[i]);
+    }
+    return *this;
+  }
+
+  constexpr inlined_bitset &operator|= (inlined_bitset const &other)
+  {
+    if (bit_size_ != other.bit_size_) [[unlikely]] throw_invalid_argument_();
+    block_type *const blocks    = data();
+    block_type const *const rhs = other.data();
+    size_type const n           = block_count();
+    for (size_type i = 0; i < n; ++i) {
+      blocks[i] = static_cast<block_type>(blocks[i] | rhs[i]);
+    }
+    return *this;
+  }
+
+  constexpr inlined_bitset &operator^= (inlined_bitset const &other)
+  {
+    if (bit_size_ != other.bit_size_) [[unlikely]] throw_invalid_argument_();
+    block_type *const blocks    = data();
+    block_type const *const rhs = other.data();
+    size_type const n           = block_count();
+    for (size_type i = 0; i < n; ++i) {
+      blocks[i] = static_cast<block_type>(blocks[i] ^ rhs[i]);
+    }
+    return *this;
+  }
+
+  constexpr inlined_bitset &operator-= (inlined_bitset const &other)
+  {
+    if (bit_size_ != other.bit_size_) [[unlikely]] throw_invalid_argument_();
+    block_type *const blocks    = data();
+    block_type const *const rhs = other.data();
+    size_type const n           = block_count();
+    for (size_type i = 0; i < n; ++i) {
+      blocks[i] = static_cast<block_type>(blocks[i] & static_cast<block_type>(~rhs[i]));
+    }
+    return *this;
+  }
 
   constexpr void swap(inlined_bitset &other) noexcept(noexcept(std::declval<base &>().swap(std::declval<base &>())))
   {
