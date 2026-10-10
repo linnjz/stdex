@@ -24,8 +24,10 @@
 #include <cstdlib>          // std::abort
 #include <initializer_list> // std::initializer_list
 #include <iosfwd>           // std::basic_istream, std::basic_ostream
+#include <istream>          // std::basic_istream::sentry (extraction below)
 #include <iterator>         // std::input_iterator, std::iter_reference_t, std::iter_value_t,
                             // std::random_access_iterator_tag, std::reverse_iterator
+#include <ostream>          // string inserter used by the insertion operator below
 #include <limits>           // std::numeric_limits
 #include <memory>           // std::allocator
 #include <ranges>           // std::from_range_t, std::ranges::input_range, std::ranges::range_reference_t, std::ranges::range_value_t
@@ -1969,14 +1971,104 @@ public:
 public:
   template <class CharT = char, class Traits = std::char_traits<CharT>, class StrAlloc = std::allocator<CharT>>
   [[nodiscard]] constexpr auto to_string(CharT zero = CharT('0'), CharT one = CharT('1')) const
-      -> std::basic_string<CharT, Traits, StrAlloc>;
+      -> std::basic_string<CharT, Traits, StrAlloc>
+  {
+    size_type const len = bit_size_;
+    std::basic_string<CharT, Traits, StrAlloc> str(static_cast<typename std::basic_string<CharT, Traits, StrAlloc>::size_type>(len), zero);
+    block_type const *const blocks = data();
+    size_type const n              = block_count();
+    for (size_type i = 0; i < n; ++i) {
+      if (block_type const w = blocks[i]; w != block_type { 0 }) {
+        block_type mask = block_type { 1 };
+        size_type const limit = (i == n - 1) ? len - i * bits_per_block : bits_per_block;
+        for (size_type j = 0; j < limit; ++j) {
+          if ((w & mask) != block_type { 0 }) {
+            Traits::assign(str[len - (i * bits_per_block + j + 1)], one);
+          }
+          // No <<= on mask: it would warn on integral promotion for block
+          // types narrower than int.
+          mask = static_cast<block_type>(mask << 1);
+        }
+      }
+    }
+    return str;
+  }
 
-  [[nodiscard]] constexpr unsigned long to_ulong() const;
-  [[nodiscard]] constexpr unsigned long long to_ullong() const;
+  [[nodiscard]] constexpr unsigned long to_ulong() const
+  {
+    if (empty()) [[unlikely]] return 0;
+    constexpr size_type width = static_cast<size_type>(std::numeric_limits<unsigned long>::digits);
+    if (find_next(width - 1) != npos) [[unlikely]] throw_overflow_error_();
+    unsigned long result       = 0;
+    size_type const result_bits = (std::min)(width, bit_size_);
+    block_type const *const blocks = data();
+    // Casting each block truncates wider-than-ulong blocks; narrower blocks
+    // shift in exactly (no overshoot: widths are powers of two, and the last
+    // shift stays below the ulong width).
+    for (size_type i = 0; i <= (result_bits - 1) / bits_per_block; ++i) {
+      result |= static_cast<unsigned long>(blocks[i]) << (i * bits_per_block);
+    }
+    return result;
+  }
 
-  [[nodiscard]] constexpr bool is_subset_of(inlined_bitset const &other) const noexcept;
-  [[nodiscard]] constexpr bool is_proper_subset_of(inlined_bitset const &other) const noexcept;
-  [[nodiscard]] constexpr bool intersects(inlined_bitset const &other) const noexcept;
+  [[nodiscard]] constexpr unsigned long long to_ullong() const
+  {
+    if (empty()) [[unlikely]] return 0;
+    constexpr size_type width = static_cast<size_type>(std::numeric_limits<unsigned long long>::digits);
+    if (find_next(width - 1) != npos) [[unlikely]] throw_overflow_error_();
+    unsigned long long result = 0;
+    size_type const result_bits = (std::min)(width, bit_size_);
+    block_type const *const blocks = data();
+    for (size_type i = 0; i <= (result_bits - 1) / bits_per_block; ++i) {
+      result |= static_cast<unsigned long long>(blocks[i]) << (i * bits_per_block);
+    }
+    return result;
+  }
+
+  [[nodiscard]] constexpr bool is_subset_of(inlined_bitset const &other) const
+  {
+    if (bit_size_ != other.bit_size_) [[unlikely]] throw_size_mismatch_();
+    block_type const *const blocks = data();
+    block_type const *const rhs    = other.data();
+    size_type const n              = block_count();
+    for (size_type i = 0; i < n; ++i) {
+      if ((blocks[i] & static_cast<block_type>(~rhs[i])) != block_type { 0 }) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  [[nodiscard]] constexpr bool is_proper_subset_of(inlined_bitset const &other) const
+  {
+    if (bit_size_ != other.bit_size_) [[unlikely]] throw_size_mismatch_();
+    block_type const *const blocks = data();
+    block_type const *const rhs    = other.data();
+    size_type const n              = block_count();
+
+    block_type missing {};
+    for (size_type i = 0; i < n; ++i) {
+      block_type const a = blocks[i];
+      block_type const b = rhs[i];
+      if ((a & static_cast<block_type>(~b)) != block_type { 0 }) return false;
+      missing |= static_cast<block_type>(~a) & b;
+    }
+    return missing != block_type { 0 };
+  }
+
+  [[nodiscard]] constexpr bool intersects(inlined_bitset const &other) const
+  {
+    if (bit_size_ != other.bit_size_) [[unlikely]] throw_size_mismatch_();
+    block_type const *const blocks = data();
+    block_type const *const rhs    = other.data();
+    size_type const n              = block_count();
+    for (size_type i = 0; i < n; ++i) {
+      if ((blocks[i] & rhs[i]) != block_type { 0 }) {
+        return true;
+      }
+    }
+    return false;
+  }
 
   [[nodiscard]] constexpr size_type find_first() const noexcept
   {
@@ -2143,34 +2235,6 @@ public:
   }
 
 public:
-  [[nodiscard]] constexpr inlined_bitset operator& (inlined_bitset const &other) const
-  {
-    inlined_bitset result(*this);
-    result &= other;
-    return result;
-  }
-
-  [[nodiscard]] constexpr inlined_bitset operator| (inlined_bitset const &other) const
-  {
-    inlined_bitset result(*this);
-    result |= other;
-    return result;
-  }
-
-  [[nodiscard]] constexpr inlined_bitset operator^ (inlined_bitset const &other) const
-  {
-    inlined_bitset result(*this);
-    result ^= other;
-    return result;
-  }
-
-  [[nodiscard]] constexpr inlined_bitset operator- (inlined_bitset const &other) const
-  {
-    inlined_bitset result(*this);
-    result -= other;
-    return result;
-  }
-
   [[nodiscard]] constexpr inlined_bitset operator~ () const
   {
     inlined_bitset result(*this);
@@ -2249,7 +2313,7 @@ public:
 
   constexpr inlined_bitset &operator&= (inlined_bitset const &other)
   {
-    if (bit_size_ != other.bit_size_) [[unlikely]] throw_invalid_argument_();
+    if (bit_size_ != other.bit_size_) [[unlikely]] throw_size_mismatch_();
     block_type *const blocks    = data();
     block_type const *const rhs = other.data();
     size_type const n           = block_count();
@@ -2261,7 +2325,7 @@ public:
 
   constexpr inlined_bitset &operator|= (inlined_bitset const &other)
   {
-    if (bit_size_ != other.bit_size_) [[unlikely]] throw_invalid_argument_();
+    if (bit_size_ != other.bit_size_) [[unlikely]] throw_size_mismatch_();
     block_type *const blocks    = data();
     block_type const *const rhs = other.data();
     size_type const n           = block_count();
@@ -2273,7 +2337,7 @@ public:
 
   constexpr inlined_bitset &operator^= (inlined_bitset const &other)
   {
-    if (bit_size_ != other.bit_size_) [[unlikely]] throw_invalid_argument_();
+    if (bit_size_ != other.bit_size_) [[unlikely]] throw_size_mismatch_();
     block_type *const blocks    = data();
     block_type const *const rhs = other.data();
     size_type const n           = block_count();
@@ -2285,7 +2349,7 @@ public:
 
   constexpr inlined_bitset &operator-= (inlined_bitset const &other)
   {
-    if (bit_size_ != other.bit_size_) [[unlikely]] throw_invalid_argument_();
+    if (bit_size_ != other.bit_size_) [[unlikely]] throw_size_mismatch_();
     block_type *const blocks    = data();
     block_type const *const rhs = other.data();
     size_type const n           = block_count();
@@ -2340,13 +2404,108 @@ private:
 #endif
   }
 
+  [[noreturn]] static void throw_size_mismatch_()
+  {
+#if defined(_CPPUNWIND) || defined(__EXCEPTIONS)
+    throw std::invalid_argument("bitset size mismatch");
+#else
+    std::abort();
+#endif
+  }
+
 private:
   size_type bit_size_ {};
 };
 
-template <class CharT, class Traits, std::unsigned_integral Block, std::size_t N, class Allocator>
-std::basic_ostream<CharT, Traits> &operator<< (std::basic_ostream<CharT, Traits> &os, inlined_bitset<Block, N, Allocator> const &bitset);
+template <std::unsigned_integral Block, std::size_t N, class Allocator>
+[[nodiscard]] constexpr inlined_bitset<Block, N, Allocator> operator& (inlined_bitset<Block, N, Allocator> const &lhs,
+                                                                       inlined_bitset<Block, N, Allocator> const &rhs)
+{
+  inlined_bitset<Block, N, Allocator> result(lhs);
+  result &= rhs;
+  return result;
+}
+
+template <std::unsigned_integral Block, std::size_t N, class Allocator>
+[[nodiscard]] constexpr inlined_bitset<Block, N, Allocator> operator| (inlined_bitset<Block, N, Allocator> const &lhs,
+                                                                       inlined_bitset<Block, N, Allocator> const &rhs)
+{
+  inlined_bitset<Block, N, Allocator> result(lhs);
+  result |= rhs;
+  return result;
+}
+
+template <std::unsigned_integral Block, std::size_t N, class Allocator>
+[[nodiscard]] constexpr inlined_bitset<Block, N, Allocator> operator^ (inlined_bitset<Block, N, Allocator> const &lhs,
+                                                                       inlined_bitset<Block, N, Allocator> const &rhs)
+{
+  inlined_bitset<Block, N, Allocator> result(lhs);
+  result ^= rhs;
+  return result;
+}
+
+template <std::unsigned_integral Block, std::size_t N, class Allocator>
+[[nodiscard]] constexpr inlined_bitset<Block, N, Allocator> operator- (inlined_bitset<Block, N, Allocator> const &lhs,
+                                                                       inlined_bitset<Block, N, Allocator> const &rhs)
+{
+  inlined_bitset<Block, N, Allocator> result(lhs);
+  result -= rhs;
+  return result;
+}
 
 template <class CharT, class Traits, std::unsigned_integral Block, std::size_t N, class Allocator>
-std::basic_istream<CharT, Traits> &operator>> (std::basic_istream<CharT, Traits> &is, inlined_bitset<Block, N, Allocator> &bitset);
+std::basic_ostream<CharT, Traits> &operator<< (std::basic_ostream<CharT, Traits> &os, inlined_bitset<Block, N, Allocator> const &bitset)
+{
+  std::ctype<CharT> const &ct = std::use_facet<std::ctype<CharT>>(os.getloc());
+  CharT const zero            = ct.widen('0');
+  CharT const one             = ct.widen('1');
+
+  auto const str = bitset.template to_string<CharT, Traits>(zero, one);
+  return os << str;
+}
+
+template <class CharT, class Traits, std::unsigned_integral Block, std::size_t N, class Allocator>
+std::basic_istream<CharT, Traits> &operator>> (std::basic_istream<CharT, Traits> &is, inlined_bitset<Block, N, Allocator> &bitset)
+{
+  using istream_type = std::basic_istream<CharT, Traits>;
+
+  typename istream_type::sentry const ok(is);
+  if (!ok) return is;
+
+  typename istream_type::iostate state = istream_type::goodbit;
+  try {
+    std::ctype<CharT> const &ct = std::use_facet<std::ctype<CharT>>(is.getloc());
+    CharT const zero            = ct.widen('0');
+    CharT const one             = ct.widen('1');
+
+    std::basic_string<CharT, Traits> str;
+    auto *const buf                = is.rdbuf();
+    typename Traits::int_type meta = buf->sgetc();
+    for (;;) {
+      if (Traits::eq_int_type(Traits::eof(), meta)) {
+        state |= istream_type::eofbit;
+        break;
+      }
+      CharT const ch = Traits::to_char_type(meta);
+      if (ch != zero && ch != one) {
+        break;
+      }
+      str.push_back(ch);
+      meta = buf->snextc();
+    }
+
+    if (str.empty()) {
+      state |= istream_type::failbit;
+      bitset.clear();
+    } else {
+      bitset = inlined_bitset<Block, N, Allocator> { str, 0, str.size(), zero, one };
+    }
+  } catch (...) {
+    state |= istream_type::badbit;
+  }
+
+  is.setstate(state);
+  return is;
+}
+
 } // namespace stdex
