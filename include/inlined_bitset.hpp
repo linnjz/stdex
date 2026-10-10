@@ -1500,10 +1500,14 @@ public:
   {
     size_type const n = block_count();
     if (n == 0) [[unlikely]] return *this;
-    block_type *const blocks = data();
-    std::fill_n(blocks, n - 1, static_cast<block_type>(~block_type { 0 }));
-    size_type const r = bit_size_ % bits_per_block;
-    blocks[n - 1]     = (r == 0) ? static_cast<block_type>(~block_type { 0 }) : low_bits_mask_(r);
+    block_type *const blocks  = data();
+    block_type const all_ones = static_cast<block_type>(~block_type { 0 });
+    if (size_type const r = bit_size_ % bits_per_block; r != 0) {
+      std::fill_n(blocks, n - 1, all_ones);
+      blocks[n - 1] = low_bits_mask_(r);
+    } else {
+      std::fill_n(blocks, n, all_ones);
+    }
     return *this;
   }
 

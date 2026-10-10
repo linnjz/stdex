@@ -708,6 +708,18 @@ constexpr OutIt uninitialized_fill(OutIt dest_first, OutSent dest_last, T const 
     }
   }
 
+  constexpr bool trivial_assign_ok = sized && !use_alloc &&
+                                     std::is_trivially_copyable_v<std::iter_value_t<OutIt>>;
+  if constexpr (trivial_assign_ok) {
+    if (!std::is_constant_evaluated()) {
+      auto const n = static_cast<std::size_t>(dest_last - dest_first);
+      for (std::size_t i = 0; i < n; ++i) {
+        dest_first[i] = static_cast<std::iter_value_t<OutIt>>(val);
+      }
+      return dest_first + static_cast<std::iter_difference_t<OutIt>>(n);
+    }
+  }
+
   uninitialized_backout_al<Allocator, OutIt> backout { dest_first, alloc };
   while (backout.last() != dest_last) {
     backout.emplace_back(val);
@@ -768,6 +780,17 @@ constexpr OutIt uninitialized_fill_n(OutIt dest_first, std::iter_difference_t<Ou
   } else if constexpr (zero_ok) {
     if (!std::is_constant_evaluated() && is_all_bits_zero(val)) {
       uninitialized_detail::invoke_zero_memset(dest_first, static_cast<std::size_t>(count));
+      return dest_first + count;
+    }
+  }
+
+  constexpr bool trivial_assign_ok = !use_alloc && std::is_trivially_copyable_v<std::iter_value_t<OutIt>> &&
+                                     std::contiguous_iterator<OutIt>;
+  if constexpr (trivial_assign_ok) {
+    if (!std::is_constant_evaluated()) {
+      for (std::iter_difference_t<OutIt> i = 0; i < count; ++i) {
+        dest_first[i] = static_cast<std::iter_value_t<OutIt>>(val);
+      }
       return dest_first + count;
     }
   }
