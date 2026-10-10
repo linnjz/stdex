@@ -22,7 +22,7 @@
 #include <climits>   // CHAR_BIT
 #include <concepts>  // std::same_as, std::unsigned_integral
 #include <cstddef>   // std::size_t, std::byte, std::to_integer
-#include <cstdint>   // uint64_t, uint32_t, uint8_t
+#include <cstdint>   // std::uint64_t, std::uint32_t, std::uint8_t
 #include <span>      // std::span
 #include <type_traits> // std::remove_cv_t
 #include <utility>   // std::make_index_sequence
@@ -64,12 +64,12 @@ concept byte_like = std::same_as<std::remove_cv_t<T>, std::byte> ||
                     std::same_as<std::remove_cv_t<T>, bool>;
 
 template <byte_like T>
-[[nodiscard]] constexpr uint8_t byte_value(T const value) noexcept
+[[nodiscard]] constexpr std::uint8_t byte_value(T const value) noexcept
 {
   if constexpr (std::same_as<std::remove_cv_t<T>, std::byte>) {
-    return std::to_integer<uint8_t>(value);
+    return std::to_integer<std::uint8_t>(value);
   } else {
-    return static_cast<uint8_t>(value);
+    return static_cast<std::uint8_t>(value);
   }
 }
 
@@ -78,7 +78,7 @@ template <byte_like Byte>
 #if !defined(DEBUG) && !defined(_DEBUG)
 [[msvc::forceinline, gnu::always_inline]]
 #endif
-constexpr uint64_t read64_le(std::span<Byte const> const input, size_t const offset) noexcept
+constexpr std::uint64_t read64_le(std::span<Byte const> const input, std::size_t const offset) noexcept
 {
   static_assert(std::endian::native == std::endian::little || 
                 std::endian::native == std::endian::big, 
@@ -87,9 +87,9 @@ constexpr uint64_t read64_le(std::span<Byte const> const input, size_t const off
   std::array<Byte, 8> buf;
   std::copy_n(input.begin() + offset, buf.size(), buf.begin());
   if constexpr (std::endian::native == std::endian::big) {
-    return byteswap(std::bit_cast<uint64_t>(buf));
+    return byteswap(std::bit_cast<std::uint64_t>(buf));
   } else /*if constexpr (std::endian::native == std::endian::little)*/ {
-    return std::bit_cast<uint64_t>(buf);
+    return std::bit_cast<std::uint64_t>(buf);
   }
 }
 
@@ -98,7 +98,7 @@ template <byte_like Byte>
 #if !defined(DEBUG) && !defined(_DEBUG)
 [[msvc::forceinline, gnu::always_inline]]
 #endif
-constexpr uint32_t read32_le(std::span<Byte const> const input, size_t const offset) noexcept
+constexpr std::uint32_t read32_le(std::span<Byte const> const input, std::size_t const offset) noexcept
 {
   static_assert(std::endian::native == std::endian::little || 
                 std::endian::native == std::endian::big, 
@@ -108,9 +108,9 @@ constexpr uint32_t read32_le(std::span<Byte const> const input, size_t const off
   std::copy_n(input.begin() + offset, buf.size(), buf.begin());
 
   if constexpr (std::endian::native == std::endian::big) {
-    return byteswap(std::bit_cast<uint32_t>(buf));
+    return byteswap(std::bit_cast<std::uint32_t>(buf));
   } else /*if constexpr (std::endian::native == std::endian::little)*/ {
-    return std::bit_cast<uint32_t>(buf);
+    return std::bit_cast<std::uint32_t>(buf);
   }
 }
 

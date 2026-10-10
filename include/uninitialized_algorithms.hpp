@@ -19,7 +19,7 @@
 #include <array>       // std::array
 #include <cassert>     // assert
 #include <concepts>    // std::constructible_from
-#include <cstddef>     // size_t, std::byte
+#include <cstddef>     // std::size_t, std::byte
 #include <cstdint>     // std::uint8_t, ...
 #include <cstring>     // std::memcpy, std::memset
 #include <iterator>    // std::contiguous_iterator, std::iter_difference_t, std::iter_value_t,
@@ -189,20 +189,20 @@ auto invoke_memcpy(InIt first, InSent last, OutIt dest_first, OutSent dest_last)
   constexpr bool sized_dst = std::sized_sentinel_for<OutSent, OutIt>;
   static_assert(sized_src || sized_dst, "invoke_memcpy requires at least one sized side");
 
-  ptrdiff_t n = 0;
+  std::ptrdiff_t n = 0;
   if constexpr (sized_src && sized_dst) {
-    ptrdiff_t const src_n = static_cast<ptrdiff_t>(last - first);
-    ptrdiff_t const dst_n = static_cast<ptrdiff_t>(dest_last - dest_first);
-    n                     = src_n < dst_n ? src_n : dst_n;
+    std::ptrdiff_t const src_n = static_cast<std::ptrdiff_t>(last - first);
+    std::ptrdiff_t const dst_n = static_cast<std::ptrdiff_t>(dest_last - dest_first);
+    n = src_n < dst_n ? src_n : dst_n;
   } else if constexpr (sized_src) {
-    n = static_cast<ptrdiff_t>(last - first);
+    n = static_cast<std::ptrdiff_t>(last - first);
   } else {
-    n = static_cast<ptrdiff_t>(dest_last - dest_first);
+    n = static_cast<std::ptrdiff_t>(dest_last - dest_first);
   }
 
   std::memcpy(static_cast<void *>(to_address_unwrap(dest_first)),
                 static_cast<void const *>(to_address_unwrap(first)),
-                static_cast<size_t>(n) * sizeof(std::iter_value_t<OutIt>));
+                static_cast<std::size_t>(n) * sizeof(std::iter_value_t<OutIt>));
 
   return { first + static_cast<std::iter_difference_t<InIt>>(n),
            dest_first + static_cast<std::iter_difference_t<OutIt>>(n) };
@@ -238,7 +238,7 @@ template <class OutIt, class T>
 constexpr bool fill_zero_memset_is_safe<OutIt, T, false> = false;
 
 template <class OutIt, class T>
-void invoke_memset(OutIt dest_first, T const &val, size_t count)
+void invoke_memset(OutIt dest_first, T const &val, std::size_t count)
 {
   using value_type = std::iter_value_t<OutIt>;
   static_assert(sizeof(value_type) == sizeof(unsigned char));
@@ -248,7 +248,7 @@ void invoke_memset(OutIt dest_first, T const &val, size_t count)
 }
 
 template <class OutIt>
-void invoke_zero_memset(OutIt dest_first, size_t count)
+void invoke_zero_memset(OutIt dest_first, std::size_t count)
 {
   std::memset(static_cast<void *>(to_address_unwrap(dest_first)),
               0, count * sizeof(std::iter_value_t<OutIt>));
@@ -664,13 +664,13 @@ constexpr OutIt uninitialized_fill(OutIt dest_first, OutSent dest_last, T const 
 
   if constexpr (memset_ok) {
     if (!std::is_constant_evaluated()) {
-      auto const n = static_cast<size_t>(dest_last - dest_first);
+      auto const n = static_cast<std::size_t>(dest_last - dest_first);
       uninitialized_detail::invoke_memset(dest_first, val, n);
       return dest_first + static_cast<std::iter_difference_t<OutIt>>(n);
     }
   } else if constexpr (zero_ok) {
     if (!std::is_constant_evaluated() && is_all_bits_zero(val)) {
-      auto const n = static_cast<size_t>(dest_last - dest_first);
+      auto const n = static_cast<std::size_t>(dest_last - dest_first);
       uninitialized_detail::invoke_zero_memset(dest_first, n);
       return dest_first + static_cast<std::iter_difference_t<OutIt>>(n);
     }
@@ -696,13 +696,13 @@ constexpr OutIt uninitialized_fill(OutIt dest_first, OutSent dest_last, T const 
 
   if constexpr (memset_ok) {
     if (!std::is_constant_evaluated()) {
-      auto const n = static_cast<size_t>(dest_last - dest_first);
+      auto const n = static_cast<std::size_t>(dest_last - dest_first);
       uninitialized_detail::invoke_memset(dest_first, val, n);
       return dest_first + static_cast<std::iter_difference_t<OutIt>>(n);
     }
   } else if constexpr (zero_ok) {
     if (!std::is_constant_evaluated() && is_all_bits_zero(val)) {
-      auto const n = static_cast<size_t>(dest_last - dest_first);
+      auto const n = static_cast<std::size_t>(dest_last - dest_first);
       uninitialized_detail::invoke_zero_memset(dest_first, n);
       return dest_first + static_cast<std::iter_difference_t<OutIt>>(n);
     }
@@ -728,12 +728,12 @@ constexpr OutIt uninitialized_fill_n(OutIt dest_first, std::iter_difference_t<Ou
 
   if constexpr (memset_ok) {
     if (!std::is_constant_evaluated()) {
-      uninitialized_detail::invoke_memset(dest_first, val, static_cast<size_t>(count));
+      uninitialized_detail::invoke_memset(dest_first, val, static_cast<std::size_t>(count));
       return dest_first + count;
     }
   } else if constexpr (zero_ok) {
     if (!std::is_constant_evaluated() && is_all_bits_zero(val)) {
-      uninitialized_detail::invoke_zero_memset(dest_first, static_cast<size_t>(count));
+      uninitialized_detail::invoke_zero_memset(dest_first, static_cast<std::size_t>(count));
       return dest_first + count;
     }
   }
@@ -762,12 +762,12 @@ constexpr OutIt uninitialized_fill_n(OutIt dest_first, std::iter_difference_t<Ou
 
   if constexpr (memset_ok) {
     if (!std::is_constant_evaluated()) {
-      uninitialized_detail::invoke_memset(dest_first, val, static_cast<size_t>(count));
+      uninitialized_detail::invoke_memset(dest_first, val, static_cast<std::size_t>(count));
       return dest_first + count;
     }
   } else if constexpr (zero_ok) {
     if (!std::is_constant_evaluated() && is_all_bits_zero(val)) {
-      uninitialized_detail::invoke_zero_memset(dest_first, static_cast<size_t>(count));
+      uninitialized_detail::invoke_zero_memset(dest_first, static_cast<std::size_t>(count));
       return dest_first + count;
     }
   }
@@ -788,7 +788,7 @@ constexpr OutIt uninitialized_value_construct(OutIt dest_first, OutSent dest_las
 
   if constexpr (memset_ok) {
     if (!std::is_constant_evaluated()) {
-      auto const n = static_cast<size_t>(dest_last - dest_first);
+      auto const n = static_cast<std::size_t>(dest_last - dest_first);
       uninitialized_detail::invoke_zero_memset(dest_first, n);
       return dest_first + static_cast<std::iter_difference_t<OutIt>>(n);
     }
@@ -813,7 +813,7 @@ constexpr OutIt uninitialized_value_construct(OutIt dest_first, OutSent dest_las
 
   if constexpr (memset_ok) {
     if (!std::is_constant_evaluated()) {
-      auto const n = static_cast<size_t>(dest_last - dest_first);
+      auto const n = static_cast<std::size_t>(dest_last - dest_first);
       uninitialized_detail::invoke_zero_memset(dest_first, n);
       return dest_first + static_cast<std::iter_difference_t<OutIt>>(n);
     }
@@ -838,7 +838,7 @@ constexpr OutIt uninitialized_value_construct_n(OutIt dest_first, std::iter_diff
 
   if constexpr (memset_ok) {
     if (!std::is_constant_evaluated()) {
-      uninitialized_detail::invoke_zero_memset(dest_first, static_cast<size_t>(count));
+      uninitialized_detail::invoke_zero_memset(dest_first, static_cast<std::size_t>(count));
       return dest_first + count;
     }
   }
@@ -865,7 +865,7 @@ constexpr OutIt uninitialized_value_construct_n(OutIt dest_first, std::iter_diff
 
   if constexpr (memset_ok) {
     if (!std::is_constant_evaluated()) {
-      uninitialized_detail::invoke_zero_memset(dest_first, static_cast<size_t>(count));
+      uninitialized_detail::invoke_zero_memset(dest_first, static_cast<std::size_t>(count));
       return dest_first + count;
     }
   }
