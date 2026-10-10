@@ -38,3 +38,5 @@ stdex_add_test(test_fastmod test_fastmod.cpp)
 stdex_add_test(test_uninitialized_algorithms test_uninitialized_algorithms.cpp)
 
 stdex_add_test(test_inline_storage test_inline_storage.cpp)
+
+stdex_add_test(test_inlined_bitset test_inlined_bitset.cpp)
