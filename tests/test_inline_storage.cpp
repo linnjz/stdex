@@ -120,7 +120,6 @@ struct fix : stdex::inline_storage<T, N, A> {
   using base::insert_uncounted_range_;
   using base::insert_counted_range_;
   using base::insert_range_;
-  using base::source_overlaps_storage_;
   using base::destroy_element_unchecked_;
   using base::destroy_elements_unchecked_;
   using base::dispose_;
@@ -2048,18 +2047,24 @@ static void test_insert_counted_range()
     CHECK(int_content_matches_(f, { 21, 22, 23, 24, 1, 7, 8, 9, 10, 11, 2 }));
   }
   {
-    // self-insert across reallocation: source aliases old storage
+    // across-reallocation insert preserves order (external source; self-insert
+    // across realloc is UB since 07cf55d, no longer asserted).
     fix<int, 4> f(std::allocator<int>{});
     for (int i = 1; i <= 4; ++i) f.emplace_one_at_back_(i);
-    f.insert_counted_range_(2, f.data(), 2);
+    int src[2] = { 1, 2 };
+    f.insert_counted_range_(2, src, 2);
     CHECK(f.is_heap() && int_content_matches_(f, { 1, 2, 1, 2, 3, 4 }));
   }
   {
-    // fitting self-insert reroutes to realloc (alias-safe), still exact
+    // fitting non-aliasing insert stays in place (stack) and is exact.
+    // NOTE: fitting self-insert used to reroute to realloc via overlap
+    // detection; since 07cf55d self-insert is UB ([sequence.reqmts]) and the
+    // detector is gone, only the external-source shape is tested here.
     fix<int, 8> f(std::allocator<int>{});
     for (int i = 1; i <= 4; ++i) f.emplace_one_at_back_(i);
-    f.insert_counted_range_(1, f.data(), 2);
-    CHECK(f.is_heap() && int_content_matches_(f, { 1, 1, 2, 2, 3, 4 }));
+    int src[2] = { 1, 2 };
+    f.insert_counted_range_(1, src, 2);
+    CHECK(f.is_stack() && int_content_matches_(f, { 1, 1, 2, 2, 3, 4 }));
   }
   {
     // N == 0 pure-heap counted insert
@@ -2214,47 +2219,23 @@ static void test_insert_range_dispatch()
 }
 
 // ------------------------------------------------------------------
-// 23. source_overlaps_storage_ predicate
+// 23. self-insert is UB (07cf55d removed source_overlaps_storage_)
 // ------------------------------------------------------------------
 static void test_source_overlaps()
 {
-  SECTION("source_overlaps_storage_");
+  SECTION("self-insert UB (overlap helper removed)");
+  // The predicate no longer exists: self-insert is undefined per
+  // [sequence.reqmts], detection was removed to avoid wasting an allocation.
+  // (No reference to the removed member here: even a requires-expression
+  // naming it is rejected by MSVC instead of SFINAE-false.)
   {
-    // empty storage and empty ranges never overlap
-    fix<int, 4> f(std::allocator<int>{});
-    int ext[4] = { 1, 2, 3, 4 };
-    CHECK(!f.source_overlaps_storage_(ext, 4));
-    CHECK(!f.source_overlaps_storage_(ext, 0));
+    // Normal non-overlapping counted insert still works (regression guard).
     fix<int, 4> g(3, 1);
-    CHECK(!g.source_overlaps_storage_(ext, 0)); // count == 0 short-circuits
-  }
-  {
-    // sources starting inside [data(), data() + size()) overlap, even when
-    // count runs past the end (no src + count is formed on this path)
-    fix<int, 4> g(3, 1);
-    CHECK(g.source_overlaps_storage_(g.data(), 2));
-    CHECK(g.source_overlaps_storage_(g.data() + 1, 2));
-    CHECK(g.source_overlaps_storage_(g.data() + 2, 100));
-    // one-past-the-end only touches: no overlap
-    CHECK(!g.source_overlaps_storage_(g.data() + 3, 2));
-  }
-  {
-    // disjoint external storage never overlaps
-    fix<int, 4> g(3, 1);
-    int ext[4] = { 1, 2, 3, 4 };
-    CHECK(!g.source_overlaps_storage_(ext, 4));
-  }
-  {
-    // non-contiguous iterators always report false, even over our own data
-    fix<int, 4> g(3, 1);
-    CHECK(!g.source_overlaps_storage_(input_only_it{ g.data() }, 2));
-  }
-  {
-    // N == 0 heap storage overlaps its own blocks
-    fix<int, 0> z(2, 5);
-    CHECK(z.source_overlaps_storage_(z.data(), 1));
-    int ext[1] = { 9 };
-    CHECK(!z.source_overlaps_storage_(ext, 1));
+    int ext[2] = { 7, 8 };
+    g.insert_counted_range_(1, ext, 2);
+    CHECK(g.size() == 5);
+    CHECK(g.data()[1] == 7 && g.data()[2] == 8);
+    CHECK(g.invariants());
   }
 }
 
