@@ -1,4 +1,4 @@
-include(TestSupport)
+﻿include(TestSupport)
 
 function(stdex_add_test target source)
     cmake_parse_arguments(PARSE_ARGV 2 ARG "" "" "INCLUDES;LIBS;ARGS")
@@ -40,3 +40,16 @@ stdex_add_test(test_uninitialized_algorithms test_uninitialized_algorithms.cpp)
 stdex_add_test(test_inline_storage test_inline_storage.cpp)
 
 stdex_add_test(test_inlined_bitset test_inlined_bitset.cpp)
+
+# LinnSingleton lives outside include/ and its cross-TU / short-macro checks
+# need several translation units, so this target skips stdex_add_test.
+find_package(Threads REQUIRED)
+scaffold_add_test(test_singleton
+    SOURCES
+        "macro/test_singleton.cpp"
+        "macro/test_singleton_short_macros.cpp"
+        "macro/test_singleton_cross_tu_a.cpp"
+        "macro/test_singleton_cross_tu_b.cpp"
+    INCLUDES "${CMAKE_SOURCE_DIR}/marco"
+    LIBS Threads::Threads
+)
