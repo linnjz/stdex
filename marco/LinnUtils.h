@@ -141,7 +141,7 @@
 #  else
 #    define LINN_USE_VA_OPT 1
 #  endif
-#elif __cplusplus >= 202002L
+#elif __cplusplus >= 202002L || (defined(_MSVC_LANG) && _MSVC_LANG >= 202002L)
 #  define LINN_USE_VA_OPT 1
 #else
 #  define LINN_USE_VA_OPT 0
@@ -152,9 +152,18 @@
 // The fallback form needs no comma-paste extension: an empty argument still
 // occupies _1, so the sequence shifts by one and N ends up as 0.
 #if LINN_USE_VA_OPT
-// C++20 with __VA_OPT__ support
-#  define LINN_NARGS_II(...) LINN_NARGS_I(__VA_ARGS__)
-#  define LINN_NARGS(...)    LINN_NARGS_II(__VA_ARGS__ __VA_OPT__(, ) LINN_NARGS_SEQ())
+// C++20 with __VA_OPT__ support.
+//
+// MSVC does not expand LINN_NARGS_SEQ() when __VA_ARGS__ is empty, so detect
+// the empty case before passing the argument list to the counting macro.
+#  define LINN_IS_EMPTY(...)      LINN_IS_EMPTY_I(__VA_OPT__(0,) 1)
+#  define LINN_IS_EMPTY_I(...)    LINN_IS_EMPTY_II(__VA_ARGS__)
+#  define LINN_IS_EMPTY_II(...)   LINN_IS_EMPTY_III(__VA_ARGS__)
+#  define LINN_IS_EMPTY_III(x, ...) x
+#  define LINN_NARGS_EMPTY_1(...) 0
+#  define LINN_NARGS_EMPTY_0(...) LINN_NARGS_II(__VA_ARGS__ __VA_OPT__(, ) LINN_NARGS_SEQ())
+#  define LINN_NARGS_II(...)      LINN_NARGS_I(__VA_ARGS__)
+#  define LINN_NARGS(...)         LINN_CAT(LINN_NARGS_EMPTY_, LINN_IS_EMPTY(__VA_ARGS__))(__VA_ARGS__)
 #else
 // Fallback for older compilers
 #  if defined(__clang__) || defined(__GNUC__)
