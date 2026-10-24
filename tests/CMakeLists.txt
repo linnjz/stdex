@@ -1,15 +1,15 @@
 ﻿include(TestSupport)
 
-function(stdex_add_test target source)
-    cmake_parse_arguments(PARSE_ARGV 2 ARG "" "" "INCLUDES;LIBS;ARGS")
+function(stdex_add_test target)
+    cmake_parse_arguments(PARSE_ARGV 1 ARG "" "" "INCLUDES;LIBS;ARGS")
 
-    if(ARG_UNPARSED_ARGUMENTS)
+    if(NOT ARG_UNPARSED_ARGUMENTS)
         message(FATAL_ERROR
-            "stdex_add_test(${target}): unknown arguments: ${ARG_UNPARSED_ARGUMENTS}")
+            "stdex_add_test(${target}): at least one source is required")
     endif()
 
     scaffold_add_test(${target}
-        SOURCES "${source}"
+        SOURCES ${ARG_UNPARSED_ARGUMENTS}
         INCLUDES "${CMAKE_SOURCE_DIR}/include" ${ARG_INCLUDES}
         LIBS stdex ${ARG_LIBS}
         ARGS ${ARG_ARGS}
@@ -42,14 +42,18 @@ stdex_add_test(test_inline_storage test_inline_storage.cpp)
 stdex_add_test(test_inlined_bitset test_inlined_bitset.cpp)
 
 # LinnSingleton lives outside include/ and its cross-TU / short-macro checks
-# need several translation units, so this target skips stdex_add_test.
+# need several translation units.
 find_package(Threads REQUIRED)
-scaffold_add_test(test_singleton
-    SOURCES
-        "macro/test_singleton.cpp"
-        "macro/test_singleton_short_macros.cpp"
-        "macro/test_singleton_cross_tu_a.cpp"
-        "macro/test_singleton_cross_tu_b.cpp"
+stdex_add_test(test_singleton
+    macro/test_singleton.cpp
+    macro/test_singleton_short_macros.cpp
+    macro/test_singleton_cross_tu_a.cpp
+    macro/test_singleton_cross_tu_b.cpp
     INCLUDES "${CMAKE_SOURCE_DIR}/marco"
     LIBS Threads::Threads
+)
+
+stdex_add_test(test_property
+    macro/test_property.cpp
+    INCLUDES "${CMAKE_SOURCE_DIR}/marco"
 )
