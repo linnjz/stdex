@@ -58,13 +58,13 @@
 #endif
 
 #if defined(__clang__)
-// Clang support clang loop unroll_count or unroll
+/// Clang support clang loop unroll_count or unroll
 #  define LINN_LOOP_UNROLL(n) _Pragma(LINN_EXPAND_AND_STRINGIFY(clang loop unroll_count(n)))
 #elif defined(__GNUC__) && !defined(__INTEL_COMPILER) && __GNUC__ >= 8
-// GCC 8+ support #pragma GCC unroll
+/// GCC 8+ support #pragma GCC unroll
 #  define LINN_LOOP_UNROLL(n) _Pragma(LINN_EXPAND_AND_STRINGIFY(GCC unroll n))
 #elif defined(_MSC_VER) && _MSC_VER >= 1920
-// MSVC 2019+ support __pragma(unroll)
+/// MSVC 2019+ support __pragma(unroll)
 #  define LINN_LOOP_UNROLL(n) //__pragma(unroll(n))
 #else
 #  define LINN_LOOP_UNROLL(n)
@@ -85,18 +85,120 @@
 #define LINN_IF_1(t, f) t
 #define LINN_IF_0(t, f) f
 
-#define LINN_CHECK_N(x, n, ...)  n
-#define LINN_CHECK(...)          LINN_CHECK_N(__VA_ARGS__, 0)
-#define LINN_PROBE(x)            x, 1
-#define LINN_IS_PAREN(x)         LINN_CHECK(LINN_IS_PAREN_PROBE x)
-#define LINN_IS_PAREN_PROBE(...) LINN_PROBE(~)
+#define LINN_CHECK_N(x, n, ...) n
+#define LINN_CHECK(...)         LINN_CHECK_N(__VA_ARGS__, 0)
 
-#define LINN_PAIR(a, b)                (a, b)
-#define LINN_PAIR_FIRST_I(tag, value)  tag
-#define LINN_PAIR_FIRST(pair)          LINN_PAIR_FIRST_I pair
-#define LINN_PAIR_SECOND_I(tag, value) value
-#define LINN_PAIR_SECOND(pair)         LINN_PAIR_SECOND_I pair
-#define LINN_UNPAREN(...)              __VA_ARGS__
+#define LINN_PROBE(x) x, 1
+
+#define LINN_IS_PAREN_PROBE(...) LINN_PROBE(~)
+#define LINN_IS_PAREN(x)         LINN_CHECK(LINN_IS_PAREN_PROBE x)
+
+#define LINN_PAIR(a, b)          (a, b)
+#define LINN_PAIR_FIRST_I(a, b)  a
+#define LINN_PAIR_FIRST(pair)    LINN_PAIR_FIRST_I pair
+#define LINN_PAIR_SECOND_I(a, b) b
+#define LINN_PAIR_SECOND(pair)   LINN_PAIR_SECOND_I pair
+
+#define LINN_TRIPLE(a, b, c)          (a, b, c)
+#define LINN_TRIPLE_FIRST_I(a, b, c)  a
+#define LINN_TRIPLE_FIRST(triple)     LINN_TRIPLE_FIRST_I triple
+#define LINN_TRIPLE_SECOND_I(a, b, c) b
+#define LINN_TRIPLE_SECOND(triple)    LINN_TRIPLE_SECOND_I triple
+#define LINN_TRIPLE_THIRD_I(a, b, c)  c
+#define LINN_TRIPLE_THIRD(triple)     LINN_TRIPLE_THIRD_I triple
+
+#define LINN_QUAD(a, b, c, d)          (a, b, c, d)
+#define LINN_QUAD_FIRST_I(a, b, c, d)  a
+#define LINN_QUAD_FIRST(t)             LINN_QUAD_FIRST_I t
+#define LINN_QUAD_SECOND_I(a, b, c, d) b
+#define LINN_QUAD_SECOND(t)            LINN_QUAD_SECOND_I t
+#define LINN_QUAD_THIRD_I(a, b, c, d)  c
+#define LINN_QUAD_THIRD(t)             LINN_QUAD_THIRD_I t
+#define LINN_QUAD_FOURTH_I(a, b, c, d) d
+#define LINN_QUAD_FOURTH(t)            LINN_QUAD_FOURTH_I t
+
+#define LINN_QUINT(a, b, c, d, e)          (a, b, c, d, e)
+#define LINN_QUINT_FIRST_I(a, b, c, d, e)  a
+#define LINN_QUINT_FIRST(t)                LINN_QUINT_FIRST_I t
+#define LINN_QUINT_SECOND_I(a, b, c, d, e) b
+#define LINN_QUINT_SECOND(t)               LINN_QUINT_SECOND_I t
+#define LINN_QUINT_THIRD_I(a, b, c, d, e)  c
+#define LINN_QUINT_THIRD(t)                LINN_QUINT_THIRD_I t
+#define LINN_QUINT_FOURTH_I(a, b, c, d, e) d
+#define LINN_QUINT_FOURTH(t)               LINN_QUINT_FOURTH_I t
+#define LINN_QUINT_FIFTH_I(a, b, c, d, e)  e
+#define LINN_QUINT_FIFTH(t)                LINN_QUINT_FIFTH_I t
+
+#define LINN_SEXT(a, b, c, d, e, f)          (a, b, c, d, e, f)
+#define LINN_SEXT_FIRST_I(a, b, c, d, e, f)  a
+#define LINN_SEXT_FIRST(t)                   LINN_SEXT_FIRST_I t
+#define LINN_SEXT_SECOND_I(a, b, c, d, e, f) b
+#define LINN_SEXT_SECOND(t)                  LINN_SEXT_SECOND_I t
+#define LINN_SEXT_THIRD_I(a, b, c, d, e, f)  c
+#define LINN_SEXT_THIRD(t)                   LINN_SEXT_THIRD_I t
+#define LINN_SEXT_FOURTH_I(a, b, c, d, e, f) d
+#define LINN_SEXT_FOURTH(t)                  LINN_SEXT_FOURTH_I t
+#define LINN_SEXT_FIFTH_I(a, b, c, d, e, f)  e
+#define LINN_SEXT_FIFTH(t)                   LINN_SEXT_FIFTH_I t
+#define LINN_SEXT_SIXTH_I(a, b, c, d, e, f)  f
+#define LINN_SEXT_SIXTH(t)                   LINN_SEXT_SIXTH_I t
+
+#define LINN_SEPT(a, b, c, d, e, f, g)           (a, b, c, d, e, f, g)
+#define LINN_SEPT_FIRST_I(a, b, c, d, e, f, g)   a
+#define LINN_SEPT_FIRST(t)                       LINN_SEPT_FIRST_I t
+#define LINN_SEPT_SECOND_I(a, b, c, d, e, f, g)  b
+#define LINN_SEPT_SECOND(t)                      LINN_SEPT_SECOND_I t
+#define LINN_SEPT_THIRD_I(a, b, c, d, e, f, g)   c
+#define LINN_SEPT_THIRD(t)                       LINN_SEPT_THIRD_I t
+#define LINN_SEPT_FOURTH_I(a, b, c, d, e, f, g)  d
+#define LINN_SEPT_FOURTH(t)                      LINN_SEPT_FOURTH_I t
+#define LINN_SEPT_FIFTH_I(a, b, c, d, e, f, g)   e
+#define LINN_SEPT_FIFTH(t)                       LINN_SEPT_FIFTH_I t
+#define LINN_SEPT_SIXTH_I(a, b, c, d, e, f, g)   f
+#define LINN_SEPT_SIXTH(t)                       LINN_SEPT_SIXTH_I t
+#define LINN_SEPT_SEVENTH_I(a, b, c, d, e, f, g) g
+#define LINN_SEPT_SEVENTH(t)                     LINN_SEPT_SEVENTH_I t
+
+#define LINN_OCT(a, b, c, d, e, f, g, h)           (a, b, c, d, e, f, g, h)
+#define LINN_OCT_FIRST_I(a, b, c, d, e, f, g, h)   a
+#define LINN_OCT_FIRST(t)                          LINN_OCT_FIRST_I t
+#define LINN_OCT_SECOND_I(a, b, c, d, e, f, g, h)  b
+#define LINN_OCT_SECOND(t)                         LINN_OCT_SECOND_I t
+#define LINN_OCT_THIRD_I(a, b, c, d, e, f, g, h)   c
+#define LINN_OCT_THIRD(t)                          LINN_OCT_THIRD_I t
+#define LINN_OCT_FOURTH_I(a, b, c, d, e, f, g, h)  d
+#define LINN_OCT_FOURTH(t)                         LINN_OCT_FOURTH_I t
+#define LINN_OCT_FIFTH_I(a, b, c, d, e, f, g, h)   e
+#define LINN_OCT_FIFTH(t)                          LINN_OCT_FIFTH_I t
+#define LINN_OCT_SIXTH_I(a, b, c, d, e, f, g, h)   f
+#define LINN_OCT_SIXTH(t)                          LINN_OCT_SIXTH_I t
+#define LINN_OCT_SEVENTH_I(a, b, c, d, e, f, g, h) g
+#define LINN_OCT_SEVENTH(t)                        LINN_OCT_SEVENTH_I t
+#define LINN_OCT_EIGHTH_I(a, b, c, d, e, f, g, h)  h
+#define LINN_OCT_EIGHTH(t)                         LINN_OCT_EIGHTH_I t
+
+#define LINN_NON(a, b, c, d, e, f, g, h, i)           (a, b, c, d, e, f, g, h, i)
+#define LINN_NON_FIRST_I(a, b, c, d, e, f, g, h, i)   a
+#define LINN_NON_FIRST(t)                             LINN_NON_FIRST_I t
+#define LINN_NON_SECOND_I(a, b, c, d, e, f, g, h, i)  b
+#define LINN_NON_SECOND(t)                            LINN_NON_SECOND_I t
+#define LINN_NON_THIRD_I(a, b, c, d, e, f, g, h, i)   c
+#define LINN_NON_THIRD(t)                             LINN_NON_THIRD_I t
+#define LINN_NON_FOURTH_I(a, b, c, d, e, f, g, h, i)  d
+#define LINN_NON_FOURTH(t)                            LINN_NON_FOURTH_I t
+#define LINN_NON_FIFTH_I(a, b, c, d, e, f, g, h, i)   e
+#define LINN_NON_FIFTH(t)                             LINN_NON_FIFTH_I t
+#define LINN_NON_SIXTH_I(a, b, c, d, e, f, g, h, i)   f
+#define LINN_NON_SIXTH(t)                             LINN_NON_SIXTH_I t
+#define LINN_NON_SEVENTH_I(a, b, c, d, e, f, g, h, i) g
+#define LINN_NON_SEVENTH(t)                           LINN_NON_SEVENTH_I t
+#define LINN_NON_EIGHTH_I(a, b, c, d, e, f, g, h, i)  h
+#define LINN_NON_EIGHTH(t)                            LINN_NON_EIGHTH_I t
+#define LINN_NON_NINTH_I(a, b, c, d, e, f, g, h, i)   i
+#define LINN_NON_NINTH(t)                             LINN_NON_NINTH_I t
+
+#define LINN_UNPAREN(...)   LINN_UNPAREN_I __VA_ARGS__
+#define LINN_UNPAREN_I(...) __VA_ARGS__
 
 #define LINN_OR(a, b) LINN_CAT(LINN_OR_, LINN_CAT(a, b))
 #define LINN_OR_00    0
@@ -132,71 +234,100 @@
     _228, _229, _230, _231, _232, _233, _234, _235, _236, _237, _238, _239, _240, _241, _242, _243, _244, _245, _246,  \
     _247, _248, _249, _250, _251, _252, _253, _254, _255, _256, N, ...)                                                \
   N
+#define LINN_NARGS_II(...) LINN_NARGS_I(__VA_ARGS__)
 
-// Determine whether to use __VA_OPT__ (C++20 and not Qt <7.0)
-#if defined(QT_CORE_LIB)
-#  include <QCoreApplication>
-#  if QT_VERSION < QT_VERSION_CHECK(7, 0, 0)
-#    define LINN_USE_VA_OPT 0
-#  else
-#    define LINN_USE_VA_OPT 1
-#  endif
-#elif __cplusplus >= 202002L || (defined(_MSVC_LANG) && _MSVC_LANG >= 202002L)
-#  define LINN_USE_VA_OPT 1
-#else
-#  define LINN_USE_VA_OPT 0
-#endif
-
-// Now define LINN_NARGS based on LINN_USE_VA_OPT
-//
-// The fallback form needs no comma-paste extension: an empty argument still
-// occupies _1, so the sequence shifts by one and N ends up as 0.
-#if LINN_USE_VA_OPT
-// C++20 with __VA_OPT__ support.
-//
-// MSVC does not expand LINN_NARGS_SEQ() when __VA_ARGS__ is empty, so detect
-// the empty case before passing the argument list to the counting macro.
-#  define LINN_IS_EMPTY(...)      LINN_IS_EMPTY_I(__VA_OPT__(0,) 1)
-#  define LINN_IS_EMPTY_I(...)    LINN_IS_EMPTY_II(__VA_ARGS__)
-#  define LINN_IS_EMPTY_II(...)   LINN_IS_EMPTY_III(__VA_ARGS__)
+#if __cplusplus >= 202002L || (defined(_MSVC_LANG) && _MSVC_LANG >= 202002L)
+/// C++20 with __VA_OPT__ support.
+///
+/// MSVC does not expand LINN_NARGS_SEQ() when __VA_ARGS__ is empty, so detect
+/// the empty case before passing the argument list to the counting macro.
 #  define LINN_IS_EMPTY_III(x, ...) x
-#  define LINN_NARGS_EMPTY_1(...) 0
-#  define LINN_NARGS_EMPTY_0(...) LINN_NARGS_II(__VA_ARGS__ __VA_OPT__(, ) LINN_NARGS_SEQ())
-#  define LINN_NARGS_II(...)      LINN_NARGS_I(__VA_ARGS__)
-#  define LINN_NARGS(...)         LINN_CAT(LINN_NARGS_EMPTY_, LINN_IS_EMPTY(__VA_ARGS__))(__VA_ARGS__)
+#  define LINN_IS_EMPTY_II(...)     LINN_IS_EMPTY_III(__VA_ARGS__)
+#  define LINN_IS_EMPTY_I(...)      LINN_IS_EMPTY_II(__VA_ARGS__)
+#  define LINN_IS_EMPTY(...)        LINN_IS_EMPTY_I(__VA_OPT__(0, ) 1)
+#  define LINN_NARGS_EMPTY_1(...)   0
+#  define LINN_NARGS_EMPTY_0(...)   LINN_NARGS_II(__VA_ARGS__ __VA_OPT__(, ) LINN_NARGS_SEQ())
+#  define LINN_NARGS(...)           LINN_CAT(LINN_NARGS_EMPTY_, LINN_IS_EMPTY(__VA_ARGS__))(__VA_ARGS__)
 #else
-// Fallback for older compilers
-#  if defined(__clang__) || defined(__GNUC__)
-#    define LINN_NARGS_II(...) LINN_NARGS_I(__VA_ARGS__)
-#    define LINN_NARGS(...)    LINN_NARGS_II(__VA_ARGS__, LINN_NARGS_SEQ())
-#  elif defined(_MSC_VER)
-#    pragma warning(push)
-#    pragma warning(disable : 5103)
-// MSVC: require standard preprocessor mode (/Zc:preprocessor)
-#    if _MSC_VER >= 1925 && defined(_MSVC_TRADITIONAL) && _MSVC_TRADITIONAL == 0
-#      define LINN_NARGS_II(...) LINN_NARGS_I(__VA_ARGS__)
-#      define LINN_NARGS(...)    LINN_NARGS_II(__VA_ARGS__, LINN_NARGS_SEQ())
-#    else
+/// MSVC: require standard preprocessor mode (/Zc:preprocessor)
+#  if defined(_MSC_VER) && !defined(__clang__)
+#    if !(_MSC_VER >= 1925 && defined(_MSVC_TRADITIONAL) && _MSVC_TRADITIONAL == 0)
 #      error "For MSVC, please use the standard preprocessor compilation option /Zc:preprocessor or /experimental:preprocessor. For details, see https://learn.microsoft.com/en-us/cpp/build/reference/zc-preprocessor?view=msvc-170"
 #    endif
-#    pragma warning(pop)
-#  else
-// Other compilers (no special extension)
-#    define LINN_NARGS_II(...) LINN_NARGS_I(__VA_ARGS__)
-#    define LINN_NARGS(...)    LINN_NARGS_II(__VA_ARGS__, LINN_NARGS_SEQ())
 #  endif
+/*
+* Macro LINN_IS_EMPTY_IMPL(_0, _1, _2, _3), the role of four parameters:
+* _0: Does __VA_ARGS__ contain a top-level comma?
+*     HAS_COMMA()        -> 0    (empty)
+*     HAS_COMMA(x)       -> 0    (single argument)
+*     HAS_COMMA(x, y)    -> 1    (multiple arguments, top-level comma present)
+*     Purpose: directly detect ">= 2 arguments"
+*
+* _1: Put a "comma trigger" before __VA_ARGS__
+*     TRIGGER is a function-like macro (defined as ','); it expands only
+*     when immediately followed by '('.
+*     empty / starts with non-'(' -> TRIGGER remains unchanged -> 0
+*     starts with '(' (e.g. (), (x), (a,b)) -> TRIGGER '(' ... ')' is invoked
+*         -> becomes ',' -> 1
+*     Purpose: detect "argument starts with '('"
+*
+* _2: Append '()' after __VA_ARGS__
+*     empty -> '()' (only one empty paren group, no comma) -> 0
+*     x     -> 'x()' (no top-level comma)                 -> 0
+*     x, y  -> 'x, y()' (top-level comma remains)        -> 1
+*     Purpose: complement _0, ensuring "empty" and "multiple arguments"
+*     are distinguished by _2
+*
+* _3: Add both the trigger and the appended '()' -- key probe
+*     empty: TRIGGER () -> TRIGGER immediately followed by '()'
+*         -> expands to ',' -> 1
+*     starts with '(': TRIGGER (...) -> expands to ',' -> 1
+*     other single argument: TRIGGER x () -> TRIGGER unchanged -> 0
+*     top-level comma: x, y () -> comma remains -> 1
+*     Purpose: the only probe that can identify "empty" by itself
+*     (empty always yields 1)
+* 16 Cases Table:
+| #   | `_0` | `_1` | `_2` | `_3` | Pattern | Reachable | Corresponding input                                         | `IS_EMPTY`           |
+| --- | ---- | ---- | ---- | ---- | ------- | --------- | ----------------------------------------------------------- | -------------------- |
+| 0   | 0    | 0    | 0    | 0    | `0000`  | Yes       | `x`, `x()`, `x y`, `x (y)`, `x (y,z)`                       | **0**                |
+| 1   | 0    | 0    | 0    | 1    | `0001`  | Yes       | **empty `()`**                                              | **1** (unique match) |
+| 2   | 0    | 0    | 1    | 0    | `0010`  | No        | `_2=1` requires top-level comma -> `_0=1`, contradiction    | **0**                |
+| 3   | 0    | 0    | 1    | 1    | `0011`  | No        | Same as above                                               | **0**                |
+| 4   | 0    | 1    | 0    | 0    | `0100`  | No        | `_1=1` requires starting with `(` -> `_3=1`, contradiction  | **0**                |
+| 5   | 0    | 1    | 0    | 1    | `0101`  | Yes       | `()`; `(x)`; `((x))`; `(a,b)`; `(x) y`; `(x) (y)`; `(,)`    | **0**                |
+| 6   | 0    | 1    | 1    | 0    | `0110`  | No        | `_2=1` -> `_0=1`, contradiction                             | **0**                |
+| 7   | 0    | 1    | 1    | 1    | `0111`  | No        | Same as above                                               | **0**                |
+| 8   | 1    | 0    | 0    | 0    | `1000`  | No        | `_0=1` (has top-level comma) -> `_1=_2=_3=1`, contradiction | **0**                |
+| 9   | 1    | 0    | 0    | 1    | `1001`  | No        | Same as above                                               | **0**                |
+| 10  | 1    | 0    | 1    | 0    | `1010`  | No        | Same as above                                               | **0**                |
+| 11  | 1    | 0    | 1    | 1    | `1011`  | No        | Same as above                                               | **0**                |
+| 12  | 1    | 1    | 0    | 0    | `1100`  | No        | Same as above                                               | **0**                |
+| 13  | 1    | 1    | 0    | 1    | `1101`  | No        | Same as above                                               | **0**                |
+| 14  | 1    | 1    | 1    | 0    | `1110`  | No        | Same as above                                               | **0**                |
+| 15  | 1    | 1    | 1    | 1    | `1111`  | Yes       | `x, y`; `(a), (b)`; `(), x`; `x, (y)`; `x, y, z`            | **0**                |
+*/
+#  define LINN_HAS_COMMA_I(_0, _1, _2, _3, _4, _5, _6, _7, _8, _9, _10, _11, _12, _13, _14, _15, ...) _15
+
+#  define LINN_HAS_COMMA(...) LINN_HAS_COMMA_I(__VA_ARGS__, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0)
+
+#  define LINN_IS_EMPTY_CASE_UNIQUE_ID(_0, _1, _2, _3, _4) _0##_1##_2##_3##_4
+#  define LINN_IS_EMPTY_IMPL(_0, _1, _2, _3)               LINN_HAS_COMMA(LINN_IS_EMPTY_CASE_UNIQUE_ID(LINN_IS_EMPTY_CASE_, _0, _1, _2, _3))
+/// 16 IDs
+// define LINN_IS_EMPTY_CASE_0000
+#  define LINN_IS_EMPTY_CASE_0001                          , // Empty ID
+// define LINN_IS_EMPTY_CASE_0010
+// ...
+// define LINN_IS_EMPTY_CASE_1111
+#  define LINN_TRIGGER_PARENTHESIS(...)                    ,
+
+#  define LINN_IS_EMPTY(...)                                  \
+    LINN_IS_EMPTY_IMPL(                                       \
+        LINN_HAS_COMMA(__VA_ARGS__),                          \
+        LINN_HAS_COMMA(LINN_TRIGGER_PARENTHESIS __VA_ARGS__), \
+        LINN_HAS_COMMA(__VA_ARGS__()),                        \
+        LINN_HAS_COMMA(LINN_TRIGGER_PARENTHESIS __VA_ARGS__()))
+#  define LINN_NARGS_EMPTY_1(...) 0
+#  define LINN_NARGS_EMPTY_0(...) LINN_NARGS_II(__VA_ARGS__, LINN_NARGS_SEQ())
+#  define LINN_NARGS(...)         LINN_CAT(LINN_NARGS_EMPTY_, LINN_IS_EMPTY(__VA_ARGS__))(__VA_ARGS__)
 #endif
-
-#define LINN_DISABLE_COPY(CLASS)             \
-  CLASS(CLASS const &)             = delete; \
-  CLASS &operator= (CLASS const &) = delete;
-
-#define LINN_DISABLE_MOVE(CLASS)        \
-  CLASS(CLASS &&)             = delete; \
-  CLASS &operator= (CLASS &&) = delete;
-
-#define LINN_DISABLE_COPY_MOVE(CLASS) \
-  LINN_DISABLE_COPY(CLASS)            \
-  LINN_DISABLE_MOVE(CLASS)
-
 #endif // !LINN_UTILS_H_

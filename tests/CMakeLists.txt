@@ -53,7 +53,22 @@ stdex_add_test(test_singleton
     LIBS Threads::Threads
 )
 
-stdex_add_test(test_property
-    macro/test_property.cpp
-    INCLUDES "${CMAKE_SOURCE_DIR}/marco"
-)
+option(STDEX_ENABLE_QT "Enable Qt-dependent tests (test_property)" OFF)
+if(STDEX_ENABLE_QT)
+    set(CMAKE_AUTOMOC ON)
+    list(APPEND CMAKE_PREFIX_PATH "E:/Qt/6.6.2/msvc2019_64") # Set your Qt library path
+
+    find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Core)
+    find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Core)
+
+    stdex_add_test(test_property
+        macro/test_property.cpp
+        INCLUDES "${CMAKE_SOURCE_DIR}/marco"
+        LIBS Qt${QT_VERSION_MAJOR}::Core
+    )
+else()
+    stdex_add_test(test_property
+        macro/test_property.cpp
+        INCLUDES "${CMAKE_SOURCE_DIR}/marco"
+    )
+endif()
