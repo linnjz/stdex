@@ -111,6 +111,8 @@ public:
   LINN_PROPERTY_CREATE(LPS_MEMBER(Tracker, TrackerCopy, Tracker { 1 }), LPS_SETTER(Tracker const &), LPS_GETTER(Tracker))
   LINN_PROPERTY_CREATE(LPS_MEMBER(Tracker, TrackerMove, Tracker { 2 }), LPS_SETTER(Tracker &&), LPS_GETTER(Tracker))
   LINN_PROPERTY_CREATE(LPS_MEMBER(Tracker, TrackerValue, Tracker { 3 }), LPS_SETTER(Tracker), LPS_GETTER(Tracker))
+  LINN_PROPERTY_CREATE(int, SimpleCount)
+  LINN_PROPERTY_CREATE(LPS_SCREF(std::string), SimpleName)
 };
 
 class GuardedProps
@@ -156,18 +158,29 @@ public:
   int touches = 0;
 
   void touch() noexcept { ++touches; }
-
+  LINN_PROPERTY_CREATE_H(LPS_MEMBER(int, xCount), LPS_SETTER(int), LPS_GETTER(int))
   LINN_PROPERTY_CREATE_H(LPS_MEMBER(int, Count), LPS_SETTER(int), LPS_GETTER(int))
   LINN_PROPERTY_CREATE_H(LPS_MEMBER(std::string, Name), LPS_SETTER(std::string const &), LPS_GETTER(std::string))
   LINN_PROPERTY_CREATE_H(LPS_MEMBER(std::string, RefName), LPS_SETTER(std::string const &), LPS_GETTER_REF_QUALIFIED_OVERLOAD)
   LINN_PROPERTY_CREATE_H(LPS_MEMBER(int, Guarded), LPS_SETTER(int), LPS_GETTER(int))
   LINN_PROPERTY_CREATE_H(LPS_MEMBER(int, Posted), LPS_SETTER(int), LPS_GETTER(int))
+  LINN_PROPERTY_CREATE_H(int, SimpleCount)
+  LINN_PROPERTY_CREATE_H(LPS_SCREF(std::string), SimpleName)
 
-  LINN_PROPERTY_CREATE_D(int, Count, 7)
+#define INT_TYPE   int
+#define COUNT_NAME Count
+
+  LINN_PROPERTY_CREATE_D(INT_TYPE, COUNT_NAME, 7)
+
+#undef INT_TYPE
+#undef COUNT_NAME
+
   LINN_PROPERTY_CREATE_D(std::string, Name, "guest")
   LINN_PROPERTY_CREATE_D(std::string, RefName, "ref")
   LINN_PROPERTY_CREATE_D(int, Guarded, 1)
   LINN_PROPERTY_CREATE_D(int, Posted, 1)
+  LINN_PROPERTY_CREATE_D(int, SimpleCount, 5)
+  LINN_PROPERTY_CREATE_D(std::string, SimpleName, "simple")
 };
 
 // MSVC evaluates `this->member()` in an in-class exception specification as
@@ -178,6 +191,9 @@ LINN_PROPERTY_CREATE_CPP(SplitProps, LPS_MEMBER(std::string, Name), LPS_SETTER(s
 LINN_PROPERTY_CREATE_CPP(SplitProps, LPS_MEMBER(std::string, RefName), LPS_SETTER(std::string const &), LPS_GETTER_REF_QUALIFIED_OVERLOAD)
 LINN_PROPERTY_CREATE_CPP(SplitProps, LPS_MEMBER(int, Guarded), LPS_SETTER(int, LPS_PRE_CONTRACT(Guarded > 0, custom_handler)), LPS_GETTER(int))
 LINN_PROPERTY_CREATE_CPP(SplitProps, LPS_MEMBER(int, Posted), LPS_SETTER(int, LPS_POST_ACTION(touch())), LPS_GETTER(int))
+LINN_PROPERTY_CREATE_CPP(SplitProps, int, SimpleCount)
+LINN_PROPERTY_CREATE_CPP(SplitProps, LPS_SCREF(std::string), SimpleName)
+
 
 #if defined(QT_DEBUG) || defined(QT_NO_DEBUG) || defined(QT_CORE_LIB) || defined(QT_WIDGETS_LIB) || defined(Q_OBJECT)
 namespace qt_test
@@ -296,6 +312,8 @@ int main(int argc, char *argv[])
   static_assert(std::is_same_v<decltype(std::declval<BasicProps const &>().getValueRef()), std::string const &>);
   static_assert(std::is_same_v<decltype(std::declval<BasicProps &&>().getValueRef()), std::string>);
   static_assert(std::is_same_v<decltype(std::declval<BasicProps const &>().getTrackerCopy()), Tracker>);
+  static_assert(std::is_same_v<decltype(std::declval<BasicProps const &>().getSimpleCount()), int>);
+  static_assert(std::is_same_v<decltype(std::declval<BasicProps const &>().getSimpleName()), std::string>);
 
   static_assert(noexcept(std::declval<BasicProps const &>().getCount()));
   static_assert(!noexcept(std::declval<BasicProps const &>().getName()));
@@ -334,6 +352,7 @@ int main(int argc, char *argv[])
   static_assert(!noexcept(std::declval<SplitProps &>().setPosted(0)));
   static_assert(std::is_same_v<decltype(std::declval<SplitProps const &>().getRefName()), std::string const &>);
   static_assert(std::is_same_v<decltype(std::declval<SplitProps &&>().getRefName()), std::string>);
+  static_assert(std::is_same_v<decltype(std::declval<SplitProps const &>().getSimpleName()), std::string>);
 
   BasicProps basic;
 
@@ -404,6 +423,12 @@ int main(int argc, char *argv[])
   CHECK(value_copy_source.value == 45);
   CHECK(Tracker::copies > 0);
   CHECK(Tracker::moves > 0);
+
+  basic.setSimpleCount(12);
+  CHECK(basic.getSimpleCount() == 12);
+  CHECK(basic.getSimpleName().empty());
+  basic.setSimpleName("simple");
+  CHECK(basic.getSimpleName() == "simple");
 
   GuardedProps guarded;
   guarded.setAlways(2);
@@ -477,6 +502,13 @@ int main(int argc, char *argv[])
   split.setPosted(6);
   CHECK(split.getPosted() == 6);
   CHECK(split.touches == 1);
+
+  CHECK(split.getSimpleCount() == 5);
+  split.setSimpleCount(13);
+  CHECK(split.getSimpleCount() == 13);
+  CHECK(split.getSimpleName() == "simple");
+  split.setSimpleName("simple-2");
+  CHECK(split.getSimpleName() == "simple-2");
 
 #if defined(QT_DEBUG) || defined(QT_NO_DEBUG) || defined(QT_CORE_LIB) || defined(QT_WIDGETS_LIB) || defined(Q_OBJECT)
 

@@ -68,7 +68,7 @@ private:
 
 class ShortMeyers
 {
-  SINGLETON_CREATE_1(MEYERS(ShortMeyers))
+  SINGLETON_CREATE(MEYERS(ShortMeyers))
 
 public:
   [[nodiscard]] int value() const noexcept
