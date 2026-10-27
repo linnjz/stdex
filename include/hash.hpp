@@ -16,14 +16,14 @@
 
 #pragma once
 
-#include <array>     // std::array, std::to_array
-#include <concepts>  // std::same_as
-#include <cstddef>   // std::size_t
-#include <cstdint>   // std::uint64_t
-#include <memory>    // std::shared_ptr, std::unique_ptr
-#include <ranges>    // std::ranges::contiguous_range, std::ranges::sized_range,
-                     // std::ranges::range_value_t, std::ranges::data, std::ranges::size
-#include <span>      // std::span, std::as_bytes
+#include <array>    // std::array, std::to_array
+#include <concepts> // std::same_as
+#include <cstddef>  // std::size_t
+#include <cstdint>  // std::uint64_t
+#include <memory>   // std::shared_ptr, std::unique_ptr
+#include <ranges>   // std::ranges::contiguous_range, std::ranges::sized_range,
+                    // std::ranges::range_value_t, std::ranges::data, std::ranges::size
+#include <span>     // std::span, std::as_bytes
 #include <string>
 #include <string_view>
 #include <type_traits> // std::remove_cvref_t, std::remove_cv_t, std::is_trivially_copyable_v
@@ -31,10 +31,13 @@
 #include "bit_traits.hpp" // stdex::unsigned_equivalent_t, stdex::to_unsigned
 #include "byte_utils.hpp" // stdex::byte_like, stdex::byte_value, stdex::read64_le,
                           // stdex::read32_le, stdex::little_endian_array
-#include "int128.hpp" // stdex::umul128, stdex::umulh, stdex::mix, stdex::mum
+#include "int128.hpp"     // stdex::umul128, stdex::umulh, stdex::mix, stdex::mum
 
 namespace stdex
 {
+
+inline constexpr std::uint64_t kPhiMixMultConstant = 0x9E'37'79'B9'7F'4A'7C'15ULL; // [2^64 / 1.618033988749894...(std::numbers::phi) ]
+inline constexpr std::uint64_t kPiMixMultConstant  = 0x51'7C'C1'B7'27'22'0A'95ULL; // [2^64 / 3.141592653589793...(std::numbers::pi) ]
 
 static_assert(CHAR_BIT == 8, "hash requires 8-bit bytes");
 static_assert(sizeof(std::uint32_t) == 4, "hash requires 32-bit std::uint32_t");
@@ -66,9 +69,9 @@ struct mode_traits<hash_standard_t>
 {
   static constexpr std::size_t stripe     = 112;
   static constexpr std::size_t lane_count = 7;
-  static constexpr bool is_standard  = true;
-  static constexpr bool is_micro     = false;
-  static constexpr bool is_nano      = false;
+  static constexpr bool is_standard       = true;
+  static constexpr bool is_micro          = false;
+  static constexpr bool is_nano           = false;
 };
 
 template <>
@@ -76,9 +79,9 @@ struct mode_traits<hash_micro_t>
 {
   static constexpr std::size_t stripe     = 80;
   static constexpr std::size_t lane_count = 5;
-  static constexpr bool is_standard  = false;
-  static constexpr bool is_micro     = true;
-  static constexpr bool is_nano      = false;
+  static constexpr bool is_standard       = false;
+  static constexpr bool is_micro          = true;
+  static constexpr bool is_nano           = false;
 };
 
 template <>
@@ -86,20 +89,20 @@ struct mode_traits<hash_nano_t>
 {
   static constexpr std::size_t stripe     = 48;
   static constexpr std::size_t lane_count = 3;
-  static constexpr bool is_standard  = false;
-  static constexpr bool is_micro     = false;
-  static constexpr bool is_nano      = true;
+  static constexpr bool is_standard       = false;
+  static constexpr bool is_micro          = false;
+  static constexpr bool is_nano           = true;
 };
 
 inline constexpr auto default_secret = std::to_array<std::uint64_t>({
-    0x2d'35'8d'cc'aa'6c'78'a5ULL,
-    0x8b'b8'4b'93'96'2e'ac'c9ULL,
-    0x4b'33'a6'2e'd4'33'd4'a3ULL,
-    0x4d'5a'2d'a5'1d'e1'aa'47ULL,
-    0xa0'76'1d'64'78'bd'64'2fULL,
-    0xe7'03'7e'd1'a0'b4'28'dbULL,
-    0x90'ed'17'65'28'1c'38'8cULL,
-    0xaa'aa'aa'aa'aa'aa'aa'aaULL,
+    0x2D'35'8D'CC'AA'6C'78'A5ULL,
+    0x8B'B8'4B'93'96'2E'AC'C9ULL,
+    0x4B'33'A6'2E'D4'33'D4'A3ULL,
+    0x4D'5A'2D'A5'1D'E1'AA'47ULL,
+    0xA0'76'1D'64'78'BD'64'2FULL,
+    0xE7'03'7E'D1'A0'B4'28'DBULL,
+    0x90'ED'17'65'28'1C'38'8CULL,
+    0xAA'AA'AA'AA'AA'AA'AA'AAULL,
 });
 
 static_assert(default_secret.size() == 8);
@@ -285,9 +288,9 @@ struct hash<T>
   [[nodiscard]] constexpr std::size_t operator() (argument_type value) const noexcept
   {
     if constexpr (sizeof(void *) == 8) {
-      return mix(static_cast<std::uint64_t>(hash_detail::to_hashable_unsigned(value)), 0x9E'37'79'B9'7F'4A'7C'15ull);
+      return mix(static_cast<std::uint64_t>(hash_detail::to_hashable_unsigned(value)), kPhiMixMultConstant);
     } else {
-      std::uint64_t product = static_cast<std::uint64_t>(hash_detail::to_hashable_unsigned(value)) * 0xE8'17'FB'2Du;
+      std::uint64_t product = static_cast<std::uint64_t>(hash_detail::to_hashable_unsigned(value)) * 0x00'00'00'00'E8'17'FB'2DULL;
 #if defined(__MSVC_RUNTIME_CHECKS)
       return static_cast<std::uint32_t>(product & UINT32_MAX) ^ static_cast<std::uint32_t>(product >> 32);
 #else
@@ -337,7 +340,8 @@ struct hash<std::nullptr_t>
 
 // reinterpret_cast from a function pointer is conditionally-supported; exclude function
 // types so hash<void(*)()> fails on the constraint instead of inside reinterpret_cast.
-template <class T> requires (!std::is_function_v<T>)
+template <class T>
+requires (!std::is_function_v<T>)
 struct hash<T *>
 {
   using argument_type = T *;
