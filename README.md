@@ -180,7 +180,7 @@ Accessor names use exactly one of `LINN_PROPERTY_ACCESSOR_PREFIX_CAMEL` (default
 
 Define `LINN_PROPERTY_ENABLE_SHORT_MACROS` for `MEMBER`, `SETTER`, `GETTER`, `GETTER_REF_QUALIFIED_OVERLOAD`, `PRE_CONTRACT`, `PRE_CONTRACTD`, `POST_ACTION`, `PROPERTY_CREATE`, `PROPERTY_CREATE_H`, `PROPERTY_CREATE_CPP`, and `PROPERTY_CREATE_D`.
 
-Qt mode is enabled automatically when Qt is detected. It adds `Q_PROPERTY_CREATE`, `Q_PROPERTY_CREATE_H`, `Q_PROPERTY_CREATE_CPP`, and `Q_PROPERTY_CREATE_D`, which emit `Q_PROPERTY(... NOTIFY signalName)` plus the signal declaration. `QPS_*` mirrors `LPS_*`, with `QPS_POST_ACTION_EMIT`, `QPS_POST_ACTION_UPDATE`, and `QPS_POST_ACTION_UPDATEMIT` as Qt-specific post actions. The two-argument Qt shortcut declares the NOTIFY signal but does not emit it; use the three-argument form with `QPS_POST_ACTION_EMIT(Name)` when the setter must emit.
+Qt mode is enabled automatically when Qt is detected. It adds `Q_PROPERTY_CREATE`, `Q_PROPERTY_CREATE_H`, `Q_PROPERTY_CREATE_CPP`, and `Q_PROPERTY_CREATE_D`, which emit `Q_PROPERTY(... NOTIFY signalName)` plus the signal declaration. `QPS_*` mirrors `LPS_*`, with `QPS_POST_ACTION_EMIT`, `QPS_POST_ACTION_UPDATE`, and `QPS_POST_ACTION_UPDATEMIT` as Qt-specific post actions. `QPS_SCREF(TYPE)` declares the NOTIFY signal without emitting it. `QPS_SCREF_PAEMIT(TYPE)`, `QPS_SCREF_PAUPEMIT(TYPE)`, `QPS_SCREF_GOVLD_PAEMIT(TYPE)`, and `QPS_SCREF_GOVLD_PAUPEMIT(TYPE)` add emit or update+emit post actions; the `GOVLD` variants use a ref-qualified overload getter. In split mode pass the same shortcut to `_H` and `_CPP`: `_H` declares the accessor shape, while `_CPP` applies the post action.
 
 Inline example:
 
@@ -212,9 +212,12 @@ Qt example:
 ```cpp
 class Counter : public QObject {
   Q_OBJECT
-  Q_PROPERTY_CREATE(QPS_MEMBER(int, Count, 0),
-                    QPS_SETTER(int, QPS_POST_ACTION_EMIT(Count)),
-                    QPS_GETTER(int))
+
+public:
+  void update() noexcept {}
+
+  Q_PROPERTY_CREATE(QPS_SCREF_PAEMIT(QString), Name)
+  Q_PROPERTY_CREATE(QPS_SCREF_GOVLD_PAUPEMIT(QString), Label)
 };
 ```
 
