@@ -205,8 +205,10 @@ class QtInlineProps : public QObject
 
 public:
   using QObject::QObject;
-  Q_PROPERTY_CREATE(LPS_MEMBER(int, Count, 7), LPS_SETTER(int, LPS_POST_ACTION(Q_EMIT this->signalCount())), LPS_GETTER(int))
-  Q_PROPERTY_CREATE(LPS_MEMBER(QString, Name, QString("guest")), LPS_SETTER(QString const &, LPS_POST_ACTION(Q_EMIT this->signalName())), LPS_GETTER(QString))
+  Q_PROPERTY_CREATE(QPS_MEMBER(int, Count, 7), QPS_SETTER(int, QPS_POST_ACTION(Q_EMIT this->signalCount())), QPS_GETTER(int))
+  Q_PROPERTY_CREATE(QPS_MEMBER(QString, Name, QString("guest")), QPS_SETTER(QString const &, QPS_POST_ACTION(Q_EMIT this->signalName())), QPS_GETTER(QString))
+  Q_PROPERTY_CREATE(int, SimpleCount)
+  Q_PROPERTY_CREATE(QPS_SCREF(QString), SimpleName)
 };
 
 class QtSplitProps : public QObject
@@ -215,26 +217,34 @@ class QtSplitProps : public QObject
 
 public:
   using QObject::QObject;
-  Q_PROPERTY_CREATE_H(LPS_MEMBER(int, Count), LPS_SETTER(int), LPS_GETTER(int))
-  Q_PROPERTY_CREATE_H(LPS_MEMBER(QString, Name), LPS_SETTER(QString const &), LPS_GETTER(QString))
+  Q_PROPERTY_CREATE_H(QPS_MEMBER(int, Count), QPS_SETTER(int), QPS_GETTER(int))
+  Q_PROPERTY_CREATE_H(QPS_MEMBER(QString, Name), QPS_SETTER(QString const &), QPS_GETTER(QString))
+  Q_PROPERTY_CREATE_H(int, SimpleCount)
+  Q_PROPERTY_CREATE_H(QPS_SCREF(QString), SimpleName)
 
-  LINN_PROPERTY_CREATE_D(int, Count, 7)
-  LINN_PROPERTY_CREATE_D(QString, Name, QString("guest"))
+  Q_PROPERTY_CREATE_D(int, Count, 7)
+  Q_PROPERTY_CREATE_D(QString, Name, QString("guest"))
+  Q_PROPERTY_CREATE_D(int, SimpleCount, 5)
+  Q_PROPERTY_CREATE_D(QString, SimpleName, QString("simple"))
 };
 
-Q_PROPERTY_CREATE_CPP(QtSplitProps, LPS_MEMBER(int, Count), LPS_SETTER(int, LPS_POST_ACTION(Q_EMIT this->signalCount())), LPS_GETTER(int))
-Q_PROPERTY_CREATE_CPP(QtSplitProps, LPS_MEMBER(QString, Name), LPS_SETTER(QString const &, LPS_POST_ACTION(Q_EMIT this->signalName())), LPS_GETTER(QString))
+Q_PROPERTY_CREATE_CPP(QtSplitProps, QPS_MEMBER(int, Count), QPS_SETTER(int, QPS_POST_ACTION(Q_EMIT this->signalCount())), QPS_GETTER(int))
+Q_PROPERTY_CREATE_CPP(QtSplitProps, QPS_MEMBER(QString, Name), QPS_SETTER(QString const &, QPS_POST_ACTION(Q_EMIT this->signalName())), QPS_GETTER(QString))
+Q_PROPERTY_CREATE_CPP(QtSplitProps, int, SimpleCount)
+Q_PROPERTY_CREATE_CPP(QtSplitProps, QPS_SCREF(QString), SimpleName)
 
 } // namespace qt_test
 
 /// Verifies the meta-object metadata that moc generated for a property created
-/// with LPS_QT: registered type, READ/WRITE capability, and the NOTIFY signal.
-/// Signal is the generated notify member, so the direct-connection overload can
-/// be used instead of a string-based SIGNAL() lookup.
+/// with Q_PROPERTY_CREATE(_H): registered type, READ/WRITE capability, and the
+/// NOTIFY signal. Signal is the generated notify member, so the direct-connection
+/// overload can be used instead of a string-based SIGNAL() lookup.
 template <class Object, class Signal>
-void check_count_meta(Object *object, QMetaObject const *meta, Signal signal)
+void check_property_meta(Object *object, QMetaObject const *meta, char const *property_name,
+                         char const *type_name, char const *signal_name, Signal signal,
+                         QVariant const &first, QVariant const &second, bool expects_notify = true)
 {
-  int const index = meta->indexOfProperty("Count");
+  int const index = meta->indexOfProperty(property_name);
   CHECK(index >= 0);
   if (index < 0) {
     return;
@@ -242,9 +252,9 @@ void check_count_meta(Object *object, QMetaObject const *meta, Signal signal)
 
   QMetaProperty property = meta->property(index);
   CHECK(property.isValid());
-  CHECK(property.typeName() == QByteArray("int"));
+  CHECK(property.typeName() == QByteArray(type_name));
   CHECK(property.hasNotifySignal());
-  CHECK(property.notifySignal().name() == QByteArray("signalCount"));
+  CHECK(property.notifySignal().name() == QByteArray(signal_name));
   CHECK(property.isReadable());
   CHECK(property.isWritable());
 
@@ -252,45 +262,13 @@ void check_count_meta(Object *object, QMetaObject const *meta, Signal signal)
   auto const connection =
       QObject::connect(object, signal, object, [&emissions] { ++emissions; }, Qt::DirectConnection);
 
-  CHECK(object->setProperty("Count", 42));
-  CHECK(object->property("Count").toInt() == 42);
-  CHECK(emissions == 1);
+  CHECK(object->setProperty(property_name, first));
+  CHECK(object->property(property_name) == first);
+  CHECK(emissions == (expects_notify ? 1 : 0));
 
-  CHECK(property.write(object, QVariant(7)));
-  CHECK(object->property("Count").toInt() == 7);
-  CHECK(emissions == 2);
-
-  QObject::disconnect(connection);
-}
-
-template <class Object, class Signal>
-void check_name_meta(Object *object, QMetaObject const *meta, Signal signal)
-{
-  int const index = meta->indexOfProperty("Name");
-  CHECK(index >= 0);
-  if (index < 0) {
-    return;
-  }
-
-  QMetaProperty property = meta->property(index);
-  CHECK(property.isValid());
-  CHECK(property.typeName() == QByteArray("QString"));
-  CHECK(property.hasNotifySignal());
-  CHECK(property.notifySignal().name() == QByteArray("signalName"));
-  CHECK(property.isReadable());
-  CHECK(property.isWritable());
-
-  int emissions = 0;
-  auto const connection =
-      QObject::connect(object, signal, object, [&emissions] { ++emissions; }, Qt::DirectConnection);
-
-  CHECK(object->setProperty("Name", QStringLiteral("alice")));
-  CHECK(object->property("Name").toString() == QLatin1String("alice"));
-  CHECK(emissions == 1);
-
-  CHECK(property.write(object, QVariant(QStringLiteral("bob"))));
-  CHECK(object->property("Name").toString() == QLatin1String("bob"));
-  CHECK(emissions == 2);
+  CHECK(property.write(object, second));
+  CHECK(object->property(property_name) == second);
+  CHECK(emissions == (expects_notify ? 2 : 0));
 
   QObject::disconnect(connection);
 }
@@ -518,24 +496,47 @@ int main(int argc, char *argv[])
     qt_test::QtInlineProps object;
     CHECK(object.getCount() == 7);
     CHECK(object.getName() == QLatin1String("guest"));
-    check_count_meta(&object, &qt_test::QtInlineProps::staticMetaObject, &qt_test::QtInlineProps::signalCount);
-    check_name_meta(&object, &qt_test::QtInlineProps::staticMetaObject, &qt_test::QtInlineProps::signalName);
+    CHECK(object.getSimpleName().isEmpty());
+    check_property_meta(&object, &qt_test::QtInlineProps::staticMetaObject, "Count", "int", "signalCount",
+                        &qt_test::QtInlineProps::signalCount, QVariant(42), QVariant(7));
+    check_property_meta(&object, &qt_test::QtInlineProps::staticMetaObject, "Name", "QString", "signalName",
+                        &qt_test::QtInlineProps::signalName, QVariant(QStringLiteral("alice")), QVariant(QStringLiteral("bob")));
+    check_property_meta(&object, &qt_test::QtInlineProps::staticMetaObject, "SimpleCount", "int", "signalSimpleCount",
+                        &qt_test::QtInlineProps::signalSimpleCount, QVariant(21), QVariant(3), false);
+    check_property_meta(&object, &qt_test::QtInlineProps::staticMetaObject, "SimpleName", "QString", "signalSimpleName",
+                        &qt_test::QtInlineProps::signalSimpleName, QVariant(QStringLiteral("first")), QVariant(QStringLiteral("second")), false);
     object.setCount(9);
     CHECK(object.getCount() == 9);
     object.setName(QStringLiteral("carol"));
     CHECK(object.getName() == QLatin1String("carol"));
+    object.setSimpleCount(12);
+    CHECK(object.getSimpleCount() == 12);
+    object.setSimpleName(QStringLiteral("inline-simple"));
+    CHECK(object.getSimpleName() == QLatin1String("inline-simple"));
   }
 
   {
     qt_test::QtSplitProps object;
     CHECK(object.getCount() == 7);
     CHECK(object.getName() == QLatin1String("guest"));
-    check_count_meta(&object, &qt_test::QtSplitProps::staticMetaObject, &qt_test::QtSplitProps::signalCount);
-    check_name_meta(&object, &qt_test::QtSplitProps::staticMetaObject, &qt_test::QtSplitProps::signalName);
+    CHECK(object.getSimpleCount() == 5);
+    CHECK(object.getSimpleName() == QLatin1String("simple"));
+    check_property_meta(&object, &qt_test::QtSplitProps::staticMetaObject, "Count", "int", "signalCount",
+                        &qt_test::QtSplitProps::signalCount, QVariant(42), QVariant(7));
+    check_property_meta(&object, &qt_test::QtSplitProps::staticMetaObject, "Name", "QString", "signalName",
+                        &qt_test::QtSplitProps::signalName, QVariant(QStringLiteral("alice")), QVariant(QStringLiteral("bob")));
+    check_property_meta(&object, &qt_test::QtSplitProps::staticMetaObject, "SimpleCount", "int", "signalSimpleCount",
+                        &qt_test::QtSplitProps::signalSimpleCount, QVariant(21), QVariant(3), false);
+    check_property_meta(&object, &qt_test::QtSplitProps::staticMetaObject, "SimpleName", "QString", "signalSimpleName",
+                        &qt_test::QtSplitProps::signalSimpleName, QVariant(QStringLiteral("first")), QVariant(QStringLiteral("second")), false);
     object.setCount(11);
     CHECK(object.getCount() == 11);
     object.setName(QStringLiteral("dave"));
     CHECK(object.getName() == QLatin1String("dave"));
+    object.setSimpleCount(14);
+    CHECK(object.getSimpleCount() == 14);
+    object.setSimpleName(QStringLiteral("split-simple"));
+    CHECK(object.getSimpleName() == QLatin1String("split-simple"));
   }
 #endif
 
