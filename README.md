@@ -2,11 +2,11 @@
 
 A header-only C++ extension library: hashing, fast modular arithmetic, flat hash tables, inlined bitsets, stable radix sort, and small utilities.
 
-All public headers live under `include/` in namespace `stdex` (hash-table internals in `stdex::unordered_flat_detail`). The library has no runtime dependencies; tests use CTest and benchmarks use Google Benchmark plus Boost / Abseil for comparison.
+All public library headers live under `include/` in namespace `stdex` (hash-table internals in `stdex::unordered_flat_detail`); the standalone macro headers live under `marco/` (see [Macro headers](#macro-headers-marco)). The library has no runtime dependencies; tests use CTest and benchmarks use Google Benchmark plus Boost / Abseil for comparison.
 
 ## Requirements
 
-- C++ standard: the project builds with **C++23** (`CMAKE_CXX_STANDARD 23`, `tests` / `benchmarks` targets request `cxx_std_23`). Individual headers declare a lower minimum (see table below); `field_variant.hpp` requires **C++26** static reflection (P2996 `<meta>`) and is currently parked until toolchains provide it.
+- C++ standard: the project builds with **C++23** (`CMAKE_CXX_STANDARD 23`, `tests` / `benchmarks` targets request `cxx_std_23`). Individual headers declare a lower minimum (see the header tables below); `field_variant.hpp` requires **C++26** static reflection (P2996 `<meta>`) and is currently parked until toolchains provide it.
 - Compilers tested: MSVC 19.51 (VS 2026, `cl` / `clang-cl`), Clang 22, GCC 16. SIMD paths use SSE2 on x86-64 and NEON on ARM (little-endian); scalar fallbacks are provided.
 - Build: CMake >= 3.30, Ninja recommended. `cmake-scaffold` is vendored as a git submodule and supplies the shared CMake modules and tool configuration; initialize it before configuring. Optional vcpkg packages for benchmarks: `boost-unordered`, `absl`, `benchmark`.
 
@@ -15,6 +15,7 @@ All public headers live under `include/` in namespace `stdex` (hash-table intern
 ```text
 include/                  public headers (add to include path)
   unordered_flat_detail/  hash-table implementation details (see table)
+marco/                    standalone macro headers (add to include path)
 tests/                    one executable per test TU, registered with CTest
 benchmarks/                Google Benchmark binaries + Boost/Abseil comparisons
 third_party/cmake-scaffold/  shared CMake modules and tool configuration (submodule)
@@ -55,6 +56,167 @@ Included indirectly by the map/set facades (upstream Boost.FoA layout: public he
 | `ufmap_traits.hpp`        | Map traits: `pair<const Key, T>` value model, `key_fn`, reference proxies. |
 | `ufset_traits.hpp`        | Set traits: key-is-value model.                              |
 | `try_key_extraction.hpp`  | `try_key_extraction`: perfect-forwarding key hint extraction for `emplace` (avoids hashing before knowing whether construction is possible). |
+
+## Macro headers (`marco/`)
+
+Standalone, header-only macro utilities. They are independent of the `stdex` namespace and the CMake targets; add `marco/` to the include path. `LinnSingleton.h` and `LinnProperty.h` include `LinnPimpl.h` / `LinnUtils.h` by quoted filename, so keep the four files together.
+
+| File                    | Min. C++ | Purpose                                                                                                                              |
+| ----------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `marco/LinnUtils.h`     | C++11    | Preprocessor toolkit: compiler attributes, token pasting / stringification, boolean probes, tuple accessors, variadic arity counting. |
+| `marco/LinnPimpl.h`     | C++17    | Qt-style d-pointer / q-pointer scaffolding plus copy / move suppression.                                                             |
+| `marco/LinnSingleton.h` | C++17    | Singleton factory with unique / shared / Meyers storage and optional one-way destruction.                                            |
+| `marco/LinnProperty.h`  | C++17    | Property generator for inline, split (`_H` / `_CPP`), and Qt `Q_PROPERTY` members.                                                    |
+
+### `LinnUtils.h` (C++11)
+
+- Compiler helpers: `LINN_ALWAYS_INLINE`, `LINN_PRETTY_FUNCTION`, `LINN_RESTRICT`, `LINN_UNREACHABLE()`, `LINN_FLATTEN`, `LINN_LOOP_UNROLL(n)`.
+- Token helpers: `LINN_EXPAND`, `LINN_STRINGIFY`, `LINN_CAT` through `LINN_CAT9`.
+- Selection and probes: `LINN_IF`, `LINN_CHECK`, `LINN_PROBE`, `LINN_IS_PAREN`, `LINN_UNPAREN`, `LINN_OR`, `LINN_AND`.
+- Tuple accessors: `LINN_PAIR`, `LINN_TRIPLE`, `LINN_QUAD`, `LINN_QUINT`, `LINN_SEXT`, `LINN_SEPT`, `LINN_OCT`, `LINN_NON`, with positional `*_FIRST`, `*_SECOND`, … accessors up to each tuple's arity (`LINN_NON` covers nine elements).
+- Arity: `LINN_NARGS` (0–256), `LINN_HAS_COMMA`, `LINN_IS_EMPTY`. C++20 uses the `__VA_OPT__` fast path; earlier standards use a probe-based fallback. MSVC requires the conforming preprocessor (`/Zc:preprocessor`).
+
+```cpp
+static_assert(LINN_NARGS(a, b, c) == 3);
+static_assert(LINN_IS_PAREN((x)) == 1);
+// LINN_CAT(prefix_, Name) -> prefix_Name
+```
+
+### `LinnPimpl.h` (C++17)
+
+- `LINN_DISABLE_COPY` / `LINN_DISABLE_MOVE` / `LINN_DISABLE_COPY_MOVE`.
+- `LINN_Q_CREATE(CLASS)` adds `std::unique_ptr<CLASS##Private> d_ptr`, declares `explicit CLASS(CLASS##Private &)`, disables copying, and generates `d_func()`. `LINN_D_CREATE(CLASS)` adds the `CLASS *q_ptr` back-pointer and generates `q_func()`.
+- `LINN_D(CLASS)` / `LINN_Q(CLASS)` bind local raw pointers; `LINN_CONST_D` / `LINN_CONST_Q` bind const pointers.
+- Qt aliases `Q_Q_CREATE`, `Q_D_CREATE`, `Q_CONST_D`, `Q_CONST_Q` are available when Qt is detected.
+
+```cpp
+class WidgetPrivate;
+
+class Widget {
+  LINN_Q_CREATE(Widget)
+public:
+  explicit Widget();
+};
+
+class WidgetPrivate {
+  LINN_D_CREATE(Widget)
+public:
+  int count = 0;
+};
+
+Widget::Widget() : d_ptr(std::make_unique<WidgetPrivate>())
+{
+  LINN_D(Widget);
+  d->q_ptr = this;
+}
+```
+
+### `LinnSingleton.h` (C++17)
+
+`LINN_SINGLETON_CREATE(MODE_PAIR [, DESTROY_MODE])` injects the singleton API into a class body.
+
+- Storage modes: `LSS_UNIQUE(CLASS)` (`std::unique_ptr`, `getInstance()` returns `CLASS *`), `LSS_SHARED(CLASS)` (`std::shared_ptr`, returns `std::shared_ptr<CLASS>`), `LSS_MEYERS(CLASS)` (function-local static, returns `CLASS &`; only with `LSS_NO_DESTROY`).
+- Destroy modes: `LSS_NO_DESTROY` (default; no destroy API), `LSS_DESTROY_NOLOCK` (adds `destroyInstance()` / `isInstanceDestroyed()`; single-thread only), `LSS_DESTROY_LOCKED` (serialized get/destroy).
+- One-time creation is thread-safe except in `LSS_DESTROY_NOLOCK`, which expects all calls on one thread. Destruction is one-way, and `getInstance()` returns null after `destroyInstance()`. `LSS_MEYERS` with a destroy mode degrades to `LSS_UNIQUE`.
+- Define `LINN_SINGLETON_ENABLE_SHORT_MACROS` for `SINGLETON_CREATE`, `UNIQUE`, `SHARED`, `MEYERS`, `NO_DESTROY`, `DESTROY_NOLOCK`, `DESTROY_LOCKED`. Qt mode adds `Q_SINGLETON_CREATE` and `QSS_*`.
+
+```cpp
+class Foo {
+  LINN_SINGLETON_CREATE(LSS_UNIQUE(Foo))
+private:
+  Foo() = default;
+};
+
+Foo *foo = Foo::getInstance();
+
+class Bar {
+  LINN_SINGLETON_CREATE(LSS_SHARED(Bar), LSS_DESTROY_LOCKED)
+private:
+  Bar() = default;
+};
+
+std::shared_ptr<Bar> bar = Bar::getInstance();
+Bar::destroyInstance();
+```
+
+### `LinnProperty.h` (C++17)
+
+Generates a private member plus setter/getter from strategy descriptors. Entry points:
+
+| Macro | Use |
+| --- | --- |
+| `LINN_PROPERTY_CREATE(...)` | Inline member, setter, and getter. |
+| `LINN_PROPERTY_CREATE_H(...)` | Setter/getter declarations in a header; the member comes from `_D`. |
+| `LINN_PROPERTY_CREATE_CPP(CLASS, ...)` | Out-of-line setter/getter definitions. |
+| `LINN_PROPERTY_CREATE_D(TYPE, NAME[, DEFAULT])` | Private member definition for split mode; the only split form that accepts a default. |
+
+Pre/post hooks belong in the `_CPP` descriptor; `_H` rejects them with a `static_assert`. A two-argument shortcut expands to the three-descriptor form (with a leading `CLASS` argument for `_CPP`):
+
+```cpp
+LINN_PROPERTY_CREATE_H(int, Count)
+// equivalent to
+LINN_PROPERTY_CREATE_H(LPS_MEMBER(int, Count), LPS_SETTER(int), LPS_GETTER(int))
+
+LINN_PROPERTY_CREATE_H(LPS_SCREF(std::string), Name)
+// equivalent to
+LINN_PROPERTY_CREATE_H(LPS_MEMBER(std::string, Name),
+                       LPS_SETTER(std::string const &),
+                       LPS_GETTER(std::string))
+```
+
+`LPS_SCREF(TYPE)` expands to the pair `(TYPE, TYPE const &)`: member type and setter parameter type.
+
+Strategies:
+
+- `LPS_MEMBER(TYPE, NAME[, DEFAULT])`: member descriptor. `DEFAULT` is accepted by the inline forms (`LINN_PROPERTY_CREATE` / `Q_PROPERTY_CREATE`) only; `_H` / `_CPP` reject it with a `static_assert` and point to `_D`.
+- `LPS_SETTER(PARAM_TYPE[, HOOK][, POST])`: 1 argument is the setter type; 2 arguments are the type plus a pre-contract or post action; 3 arguments are the type, pre-contract, and post action. A single unparenthesized post-action expression is wrapped automatically; use `LPS_POST_ACTION(...)` for multi-statement actions.
+- `LPS_GETTER(TYPE)`: value getter; the wrapper is mandatory, a bare type is rejected.
+- `LPS_GETTER_REF_QUALIFIED_OVERLOAD`: `TYPE const &` on lvalues and `TYPE` on rvalues.
+- `LPS_PRE_CONTRACT(EXPR[, HANDLER])`: always-checked precondition; the default handler calls `linn_property_detail::contract_violation`.
+- `LPS_PRE_CONTRACTD(EXPR[, HANDLER])`: checked only when `DEBUG` or `_DEBUG` is defined.
+- `LPS_POST_ACTION(...)`: expression executed after assignment; comma-separated statements are allowed.
+
+Accessor names use exactly one of `LINN_PROPERTY_ACCESSOR_PREFIX_CAMEL` (default), `_PASCAL`, or `_SNAKE`. Invalid configurations emit only a `static_assert`; no accessor or `_Pragma` expansion is produced.
+
+Define `LINN_PROPERTY_ENABLE_SHORT_MACROS` for `MEMBER`, `SETTER`, `GETTER`, `GETTER_REF_QUALIFIED_OVERLOAD`, `PRE_CONTRACT`, `PRE_CONTRACTD`, `POST_ACTION`, `PROPERTY_CREATE`, `PROPERTY_CREATE_H`, `PROPERTY_CREATE_CPP`, and `PROPERTY_CREATE_D`.
+
+Qt mode is enabled automatically when Qt is detected. It adds `Q_PROPERTY_CREATE`, `Q_PROPERTY_CREATE_H`, `Q_PROPERTY_CREATE_CPP`, and `Q_PROPERTY_CREATE_D`, which emit `Q_PROPERTY(... NOTIFY signalName)` plus the signal declaration. `QPS_*` mirrors `LPS_*`, with `QPS_POST_ACTION_EMIT`, `QPS_POST_ACTION_UPDATE`, and `QPS_POST_ACTION_UPDATEMIT` as Qt-specific post actions. The two-argument Qt shortcut declares the NOTIFY signal but does not emit it; use the three-argument form with `QPS_POST_ACTION_EMIT(Name)` when the setter must emit.
+
+Inline example:
+
+```cpp
+class Counter {
+  LINN_PROPERTY_CREATE(LPS_MEMBER(int, Count, 0),
+                       LPS_SETTER(int, LPS_PRE_CONTRACT(Count >= 0), LPS_POST_ACTION(this->notify())),
+                       LPS_GETTER(int))
+};
+```
+
+Split example:
+
+```cpp
+// header
+class Sample {
+  LINN_PROPERTY_CREATE_H(LPS_MEMBER(int, Count), LPS_SETTER(int), LPS_GETTER(int))
+  LINN_PROPERTY_CREATE_D(int, Count, 0)
+};
+
+// source
+LINN_PROPERTY_CREATE_CPP(Sample, LPS_MEMBER(int, Count),
+                         LPS_SETTER(int, LPS_PRE_CONTRACT(Count >= 0)),
+                         LPS_GETTER(int))
+```
+
+Qt example:
+
+```cpp
+class Counter : public QObject {
+  Q_OBJECT
+  Q_PROPERTY_CREATE(QPS_MEMBER(int, Count, 0),
+                    QPS_SETTER(int, QPS_POST_ACTION_EMIT(Count)),
+                    QPS_GETTER(int))
+};
+```
 
 ## Build, test, benchmark
 
