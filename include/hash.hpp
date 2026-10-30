@@ -29,9 +29,7 @@
 #include <type_traits> // std::remove_cvref_t, std::remove_cv_t, std::is_trivially_copyable_v
 
 #include "bit_traits.hpp" // stdex::unsigned_equivalent_t, stdex::to_unsigned
-#include "byte_utils.hpp" // stdex::byte_like, stdex::byte_value, stdex::read64_le,
-                          // stdex::read32_le, stdex::little_endian_array
-#include "int128.hpp"     // stdex::umul128, stdex::umulh, stdex::mix, stdex::mum
+#include "int128.hpp"     // stdex::umul128, stdex::umul128_xor_fold
 
 namespace stdex
 {
@@ -108,16 +106,15 @@ inline constexpr auto default_secret = std::to_array<std::uint64_t>({
 static_assert(default_secret.size() == 8);
 
 template <typename T>
-concept scalar_hashable = std::integral<std::remove_cv_t<T>> ||
-                          std::is_enum_v<std::remove_cv_t<T>> ||
-                          std::floating_point<std::remove_cv_t<T>>;
+concept scalar_hashable = std::integral<std::remove_cvref_t<T>> ||
+                          std::is_enum_v<std::remove_cvref_t<T>> ||
+                          std::floating_point<std::remove_cvref_t<T>>;
 
 // -0.0 == +0.0 but bit_cast differs; NaN != NaN so no normalization needed.
 template <typename T>
 [[nodiscard]] constexpr unsigned_equivalent_t<T> to_hashable_unsigned(T const value) noexcept
 {
-  using U = std::remove_cv_t<T>;
-  if constexpr (std::floating_point<U>) {
+  if constexpr (std::floating_point<T>) {
     if (value == static_cast<T>(0)) {
       return static_cast<unsigned_equivalent_t<T>>(0);
     }
@@ -140,7 +137,7 @@ template <byte_like Byte, hash_mode Mode>
 [[nodiscard]] constexpr std::uint64_t hash_bytes_impl(Mode, std::span<Byte const> const input, std::uint64_t seed, std::array<std::uint64_t, 8> const &secret) noexcept
 {
   std::size_t const length = input.size();
-  seed ^= mix(seed ^ secret[2], secret[1]);
+  seed ^= umul128_xor_fold(seed ^ secret[2], secret[1]);
   std::uint64_t a {};
   std::uint64_t b {};
   std::size_t remaining = length;
@@ -150,11 +147,11 @@ template <byte_like Byte, hash_mode Mode>
     if (length >= 4) {
       seed ^= length;
       if (length >= 8) {
-        a = read64_le(input, 0);
-        b = read64_le(input, length - 8);
+        a = read64_le_unchecked(input, 0);
+        b = read64_le_unchecked(input, length - 8);
       } else {
-        a = read32_le(input, 0);
-        b = read32_le(input, length - 4);
+        a = read32_le_unchecked(input, 0);
+        b = read32_le_unchecked(input, length - 4);
       }
     } else if (length > 0) {
       a = (static_cast<std::uint64_t>(byte_value(input[0])) << 45U) | byte_value(input[length - 1]);
@@ -167,7 +164,7 @@ template <byte_like Byte, hash_mode Mode>
       std::array<std::uint64_t, 7> lane { seed, seed, seed, seed, seed, seed, seed };
       do {
         for (std::size_t index = 0; index < traits::lane_count; ++index) {
-          lane[index] = mix(read64_le(input, offset + index * 16U) ^ secret[index], read64_le(input, offset + index * 16U + 8U) ^ lane[index]);
+          lane[index] = umul128_xor_fold(read64_le_unchecked(input, offset + index * 16U) ^ secret[index], read64_le_unchecked(input, offset + index * 16U + 8U) ^ lane[index]);
         }
         offset += traits::stripe;
         remaining -= traits::stripe;
@@ -183,19 +180,19 @@ template <byte_like Byte, hash_mode Mode>
     }
 
     if (remaining > 16) {
-      seed = mix(read64_le(input, offset) ^ secret[2], read64_le(input, offset + 8) ^ seed);
+      seed = umul128_xor_fold(read64_le_unchecked(input, offset) ^ secret[2], read64_le_unchecked(input, offset + 8) ^ seed);
       if (remaining > 32) {
-        seed = mix(read64_le(input, offset + 16) ^ secret[2], read64_le(input, offset + 24) ^ seed);
+        seed = umul128_xor_fold(read64_le_unchecked(input, offset + 16) ^ secret[2], read64_le_unchecked(input, offset + 24) ^ seed);
         if constexpr (!traits::is_nano) {
           if (remaining > 48) {
-            seed = mix(read64_le(input, offset + 32) ^ secret[1], read64_le(input, offset + 40) ^ seed);
+            seed = umul128_xor_fold(read64_le_unchecked(input, offset + 32) ^ secret[1], read64_le_unchecked(input, offset + 40) ^ seed);
             if (remaining > 64) {
-              seed = mix(read64_le(input, offset + 48) ^ secret[1], read64_le(input, offset + 56) ^ seed);
+              seed = umul128_xor_fold(read64_le_unchecked(input, offset + 48) ^ secret[1], read64_le_unchecked(input, offset + 56) ^ seed);
               if constexpr (traits::is_standard) {
                 if (remaining > 80) {
-                  seed = mix(read64_le(input, offset + 64) ^ secret[2], read64_le(input, offset + 72) ^ seed);
+                  seed = umul128_xor_fold(read64_le_unchecked(input, offset + 64) ^ secret[2], read64_le_unchecked(input, offset + 72) ^ seed);
                   if (remaining > 96) {
-                    seed = mix(read64_le(input, offset + 80) ^ secret[1], read64_le(input, offset + 88) ^ seed);
+                    seed = umul128_xor_fold(read64_le_unchecked(input, offset + 80) ^ secret[1], read64_le_unchecked(input, offset + 88) ^ seed);
                   }
                 }
               }
@@ -204,14 +201,16 @@ template <byte_like Byte, hash_mode Mode>
         }
       }
     }
-    a = read64_le(input, offset + remaining - 16) ^ remaining;
-    b = read64_le(input, offset + remaining - 8);
+    a = read64_le_unchecked(input, offset + remaining - 16) ^ remaining;
+    b = read64_le_unchecked(input, offset + remaining - 8);
   }
 
   a ^= secret[1];
   b ^= seed;
-  mum(a, b);
-  return mix(a ^ secret[7], b ^ secret[1] ^ remaining);
+  uint128_t const product { umul128(a, b) };
+  a = product.lo();
+  b = product.hi();
+  return umul128_xor_fold(a ^ secret[7], b ^ secret[1] ^ remaining);
 }
 } // namespace hash_detail
 
@@ -276,6 +275,21 @@ template <hash_detail::scalar_hashable T, hash_mode Mode = hash_standard_t>
   return hash_range<array_type, Mode>(bytes, seed);
 }
 
+template <hash_mode Mode = hash_standard_t>
+[[nodiscard]] constexpr std::uint64_t hash_value(uint128_t const value, std::uint64_t const seed = 0) noexcept
+{
+  auto const low_bytes  = little_endian_array(value.lo());
+  auto const high_bytes = little_endian_array(value.hi());
+  using array_type      = std::remove_cv_t<decltype(low_bytes)>;
+  return hash_range<array_type, Mode>(high_bytes, hash_range<array_type, Mode>(low_bytes, seed));
+}
+
+template <hash_mode Mode = hash_standard_t>
+[[nodiscard]] constexpr std::uint64_t hash_value(int128_t const value, std::uint64_t const seed = 0) noexcept
+{
+  return hash_value<Mode>(uint128_t { value.lo(), value.hi() }, seed);
+}
+
 template <class T>
 struct hash;
 
@@ -288,7 +302,7 @@ struct hash<T>
   [[nodiscard]] constexpr std::size_t operator() (argument_type value) const noexcept
   {
     if constexpr (sizeof(void *) == 8) {
-      return mix(static_cast<std::uint64_t>(hash_detail::to_hashable_unsigned(value)), kPhiMixMultConstant);
+      return umul128_xor_fold(static_cast<std::uint64_t>(hash_detail::to_hashable_unsigned(value)), kPhiMixMultConstant);
     } else {
       std::uint64_t product = static_cast<std::uint64_t>(hash_detail::to_hashable_unsigned(value)) * 0x00'00'00'00'E8'17'FB'2DULL;
 #if defined(__MSVC_RUNTIME_CHECKS)
@@ -375,6 +389,30 @@ struct hash<std::unique_ptr<T, Deleter>>
   [[nodiscard]] std::size_t operator() (argument_type const &ptr) const noexcept
   {
     return hash<T *> {}(ptr.get());
+  }
+};
+
+template <>
+struct hash<uint128_t>
+{
+  using argument_type = uint128_t;
+  using result_type   = std::size_t;
+
+  [[nodiscard]] constexpr std::size_t operator() (argument_type const value) const noexcept
+  {
+    return static_cast<std::size_t>(hash_value(value));
+  }
+};
+
+template <>
+struct hash<int128_t>
+{
+  using argument_type = int128_t;
+  using result_type   = std::size_t;
+
+  [[nodiscard]] constexpr std::size_t operator() (argument_type const value) const noexcept
+  {
+    return static_cast<std::size_t>(hash_value(value));
   }
 };
 } // namespace stdex

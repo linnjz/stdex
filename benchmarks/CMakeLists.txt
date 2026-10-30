@@ -1,21 +1,46 @@
 include(BenchmarkSupport)
 
+# Prefer vcpkg, but also accept a normal CMake installation found through
+# CMAKE_PREFIX_PATH so the benchmarks are not silently dropped on systems
+# without vcpkg.
+set(_stdex_benchmark_found FALSE)
 scaffold_find_vcpkg_benchmark(_stdex_benchmark_found)
 if(NOT _stdex_benchmark_found)
+    find_package(benchmark CONFIG QUIET)
+    if(TARGET benchmark::benchmark AND TARGET benchmark::benchmark_main)
+        set(_stdex_benchmark_found TRUE)
+    endif()
+endif()
+if(NOT _stdex_benchmark_found)
     message(WARNING
-        "Skipping stdex benchmarks: vcpkg Google Benchmark (targets "
+        "Skipping stdex benchmarks: Google Benchmark (targets "
         "benchmark::benchmark and benchmark::benchmark_main) was not found. "
-        "Set VCPKG_ROOT and install the 'benchmark' port.")
+        "Set VCPKG_ROOT or CMAKE_PREFIX_PATH to a benchmark installation.")
     return()
 endif()
 
-FindVcpkgPackage(boost_unordered LINKAGE STATIC CONFIG QUIET)
-FindVcpkgPackage(absl LINKAGE STATIC CONFIG QUIET)
+# Vcpkg.cmake defaults VCPKG_ROOT even when that tree does not exist, so probe
+# the actual triplet directories before calling FindVcpkgPackage().
+set(_stdex_have_vcpkg_tree FALSE)
+if(VCPKG_ROOT AND (EXISTS "${VCPKG_STATIC_PATH}" OR EXISTS "${VCPKG_DYNAMIC_PATH}"))
+    set(_stdex_have_vcpkg_tree TRUE)
+endif()
+if(_stdex_have_vcpkg_tree)
+    FindVcpkgPackage(boost_unordered LINKAGE STATIC CONFIG QUIET)
+    FindVcpkgPackage(absl LINKAGE STATIC CONFIG QUIET)
+endif()
+if(NOT TARGET Boost::unordered)
+    find_package(boost_unordered CONFIG QUIET)
+endif()
+if(NOT TARGET absl::flat_hash_map)
+    find_package(absl CONFIG QUIET)
+endif()
 
+# bench_hash_table needs both comparison libraries; the other benchmarks do
+# not, so a missing Boost/Abseil only skips that one target.
 if(NOT TARGET Boost::unordered OR NOT TARGET absl::flat_hash_map)
     message(WARNING
-        "Skipping stdex benchmarks: Boost.Unordered or Abseil was not found.")
-    return()
+        "Skipping bench_hash_table: Boost.Unordered or Abseil was not found.")
 endif()
 
 function(stdex_add_bench target source)
@@ -46,17 +71,37 @@ function(stdex_add_bench target source)
             LIBS stdex ${ARG_LIBS}
         )
     endif()
+
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        target_compile_options(${target} PRIVATE "-Wno-error=#warnings")
+    endif()
 endfunction()
 
 # bench_stable_radix_sort.cpp provides its own BENCHMARK_MAIN().
 stdex_add_bench(bench_stable_radix_sort bench_stable_radix_sort.cpp
     OWN_MAIN
 )
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND NOT COMPILER_MSVC_LIKE)
+    # Clang modules can bake _PSTL_PAR_BACKEND_TBB from a sibling target that
+    # sees Boost's bundled TBB headers, while this target links no TBB.
+    target_compile_definitions(bench_stable_radix_sort PRIVATE _GLIBCXX_USE_TBB_PAR_BACKEND=0)
+endif()
 
-stdex_add_bench(bench_hash_table bench_hash_table.cpp
-    INCLUDES "${CMAKE_SOURCE_DIR}/include/unordered_flat_detail"
-    LIBS Boost::unordered absl::flat_hash_map
-)
+if(TARGET Boost::unordered AND TARGET absl::flat_hash_map)
+    stdex_add_bench(bench_hash_table bench_hash_table.cpp
+        INCLUDES "${CMAKE_SOURCE_DIR}/include/unordered_flat_detail"
+        LIBS Boost::unordered absl::flat_hash_map
+    )
+endif()
+
+# int128 always compares against the MSVC-style two-word baseline; native
+# __int128 and absl::uint128 are added automatically when the target exists.
+set(_bench_int128_libs "")
+if(TARGET absl::int128)
+    list(APPEND _bench_int128_libs absl::int128)
+endif()
+stdex_add_bench(bench_int128 bench_int128.cpp LIBS ${_bench_int128_libs})
+unset(_bench_int128_libs)
 
 # Optional third-party comparison for bench_inlined_bitset.
 # Default OFF: no network access, nothing is fetched, and the benchmark only

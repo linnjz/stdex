@@ -1,4 +1,4 @@
-﻿include(TestSupport)
+include(TestSupport)
 
 function(stdex_add_test target)
     cmake_parse_arguments(PARSE_ARGV 1 ARG "" "" "INCLUDES;LIBS;ARGS")
@@ -14,16 +14,46 @@ function(stdex_add_test target)
         LIBS stdex ${ARG_LIBS}
         ARGS ${ARG_ARGS}
     )
+
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        target_compile_options(${target} PRIVATE "-Wno-error=#warnings")
+    endif()
 endfunction()
 
 stdex_add_test(test_stable_radix_sort test_stable_radix_sort.cpp)
 stdex_add_test(test_hybrid_alloc test_hybrid_alloc.cpp)
 
-# Parked: field_variant.hpp needs C++26 reflection (<meta>, P2996), which the
-# pinned toolchains (MSVC 19.51, clang++ 22) don't ship yet. Re-enable with a
-# P2996-capable compiler (at_index dispatch cases already merged into
-# test_field_variant.cpp, no separate target needed).
-# stdex_add_test(test_field_variant test_field_variant.cpp)
+# field_variant.hpp requires C++26 reflection (P2996: <meta>,
+# define_static_array). Enable the test whenever the current compiler can
+# actually compile that, instead of leaving the source permanently detached
+# from the test suite.
+include(CheckCXXSourceCompiles)
+include(CMakePushCheckState)
+
+cmake_push_check_state(RESET)
+if(MSVC OR CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+    set(CMAKE_REQUIRED_FLAGS "/std:c++latest")
+else()
+    set(CMAKE_REQUIRED_FLAGS "-std=c++26")
+endif()
+check_cxx_source_compiles([=[
+#include <meta>
+struct field_variant_probe { int a; };
+constexpr auto members = std::define_static_array(
+    std::meta::nonstatic_data_members_of(
+        ^^field_variant_probe, std::meta::access_context::unchecked()));
+static_assert(members.size() == 1);
+int main() { return 0; }
+]=] STDEX_HAS_P2996_REFLECTION)
+cmake_pop_check_state()
+
+if(STDEX_HAS_P2996_REFLECTION)
+    stdex_add_test(test_field_variant test_field_variant.cpp)
+    target_compile_features(test_field_variant PRIVATE cxx_std_26)
+else()
+    message(STATUS
+        "Skipping test_field_variant: compiler does not provide P2996 reflection")
+endif()
 
 # Detail dir: public headers and this TU include sibling detail headers by
 # bare filename (upstream layout), so it must be on the include path.
@@ -33,7 +63,10 @@ stdex_add_test(test_hash_table test_hash_table.cpp
 
 # Extracted detail headers (bit_traits, byte_utils, int128) plus the fastmod
 # port standing on them; include/ alone suffices, no extra include dirs.
+stdex_add_test(test_bit_traits test_bit_traits.cpp)
 stdex_add_test(test_fastmod test_fastmod.cpp)
+
+stdex_add_test(test_int128 test_int128.cpp)
 
 stdex_add_test(test_uninitialized_algorithms test_uninitialized_algorithms.cpp)
 
