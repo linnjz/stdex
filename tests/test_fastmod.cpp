@@ -16,9 +16,9 @@
 
 // test_fastmod.cpp
 //
-// Verifies stdex::fastmod (include/fastmod.hpp, C++23 port) and the int128
-// primitives it stands on (include/int128.hpp) against the native %, /
-// oracle (self-contained, always authoritative).
+// Verifies stdex::fastmod (include/fastmod.hpp) and the int128 primitives it
+// stands on (include/int128.hpp) against the native %, / oracle
+// (self-contained, always authoritative).
 //
 // Deterministic SplitMix64 stream: no randomness, no flakiness.
 #include <cstdint>
@@ -72,13 +72,13 @@ static_assert(stdex::fastdiv<7ULL>(100ULL) == 100ULL / 7ULL);
 static_assert(stdex::fastmod<1ULL>(12345ULL) == 0ULL);
 static_assert(stdex::fastmod<1000000007ULL>(123456789012345ULL) == 123456789012345ULL % 1000000007ULL);
 static_assert(stdex::fastdiv<1000000007ULL>(123456789012345ULL) == 123456789012345ULL / 1000000007ULL);
-static_assert(stdex::add128({ 0xFFFF'FFFF'FFFF'FFFFULL, 0x1234ULL }, 1).low == 0);
-static_assert(stdex::add128({ 0xFFFF'FFFF'FFFF'FFFFULL, 0x1234ULL }, 1).high == 0x1235ULL);
+static_assert(stdex::uadd128({ 0xFFFF'FFFF'FFFF'FFFFULL, 0x1234ULL }, 1).lo() == 0);
+static_assert(stdex::uadd128({ 0xFFFF'FFFF'FFFF'FFFFULL, 0x1234ULL }, 1).hi() == 0x1235ULL);
 static_assert((stdex::uint128_t { 1, 2 } <=> stdex::uint128_t { 1, 2 }) == 0);
 static_assert((stdex::uint128_t { 2, 2 } <=> stdex::uint128_t { 1, 2 }) > 0);
 static_assert((stdex::uint128_t { 0, 3 } <=> stdex::uint128_t { 0xFFFF'FFFF'FFFF'FFFFULL, 2 }) > 0);
-static_assert(stdex::div128({ 100, 0 }, 7).low == 100 / 7);
-static_assert(stdex::div128({ 100, 0 }, 7).high == 0);
+static_assert(stdex::udiv128({ 100, 0 }, 7).lo() == 100 / 7);
+static_assert(stdex::udiv128({ 100, 0 }, 7).hi() == 0);
 
 bool test_u32()
 {
@@ -179,60 +179,56 @@ bool test_int128_primitives()
     stdex::uint128_t const v { next_rand(), next_rand() };
     uint64_t const add = next_rand();
 
-    // add128 vs independent carry computation.
+    // uadd128 vs independent carry computation.
     {
-      uint64_t const exp_lo = v.low + add;
-      uint64_t const exp_hi = v.high + ((exp_lo < v.low) ? 1ULL : 0ULL);
-      stdex::uint128_t const got = stdex::add128(v, add);
-      CHECK(got.low == exp_lo);
-      CHECK(got.high == exp_hi);
-      CHECK(got.low == stdex::add128_portable(v, add).low);
-      CHECK(got.high == stdex::add128_portable(v, add).high);
+      uint64_t const exp_lo = v.lo() + add;
+      uint64_t const exp_hi = v.hi() + ((exp_lo < v.lo()) ? 1ULL : 0ULL);
+      stdex::uint128_t const got = stdex::uadd128(v, add);
+      CHECK(got.lo() == exp_lo);
+      CHECK(got.hi() == exp_hi);
     }
 
-    // div128: q = div(v, d) iff q*d + r == v with r < d (128-bit multiply-back).
+    // udiv128: q = div(v, d) iff q*d + r == v with r < d (128-bit multiply-back).
     {
       uint64_t d = next_rand() | 1ULL;
       if (d == 0) d = 1;
-      stdex::uint128_t const q = stdex::div128(v, d);
-      CHECK(q.low == stdex::div128_portable(v, d).low);
-      CHECK(q.high == stdex::div128_portable(v, d).high);
-      stdex::uint128_t const prod = stdex::mul128_u64_lo(q, d);
-      uint64_t const r_lo = v.low - prod.low;
-      uint64_t const borrow = (v.low < prod.low) ? 1ULL : 0ULL;
-      uint64_t const r_hi = v.high - prod.high - borrow;
+      stdex::uint128_t const q = stdex::udiv128(v, d);
+      stdex::uint128_t const prod = stdex::umul128_lo(q, d);
+      uint64_t const r_lo = v.lo() - prod.lo();
+      uint64_t const borrow = (v.lo() < prod.lo()) ? 1ULL : 0ULL;
+      uint64_t const r_hi = v.hi() - prod.hi() - borrow;
       CHECK(r_hi == 0ULL);
       if (r_hi == 0ULL) CHECK(r_lo < d);
     }
 
-    // mul128_u64_lo: zero-high reduces to the 64x64 path; pure-high is exact.
+    // umul128_lo: zero-high reduces to the 64x64 path; pure-high is exact.
     {
       uint64_t const x = next_rand();
       uint64_t const mul = next_rand();
-      stdex::uint128_t const a = stdex::mul128_u64_lo({ x, 0 }, mul);
+      stdex::uint128_t const a = stdex::umul128_lo({ x, 0 }, mul);
       stdex::uint128_t const b = stdex::umul128(x, mul);
-      CHECK(a.low == b.low);
-      CHECK(a.high == b.high);
-      stdex::uint128_t const c = stdex::mul128_u64_lo({ 0, x }, mul);
-      CHECK(c.low == 0ULL);
-      CHECK(c.high == x * mul);
+      CHECK(a.lo() == b.lo());
+      CHECK(a.hi() == b.hi());
+      stdex::uint128_t const c = stdex::umul128_lo({ 0, x }, mul);
+      CHECK(c.lo() == 0ULL);
+      CHECK(c.hi() == x * mul);
       // Distributivity mod 2^128: lo((h+l)*m) == lo(h*m) + lo(l*m).
       stdex::uint128_t const h { 0, x };
       stdex::uint128_t const l { mul, 0 };
-      stdex::uint128_t const s = stdex::add128(h, l.low);
-      stdex::uint128_t const lhs = stdex::mul128_u64_lo(s, 0x9E37'79B9'7F4A'7C15ULL);
-      stdex::uint128_t const ph = stdex::mul128_u64_lo(h, 0x9E37'79B9'7F4A'7C15ULL);
-      stdex::uint128_t const pl = stdex::mul128_u64_lo(l, 0x9E37'79B9'7F4A'7C15ULL);
-      uint64_t const sum_lo = ph.low + pl.low;
-      uint64_t const sum_hi = ph.high + pl.high + ((sum_lo < ph.low) ? 1ULL : 0ULL);
-      CHECK(lhs.low == sum_lo);
-      CHECK(lhs.high == sum_hi);
+      stdex::uint128_t const s = stdex::uadd128(h, l.lo());
+      stdex::uint128_t const lhs = stdex::umul128_lo(s, 0x9E37'79B9'7F4A'7C15ULL);
+      stdex::uint128_t const ph = stdex::umul128_lo(h, 0x9E37'79B9'7F4A'7C15ULL);
+      stdex::uint128_t const pl = stdex::umul128_lo(l, 0x9E37'79B9'7F4A'7C15ULL);
+      uint64_t const sum_lo = ph.lo() + pl.lo();
+      uint64_t const sum_hi = ph.hi() + pl.hi() + ((sum_lo < ph.lo()) ? 1ULL : 0ULL);
+      CHECK(lhs.lo() == sum_lo);
+      CHECK(lhs.hi() == sum_hi);
     }
 
     // operator<=> vs long-hand comparison.
     {
       stdex::uint128_t const w { next_rand(), next_rand() };
-      bool const exp = (v.high > w.high) || (v.high == w.high && v.low > w.low);
+      bool const exp = (v.hi() > w.hi()) || (v.hi() == w.hi() && v.lo() > w.lo());
       CHECK(((v <=> w) > 0) == exp);
       CHECK(((v <=> v) > 0) == false);
     }
@@ -242,19 +238,19 @@ bool test_int128_primitives()
   for (int i = 0; i < 2000; ++i) {
     stdex::uint128_t const v { next_rand(), next_rand() };
     uint64_t const add = next_rand();
-    __uint128_t const wide = (static_cast<__uint128_t>(v.high) << 64U) | v.low;
+    __uint128_t const wide = (static_cast<__uint128_t>(v.hi()) << 64U) | v.lo();
     __uint128_t const sum = wide + add;
-    CHECK(stdex::add128(v, add).low == static_cast<uint64_t>(sum));
-    CHECK(stdex::add128(v, add).high == static_cast<uint64_t>(sum >> 64U));
+    CHECK(stdex::uadd128(v, add).lo() == static_cast<uint64_t>(sum));
+    CHECK(stdex::uadd128(v, add).hi() == static_cast<uint64_t>(sum >> 64U));
     uint64_t d = next_rand() | 1ULL;
     if (d == 0) d = 1;
     __uint128_t const quot = wide / d;
-    CHECK(stdex::div128(v, d).low == static_cast<uint64_t>(quot));
-    CHECK(stdex::div128(v, d).high == static_cast<uint64_t>(quot >> 64U));
+    CHECK(stdex::udiv128(v, d).lo() == static_cast<uint64_t>(quot));
+    CHECK(stdex::udiv128(v, d).hi() == static_cast<uint64_t>(quot >> 64U));
     uint64_t const mul = next_rand();
     __uint128_t const prod_lo = wide * mul;
-    CHECK(stdex::mul128_u64_lo(v, mul).low == static_cast<uint64_t>(prod_lo));
-    CHECK(stdex::mul128_u64_lo(v, mul).high == static_cast<uint64_t>(prod_lo >> 64U));
+    CHECK(stdex::umul128_lo(v, mul).lo() == static_cast<uint64_t>(prod_lo));
+    CHECK(stdex::umul128_lo(v, mul).hi() == static_cast<uint64_t>(prod_lo >> 64U));
   }
 #endif
   return g_fail == fail_mark;

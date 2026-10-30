@@ -131,6 +131,14 @@ Design references (no code copied)
   `_MarkAllocaS`, `_MallocaComputeSize`).
   Copyright (c) Microsoft Corporation.
 
+  include/int128.hpp follows the word layout and platform dispatch of
+  MSVC STL's __msvc_int128.hpp (Apache-2.0 WITH LLVM-exception),
+  including _umul128 / _addcarry_u64 / _subborrow_u64 / _udiv128,
+  __umulh, and normalized Knuth TAOCP 4.3.1D division. Only the
+  algorithm and platform-dispatch structure were referenced.
+  Copyright (c) Microsoft Corporation.
+  https://github.com/microsoft/STL
+
   include/fixed_string.hpp follows P3094R5 ("std::basic_fixed_string").
 
   include/inlined_bitset.hpp follows the public interface of
