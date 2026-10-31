@@ -200,6 +200,10 @@ auto invoke_memcpy(InIt first, InSent last, OutIt dest_first, OutSent dest_last)
     n = static_cast<std::ptrdiff_t>(dest_last - dest_first);
   }
 
+  if (n == 0) [[unlikely]] {
+    return { first, dest_first };
+  }
+
   std::memcpy(static_cast<void *>(to_address_unwrap(dest_first)),
                 static_cast<void const *>(to_address_unwrap(first)),
                 static_cast<std::size_t>(n) * sizeof(std::iter_value_t<OutIt>));
@@ -209,12 +213,12 @@ auto invoke_memcpy(InIt first, InSent last, OutIt dest_first, OutSent dest_last)
 }
 
 template <class T>
-struct is_byte_like : std::bool_constant<std::is_same_v<std::remove_cv_t<T>, char> ||
-                         std::is_same_v<std::remove_cv_t<T>, signed char> ||
-                         std::is_same_v<std::remove_cv_t<T>, unsigned char> ||
-                         std::is_same_v<std::remove_cv_t<T>, char8_t> ||
-                         std::is_same_v<std::remove_cv_t<T>, std::byte> ||
-                         std::is_same_v<std::remove_cv_t<T>, bool>>
+struct is_byte_like : std::bool_constant<std::is_same_v<std::remove_cvref_t<T>, char> ||
+                         std::is_same_v<std::remove_cvref_t<T>, signed char> ||
+                         std::is_same_v<std::remove_cvref_t<T>, unsigned char> ||
+                         std::is_same_v<std::remove_cvref_t<T>, char8_t> ||
+                         std::is_same_v<std::remove_cvref_t<T>, std::byte> ||
+                         std::is_same_v<std::remove_cvref_t<T>, bool>>
 {
 };
 
@@ -240,9 +244,10 @@ constexpr bool fill_zero_memset_is_safe<OutIt, T, false> = false;
 template <class OutIt, class T>
 void invoke_memset(OutIt dest_first, T const &val, std::size_t count)
 {
+  if (count == 0) [[unlikely]] return;
   using value_type = std::iter_value_t<OutIt>;
   static_assert(sizeof(value_type) == sizeof(unsigned char));
-  value_type dest_val = val;
+  value_type dest_val = static_cast<value_type>(val);
   std::memset(static_cast<void *>(to_address_unwrap(dest_first)),
               static_cast<unsigned char>(dest_val), count);
 }
@@ -250,6 +255,7 @@ void invoke_memset(OutIt dest_first, T const &val, std::size_t count)
 template <class OutIt>
 void invoke_zero_memset(OutIt dest_first, std::size_t count)
 {
+  if (count == 0) [[unlikely]] return;
   std::memset(static_cast<void *>(to_address_unwrap(dest_first)),
               0, count * sizeof(std::iter_value_t<OutIt>));
 }
@@ -712,11 +718,12 @@ constexpr OutIt uninitialized_fill(OutIt dest_first, OutSent dest_last, T const 
                                      std::is_trivially_copyable_v<std::iter_value_t<OutIt>>;
   if constexpr (trivial_assign_ok) {
     if (!std::is_constant_evaluated()) {
-      auto const n = static_cast<std::size_t>(dest_last - dest_first);
-      for (std::size_t i = 0; i < n; ++i) {
+      using difference_type = std::iter_difference_t<OutIt>;
+      auto const n          = static_cast<difference_type>(dest_last - dest_first);
+      for (difference_type i = 0; i < n; ++i) {
         dest_first[i] = static_cast<std::iter_value_t<OutIt>>(val);
       }
-      return dest_first + static_cast<std::iter_difference_t<OutIt>>(n);
+      return dest_first + n;
     }
   }
 

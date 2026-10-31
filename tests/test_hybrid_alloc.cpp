@@ -167,14 +167,14 @@ static void test_hybrid_get_total_size()
   {
     void *ptr = HYBRID_ALLOC(128);
     assert(ptr != nullptr);
-    size_t total = stdex::hybrid_get_total_size(ptr);
+    [[maybe_unused]] size_t total = stdex::hybrid_get_total_size(ptr);
     assert(total >= 128);
     stdex::hybrid_free(ptr);
   }
   {
     void *ptr = HYBRID_ALLOC(4096);
     assert(ptr != nullptr);
-    size_t total = stdex::hybrid_get_total_size(ptr);
+    [[maybe_unused]] size_t total = stdex::hybrid_get_total_size(ptr);
     assert(total >= 4096);
     stdex::hybrid_free(ptr);
   }
@@ -268,7 +268,7 @@ static void test_data_integrity_patterns()
       static_cast<unsigned char *>(ptr)[i] = static_cast<unsigned char>((i % 2 == 0) ? 0xAA : 0x55);
     }
     for (size_t i = 0; i < 256; ++i) {
-      unsigned char expected = static_cast<unsigned char>((i % 2 == 0) ? 0xAA : 0x55);
+      [[maybe_unused]] unsigned char expected = static_cast<unsigned char>((i % 2 == 0) ? 0xAA : 0x55);
       assert(static_cast<unsigned char *>(ptr)[i] == expected);
     }
     stdex::hybrid_free(ptr);

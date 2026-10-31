@@ -134,6 +134,7 @@ inline bool is_use_stack(std::size_t size, std::size_t threshold, std::size_t al
 // Debug assertion that the requested alignment is within the stack limit.
 inline void check_stack_alignment(std::size_t alignment) noexcept
 {
+  (void) alignment; // assert() compiles out under NDEBUG
   assert(normalize_alignment(alignment) <= HYBRID_ALLOC_MAX_STACK_ALIGNMENT && "hybrid allocation stack alignment is too large");
 }
 

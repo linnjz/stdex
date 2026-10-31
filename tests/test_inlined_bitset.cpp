@@ -598,7 +598,8 @@ void test_copy_move_assign_lifecycle()
   CHECK(hmove.empty());
 
   // self assign
-  assigned = assigned;
+  auto &assigned_alias = assigned;
+  assigned = assigned_alias;
   CHECK(assigned == src);
 
   // ilist bool assign
@@ -639,7 +640,8 @@ void test_reference_proxy()
   b[1] = b[0];
   CHECK(static_cast<bool>(b[1]));
   BS64_2 c(8, false);
-  c[0] = std::move(b[0]);
+  auto &&moved_ref = b[0];
+  c[0] = std::move(moved_ref);
   CHECK(static_cast<bool>(c[0]));
 
   // &= |= ^= -=

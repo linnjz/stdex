@@ -1353,7 +1353,7 @@ static void test_fill_plain_byte_memset()
   SECTION("fill/plain: byte memset path");
   alignas(char) unsigned char buf[4];
   char* dst = reinterpret_cast<char*>(buf);
-  auto r = stdex::uninitialized_fill(dst, dst + 4, 0x41);
+  auto r = stdex::uninitialized_fill(dst, dst + 4, static_cast<char>(0x41));
   CHECK((r == dst + 4));
   CHECK(dst[0] == 'A' && dst[1] == 'A' && dst[2] == 'A' && dst[3] == 'A');
   std::destroy(dst, dst + 4);
@@ -1461,7 +1461,7 @@ static void test_fill_alloc_raw_byte_loop_forced()
   counting_alloc<char>::reset();
   counting_alloc<char> al;
   char* dst = al.allocate(4);
-  auto r = stdex::uninitialized_fill(dst, dst + 4, 0x41, al);
+  auto r = stdex::uninitialized_fill(dst, dst + 4, static_cast<char>(0x41), al);
   CHECK((r == dst + 4));
   CHECK(counting_alloc<char>::construct_count == 4);
   CHECK(dst[0] == 'A' && dst[3] == 'A');
@@ -1539,7 +1539,7 @@ static void test_fill_alloc_fancy_byte_memset()
   SECTION("fill/alloc-fancy: byte memset path");
   fancy_alloc<char> al;
   fancy_ptr<char> dst = al.allocate(4);
-  auto r = stdex::uninitialized_fill(dst, dst + 4, 0x42, al);
+  auto r = stdex::uninitialized_fill(dst, dst + 4, static_cast<char>(0x42), al);
   CHECK((r == dst + 4));
   CHECK(dst[0] == 'B' && dst[3] == 'B');
   std::destroy(std::to_address(dst), std::to_address(dst + 4));
@@ -1600,7 +1600,7 @@ static void test_fill_alloc_fancy_custom_construct_no_memset()
   fancy_counting_alloc<char>::reset();
   fancy_counting_alloc<char> al;
   fancy_ptr<char> dst = al.allocate(4);
-  auto r = stdex::uninitialized_fill(dst, dst + 4, 0x41, al);
+  auto r = stdex::uninitialized_fill(dst, dst + 4, static_cast<char>(0x41), al);
   CHECK((r == dst + 4));
   CHECK(fancy_counting_alloc<char>::construct_count == 4);
   CHECK(dst[0] == 'A');
@@ -1656,7 +1656,7 @@ static void test_fill_n_plain()
   SECTION("fill_n/plain: byte/zero/loop/empty/nontrivial/constexpr");
   alignas(char) unsigned char bbuf[4];
   char* bdst = reinterpret_cast<char*>(bbuf);
-  auto rb = stdex::uninitialized_fill_n(bdst, 4, 0x43);
+  auto rb = stdex::uninitialized_fill_n(bdst, 4, static_cast<char>(0x43));
   CHECK((rb == bdst + 4));
   CHECK(bdst[0] == 'C' && bdst[3] == 'C');
   std::destroy(bdst, bdst + 4);
@@ -1718,7 +1718,7 @@ static void test_fill_n_alloc()
   counting_alloc<char>::reset();
   counting_alloc<char> cal;
   char* cdst = cal.allocate(2);
-  auto rc = stdex::uninitialized_fill_n(cdst, 2, 0x41, cal);
+  auto rc = stdex::uninitialized_fill_n(cdst, 2, static_cast<char>(0x41), cal);
   CHECK((rc == cdst + 2));
   CHECK(counting_alloc<char>::construct_count == 2);
   std::destroy(cdst, cdst + 2);

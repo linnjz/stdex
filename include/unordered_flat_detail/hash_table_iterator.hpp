@@ -205,7 +205,7 @@ private:
     while (true) {
       int mask = group_ptr_->occupied_mask();
       if (mask != 0) {
-        auto slot_index = std::countr_zero(static_cast<unsigned>(mask));
+        std::size_t const slot_index = static_cast<std::size_t>(std::countr_zero(static_cast<unsigned>(mask)));
         if (group_ptr_->is_sentinel_by_slot(slot_index)) [[unlikely]] {
           element_ptr_ = nullptr;
         } else {

@@ -179,7 +179,7 @@ struct inline_storage : public Traits
       for (; groups_ptr != groups_end; ++groups_ptr, elements_ptr += group_size_()) {
         auto occupied_mask = group_type::occupied_mask_excluding_sentinel(groups_ptr, sentinel_group);
         while (occupied_mask) {
-          unsigned slot_index = countr_zero_unchecked_(static_cast<unsigned>(occupied_mask));
+          unsigned slot_index = static_cast<unsigned>(countr_zero_unchecked_(static_cast<unsigned>(occupied_mask)));
           destroy_element_unchecked_(elements_ptr + slot_index);
           occupied_mask &= occupied_mask - 1;
         }
@@ -353,7 +353,14 @@ struct inline_storage : public Traits
       std::start_lifetime(stack_);
 #else
       if (std::is_constant_evaluated()) {
+#if defined(__GNUC__) && !defined(__clang__)
+#  pragma GCC diagnostic push
+#  pragma GCC diagnostic ignored "-Wterminate"
+#endif
         throw "stdex: stack storage requires std::start_lifetime for constant evaluation";
+#if defined(__GNUC__) && !defined(__clang__)
+#  pragma GCC diagnostic pop
+#endif
       } else {
         std::construct_at(&stack_);
       }
@@ -399,7 +406,14 @@ struct inline_storage : public Traits
       std::start_lifetime(stack_);
 #else
       if (std::is_constant_evaluated()) {
+#if defined(__GNUC__) && !defined(__clang__)
+#  pragma GCC diagnostic push
+#  pragma GCC diagnostic ignored "-Wterminate"
+#endif
         throw "stdex: stack storage requires std::start_lifetime for constant evaluation";
+#if defined(__GNUC__) && !defined(__clang__)
+#  pragma GCC diagnostic pop
+#endif
       } else {
         std::construct_at(&stack_);
       }
@@ -450,7 +464,7 @@ struct inline_storage : public Traits
       group_type *const group_ptr = groups_ptr + group_index;
       int occupied_mask = group_type::occupied_mask_excluding_sentinel(group_ptr, sentinel_group);
       while (occupied_mask) {
-        unsigned const slot_index = countr_zero_unchecked_(static_cast<unsigned>(occupied_mask));
+        unsigned const slot_index = static_cast<unsigned>(countr_zero_unchecked_(static_cast<unsigned>(occupied_mask)));
         fn(elements_ptr + group_index * group_size_() + slot_index, group_ptr, slot_index);
         occupied_mask &= occupied_mask - 1;
       }
@@ -498,7 +512,7 @@ struct inline_storage : public Traits
       size_type position    = prober.position();
       group_type *const group_ptr = groups_ptr + position;
       if (int const avail_mask = group_ptr->available_mask()) [[likely]] {
-        unsigned const slot_index = countr_zero_unchecked_(static_cast<unsigned>(avail_mask));
+        unsigned const slot_index = static_cast<unsigned>(countr_zero_unchecked_(static_cast<unsigned>(avail_mask)));
         value_type *const element_ptr = elements_ptr + position * group_size_() + slot_index;
         construct_element_unchecked_(element_ptr, std::forward<Args>(args)...);
         group_ptr->set_fingerprint_hash(slot_index, hash);
@@ -540,7 +554,7 @@ struct inline_storage : public Traits
 #endif
           }
           do {
-            unsigned const slot_index = countr_zero_unchecked_(static_cast<unsigned>(fingerprint_mask));
+            unsigned const slot_index = static_cast<unsigned>(countr_zero_unchecked_(static_cast<unsigned>(fingerprint_mask)));
             if (key_eq_(key_val, Traits::key_fn(element_ptr[slot_index]))) [[likely]] {
               return iterator { element_ptr + slot_index, group_ptr, slot_index };
             }
