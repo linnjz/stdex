@@ -178,7 +178,7 @@ void BM_Stack_Stdex_CtorBool(benchmark::State &st)
     StdexStack b(kStackBits, true);
     benchmark::DoNotOptimize(b);
   }
-  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * kStackBits));
+  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * static_cast<std::int64_t>(kStackBits)));
 }
 void BM_Stack_Std_CtorBool(benchmark::State &st)
 {
@@ -187,7 +187,7 @@ void BM_Stack_Std_CtorBool(benchmark::State &st)
     b.set();
     benchmark::DoNotOptimize(b);
   }
-  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * kStackBits));
+  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * static_cast<std::int64_t>(kStackBits)));
 }
 void BM_Stack_Stdex_CtorString(benchmark::State &st)
 {
@@ -197,7 +197,7 @@ void BM_Stack_Stdex_CtorString(benchmark::State &st)
     StdexStack b(sv);
     benchmark::DoNotOptimize(b);
   }
-  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * kStackBits));
+  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * static_cast<std::int64_t>(kStackBits)));
 }
 void BM_Stack_Std_CtorString(benchmark::State &st)
 {
@@ -206,7 +206,7 @@ void BM_Stack_Std_CtorString(benchmark::State &st)
     StdStack b(s);
     benchmark::DoNotOptimize(b);
   }
-  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * kStackBits));
+  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * static_cast<std::int64_t>(kStackBits)));
 }
 
 // --- Stack group: set/reset/flip/test -----------------------------------------
@@ -274,7 +274,7 @@ void BM_Stack_Stdex_SetPos(benchmark::State &st)
     for (std::size_t i = 0; i < kStackBits; ++i) c.set(i, true);
     benchmark::DoNotOptimize(c);
   }
-  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * kStackBits));
+  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * static_cast<std::int64_t>(kStackBits)));
 }
 void BM_Stack_Std_SetPos(benchmark::State &st)
 {
@@ -283,7 +283,7 @@ void BM_Stack_Std_SetPos(benchmark::State &st)
     for (std::size_t i = 0; i < kStackBits; ++i) c.set(i);
     benchmark::DoNotOptimize(c);
   }
-  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * kStackBits));
+  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * static_cast<std::int64_t>(kStackBits)));
 }
 void BM_Stack_Stdex_Test(benchmark::State &st)
 {
@@ -293,7 +293,7 @@ void BM_Stack_Stdex_Test(benchmark::State &st)
     for (std::size_t i = 0; i < kStackBits; ++i) sum += base.test(i) ? 1u : 0u;
     benchmark::DoNotOptimize(sum);
   }
-  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * kStackBits));
+  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * static_cast<std::int64_t>(kStackBits)));
 }
 void BM_Stack_Std_Test(benchmark::State &st)
 {
@@ -303,7 +303,7 @@ void BM_Stack_Std_Test(benchmark::State &st)
     for (std::size_t i = 0; i < kStackBits; ++i) sum += base.test(i) ? 1u : 0u;
     benchmark::DoNotOptimize(sum);
   }
-  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * kStackBits));
+  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * static_cast<std::int64_t>(kStackBits)));
 }
 void BM_Stack_Stdex_IndexLoop(benchmark::State &st)
 {
@@ -313,7 +313,7 @@ void BM_Stack_Stdex_IndexLoop(benchmark::State &st)
     for (std::size_t i = 0; i < kStackBits; ++i) sum += static_cast<bool>(base[i]) ? 1u : 0u;
     benchmark::DoNotOptimize(sum);
   }
-  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * kStackBits));
+  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * static_cast<std::int64_t>(kStackBits)));
 }
 void BM_Stack_Std_IndexLoop(benchmark::State &st)
 {
@@ -323,7 +323,7 @@ void BM_Stack_Std_IndexLoop(benchmark::State &st)
     for (std::size_t i = 0; i < kStackBits; ++i) sum += base[i] ? 1u : 0u;
     benchmark::DoNotOptimize(sum);
   }
-  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * kStackBits));
+  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * static_cast<std::int64_t>(kStackBits)));
 }
 
 // --- Stack group: count/any/all/none -------------------------------------------
@@ -591,7 +591,7 @@ void BM_Heap_Stdex_CtorBool(benchmark::State &st)
     b.resize(kHeapBits, true);
     benchmark::DoNotOptimize(b);
   }
-  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * kHeapBits));
+  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * static_cast<std::int64_t>(kHeapBits)));
 }
 #ifdef STDEX_BENCH_HAS_DYNAMIC_BITSET
 void BM_Heap_Dyn_CtorBool(benchmark::State &st)
@@ -601,7 +601,7 @@ void BM_Heap_Dyn_CtorBool(benchmark::State &st)
     b.resize(kHeapBits, true);
     benchmark::DoNotOptimize(b);
   }
-  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * kHeapBits));
+  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * static_cast<std::int64_t>(kHeapBits)));
 }
 #endif // STDEX_BENCH_HAS_DYNAMIC_BITSET
 void BM_Heap_Stdex_CtorString(benchmark::State &st)
@@ -612,7 +612,7 @@ void BM_Heap_Stdex_CtorString(benchmark::State &st)
     StdexHeap b(sv);
     benchmark::DoNotOptimize(b);
   }
-  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * kHeapBits));
+  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * static_cast<std::int64_t>(kHeapBits)));
 }
 #ifdef STDEX_BENCH_HAS_DYNAMIC_BITSET
 void BM_Heap_Dyn_CtorString(benchmark::State &st)
@@ -622,7 +622,7 @@ void BM_Heap_Dyn_CtorString(benchmark::State &st)
     DynHeap b(s);
     benchmark::DoNotOptimize(b);
   }
-  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * kHeapBits));
+  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * static_cast<std::int64_t>(kHeapBits)));
 }
 #endif // STDEX_BENCH_HAS_DYNAMIC_BITSET
 
@@ -731,7 +731,7 @@ void BM_Heap_Stdex_Test(benchmark::State &st)
     for (std::size_t i = 0; i < kHeapBits; i += 7) sum += base.test(i) ? 1u : 0u;
     benchmark::DoNotOptimize(sum);
   }
-  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * (kHeapBits / 7)));
+  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * static_cast<std::int64_t>(kHeapBits / 7)));
 }
 #ifdef STDEX_BENCH_HAS_DYNAMIC_BITSET
 void BM_Heap_Dyn_Test(benchmark::State &st)
@@ -742,7 +742,7 @@ void BM_Heap_Dyn_Test(benchmark::State &st)
     for (std::size_t i = 0; i < kHeapBits; i += 7) sum += base.test(i) ? 1u : 0u;
     benchmark::DoNotOptimize(sum);
   }
-  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * (kHeapBits / 7)));
+  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * static_cast<std::int64_t>(kHeapBits / 7)));
 }
 #endif // STDEX_BENCH_HAS_DYNAMIC_BITSET
 void BM_Heap_Stdex_IndexLoop(benchmark::State &st)
@@ -753,7 +753,7 @@ void BM_Heap_Stdex_IndexLoop(benchmark::State &st)
     for (std::size_t i = 0; i < kHeapBits; ++i) sum += static_cast<bool>(base[i]) ? 1u : 0u;
     benchmark::DoNotOptimize(sum);
   }
-  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * kHeapBits));
+  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * static_cast<std::int64_t>(kHeapBits)));
 }
 #ifdef STDEX_BENCH_HAS_DYNAMIC_BITSET
 void BM_Heap_Dyn_IndexLoop(benchmark::State &st)
@@ -764,7 +764,7 @@ void BM_Heap_Dyn_IndexLoop(benchmark::State &st)
     for (std::size_t i = 0; i < kHeapBits; ++i) sum += static_cast<bool>(base[i]) ? 1u : 0u;
     benchmark::DoNotOptimize(sum);
   }
-  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * kHeapBits));
+  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * static_cast<std::int64_t>(kHeapBits)));
 }
 #endif // STDEX_BENCH_HAS_DYNAMIC_BITSET
 
@@ -1117,7 +1117,6 @@ struct Registrar
 {
   Registrar()
   {
-    using S = benchmark::State;
     auto reg = [](char const *n, auto fn) {
       benchmark::RegisterBenchmark(n, fn)->Unit(benchmark::kMicrosecond);
     };

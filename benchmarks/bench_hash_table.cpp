@@ -164,7 +164,7 @@ void BM_Insert(benchmark::State &state, std::vector<Key> const &keys)
     for (std::size_t i = 0; i < keys.size(); ++i) m.emplace(keys[i], static_cast<int>(i));
     benchmark::DoNotOptimize(m.size());
   }
-  state.SetItemsProcessed(static_cast<std::int64_t>(state.iterations() * keys.size()));
+  state.SetItemsProcessed(static_cast<std::int64_t>(state.iterations() * static_cast<std::int64_t>(keys.size())));
 }
 
 template <class Map, class Key>
@@ -189,7 +189,7 @@ void BM_FindHit(benchmark::State &state, std::vector<Key> const &keys)
     }
     benchmark::DoNotOptimize(sum);
   }
-  state.SetItemsProcessed(static_cast<std::int64_t>(state.iterations() * keys.size()));
+  state.SetItemsProcessed(static_cast<std::int64_t>(state.iterations() * static_cast<std::int64_t>(keys.size())));
 }
 
 template <class Map, class Key>
@@ -204,7 +204,7 @@ void BM_FindMiss(benchmark::State &state, std::vector<Key> const &keys, std::vec
     for (auto const &k : miss) found += (m.find(k) != m.end());
     benchmark::DoNotOptimize(found);
   }
-  state.SetItemsProcessed(static_cast<std::int64_t>(state.iterations() * miss.size()));
+  state.SetItemsProcessed(static_cast<std::int64_t>(state.iterations() * static_cast<std::int64_t>(miss.size())));
 }
 
 template <class Map, class Key>
@@ -218,7 +218,7 @@ void BM_Update(benchmark::State &state, std::vector<Key> const &keys)
     for (std::size_t i = 0; i < keys.size(); ++i) m[keys[i]] = static_cast<int>(i) + 1;
     benchmark::DoNotOptimize(m.size());
   }
-  state.SetItemsProcessed(static_cast<std::int64_t>(state.iterations() * keys.size()));
+  state.SetItemsProcessed(static_cast<std::int64_t>(state.iterations() * static_cast<std::int64_t>(keys.size())));
 }
 
 template <class Map, class Key>
@@ -232,7 +232,7 @@ void BM_Erase(benchmark::State &state, std::vector<Key> const &keys)
     for (auto const &k : keys) m.erase(k);
     benchmark::DoNotOptimize(m.size());
   }
-  state.SetItemsProcessed(static_cast<std::int64_t>(state.iterations() * keys.size()));
+  state.SetItemsProcessed(static_cast<std::int64_t>(state.iterations() * static_cast<std::int64_t>(keys.size())));
 }
 
 template <class Map, class Key>
@@ -246,7 +246,7 @@ void BM_Rehash(benchmark::State &state, std::vector<Key> const &keys)
     m.rehash(m.size() * 4);
     benchmark::DoNotOptimize(m.bucket_count());
   }
-  state.SetItemsProcessed(static_cast<std::int64_t>(state.iterations() * keys.size()));
+  state.SetItemsProcessed(static_cast<std::int64_t>(state.iterations() * static_cast<std::int64_t>(keys.size())));
 }
 
 template <class Map, class Key>
@@ -263,7 +263,7 @@ void BM_Churn(benchmark::State &state, std::vector<Key> const &keys, std::vector
     for (std::size_t i = 0; i < extra.size(); ++i) m.emplace(extra[i], static_cast<int>(i));
     benchmark::DoNotOptimize(m.size());
   }
-  state.SetItemsProcessed(static_cast<std::int64_t>(state.iterations() * (half + extra.size())));
+  state.SetItemsProcessed(static_cast<std::int64_t>(state.iterations() * static_cast<std::int64_t>(half + extra.size())));
 }
 
 template <class Map, class Data>

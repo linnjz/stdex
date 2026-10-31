@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (c) 2026 LinnJz
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -114,8 +114,8 @@ struct no_default_value
 {
   static inline int live_count = 0;
 
-  explicit no_default_value(int value)
-      : value { value }
+  explicit no_default_value(int value_arg)
+      : value { value_arg }
   {
     ++live_count;
   }
@@ -148,8 +148,8 @@ struct throwing_move_value
   static inline int throw_on_copy    = 0;
   static inline int throw_on_move    = 0;
 
-  explicit throwing_move_value(int value)
-      : value { value }
+  explicit throwing_move_value(int value_arg)
+      : value { value_arg }
   {
     ++live_count;
   }
@@ -767,8 +767,9 @@ void test_copy_move()
   CHECK_EQ(moved2.size(), 100u);
   CHECK(moved2.contains(42));
 
- // self-assignment
-  cpy2 = cpy2;
+  // self-assignment
+  auto &cpy2_alias = cpy2;
+  cpy2 = cpy2_alias;
   CHECK_EQ(cpy2.size(), 100u);
 }
 
@@ -824,8 +825,10 @@ void test_storage_conversion_and_capacity_boundaries()
   heap.emplace(77, 770);
   CHECK_EQ(heap.find(77)->second, 770);
 
- // erasing then reinserting the same key should reuse capacity.
-  IMap<29> reuse { std::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, int>> {} };
+ // std::hash<int> is the identity on libstdc++, so every small key lands in the
+  // first group; erasing from that overflowed group intentionally lowers
+  // max_load_.  Use the well-mixed default hash to exercise the reuse path.
+  StdexIMap<29> reuse { stdex::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, int>> {} };
   for (int i = 0; i < 29; ++i) reuse.emplace(i, i);
   auto const reuse_capacity = reuse.capacity();
   CHECK_EQ(reuse.erase(0), 1u);
@@ -1454,7 +1457,7 @@ void test_merge()
 // std::hash / std::allocator operator()/allocate may not be constant-evaluable,
 // so a hand-made constexpr hasher is used here; this path drives inline_storage's
 // allocate/deallocate/initial_group_array and the consteval scan of group15,
-// plus forcing the consteval multiplication branches of umul128/umulh in hash.hpp into compile time.
+// plus forcing the consteval multiplication branches of umul128 in hash.hpp into compile time.
 // ==================================================================
 struct constexpr_int_hash
 {
@@ -1576,8 +1579,16 @@ constexpr bool constexpr_hash_mul()
   auto const nano     = stdex::hash_range<decltype(buffer), stdex::hash_nano_t>(buffer, 0u);
 
   auto const product = stdex::umul128(0x0123'4567'89AB'CDEFull, 0xFEDC'BA98'7654'3210ull);
+
+  // 128-bit scalars hash both words, and the signed path bit-copies to unsigned.
+  auto const h_lo  = stdex::hash_value(stdex::uint128_t { 1, 0 });
+  auto const h_hi  = stdex::hash_value(stdex::uint128_t { 0, 1 });
+  auto const h_neg = stdex::hash_value(stdex::int128_t::from_i64(-1));
+  auto const h_max = stdex::hash_value(~stdex::uint128_t {});
   return k1 != k2 && standard != micro && standard != nano && micro != nano &&
-         product.high == stdex::umulh(0x0123'4567'89AB'CDEFull, 0xFEDC'BA98'7654'3210ull);
+         product.lo() == 0x2236'D88F'E561'8CF0ULL && product.hi() == 0x0121'FA00'AD77'D742ULL &&
+         h_lo != h_hi && h_neg == h_max &&
+         stdex::hash<stdex::uint128_t> {}(stdex::uint128_t { 0, 1 }) == static_cast<std::size_t>(h_hi);
 }
 
 #if defined(__cpp_lib_start_lifetime) && __cpp_lib_start_lifetime >= 202603L
@@ -1868,7 +1879,8 @@ void test_node_value_semantics()
     IMap<0>::node_type n3;
     n3 = n2; // copy assignment: empty <- full
     CHECK_EQ(n3.value().second, 10);
-    n3 = n3; // self-assignment
+    auto &n3_alias = n3;
+    n3 = n3_alias; // self-assignment
     CHECK(static_cast<bool>(n3));
     CHECK_EQ(n3.value().second, 10);
 
@@ -1879,7 +1891,8 @@ void test_node_value_semantics()
     IMap<0>::node_type n5;
     n5 = std::move(n3); // move assignment: empty <- full
     CHECK_EQ(n5.value().second, 20);
-    n5 = std::move(n5); // self move-assignment
+    auto &n5_alias = n5;
+    n5 = std::move(n5_alias); // self move-assignment
     CHECK(static_cast<bool>(n5));
     CHECK_EQ(n5.value().second, 20);
     n5 = IMap<0>::node_type {}; // move assignment: full <- empty
@@ -2431,6 +2444,7 @@ void test_flat_map_ctors()
   CHECK_EQ(r8.size(), 3u);
   CHECK(r8.contains(2));
 
+#ifdef __cpp_lib_containers_ranges
   Map f1(std::from_range, v);
   CHECK_EQ(f1.size(), 3u);
   Map f2(std::from_range, v, alloc);
@@ -2449,6 +2463,7 @@ void test_flat_map_ctors()
   Map f8(std::from_range, v, 100u, hash, equal, alloc);
   CHECK_EQ(f8.size(), 3u);
   CHECK(f8.contains(3));
+#endif
 
   Map c1(r1);
   CHECK(c1 == r1);
@@ -2519,10 +2534,12 @@ void test_flat_set_ctors()
   Set sr3(v.begin(), v.end(), 100u, hash, equal, alloc);
   CHECK_EQ(sr3.size(), 3u);
 
+#ifdef __cpp_lib_containers_ranges
   Set sf1(std::from_range, v);
   CHECK_EQ(sf1.size(), 3u);
   Set sf2(std::from_range, v, 100u, hash, equal, alloc);
   CHECK_EQ(sf2.size(), 3u);
+#endif
 
   Set sc1(sr1);
   CHECK(sc1 == sr1);
@@ -2581,6 +2598,7 @@ void test_ctad_deduction()
   stdex::unordered_flat_map d8(il, 10u, h, ma);
   static_assert(std::is_same_v<typename decltype(d8)::hasher, std::hash<int>>);
 
+#ifdef __cpp_lib_containers_ranges
   stdex::unordered_flat_map d9(std::from_range, v);
   static_assert(std::is_same_v<typename decltype(d9)::key_type, int>);
   stdex::unordered_flat_map d10(std::from_range, v, ma);
@@ -2589,6 +2607,7 @@ void test_ctad_deduction()
   static_assert(std::is_same_v<typename decltype(d11)::key_type, int>);
   stdex::unordered_flat_map d12(std::from_range, v, 10u, h, ma);
   static_assert(std::is_same_v<typename decltype(d12)::hasher, std::hash<int>>);
+#endif
 
   stdex::unordered_flat_set e1(sv.begin(), sv.end());
   static_assert(std::is_same_v<typename decltype(e1)::key_type, int>);
@@ -2609,6 +2628,7 @@ void test_ctad_deduction()
   stdex::unordered_flat_set e8(sil, 10u, h, sa);
   static_assert(std::is_same_v<typename decltype(e8)::hasher, std::hash<int>>);
 
+#ifdef __cpp_lib_containers_ranges
   stdex::unordered_flat_set e9(std::from_range, sv);
   static_assert(std::is_same_v<typename decltype(e9)::key_type, int>);
   stdex::unordered_flat_set e10(std::from_range, sv, sa);
@@ -2617,6 +2637,7 @@ void test_ctad_deduction()
   static_assert(std::is_same_v<typename decltype(e11)::key_type, int>);
   stdex::unordered_flat_set e12(std::from_range, sv, 10u, h, sa);
   static_assert(std::is_same_v<typename decltype(e12)::hasher, std::hash<int>>);
+#endif
 }
 
 // ==================================================================

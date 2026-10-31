@@ -153,40 +153,40 @@ public:
   }
 
   // ---------- bucket / hash / key_equal constructor ----------
-  constexpr explicit unordered_flat_map(size_type bucket_count)
+  constexpr explicit unordered_flat_map(size_type buckets)
       : base { hasher {}, key_equal {}, allocator_type {} }
   {
-    if (bucket_count > 0) this->reserve(bucket_count);
+    if (buckets > 0) this->reserve(buckets);
   }
 
-  constexpr unordered_flat_map(size_type bucket_count, allocator_type const &alloc)
+  constexpr unordered_flat_map(size_type buckets, allocator_type const &alloc)
       : base { hasher {}, key_equal {}, alloc }
   {
-    if (bucket_count > 0) this->reserve(bucket_count);
+    if (buckets > 0) this->reserve(buckets);
   }
 
-  constexpr unordered_flat_map(size_type bucket_count, hasher const &hash)
+  constexpr unordered_flat_map(size_type buckets, hasher const &hash)
       : base { hash, key_equal {}, allocator_type {} }
   {
-    if (bucket_count > 0) this->reserve(bucket_count);
+    if (buckets > 0) this->reserve(buckets);
   }
 
-  constexpr unordered_flat_map(size_type bucket_count, hasher const &hash, allocator_type const &alloc)
+  constexpr unordered_flat_map(size_type buckets, hasher const &hash, allocator_type const &alloc)
       : base { hash, key_equal {}, alloc }
   {
-    if (bucket_count > 0) this->reserve(bucket_count);
+    if (buckets > 0) this->reserve(buckets);
   }
 
-  constexpr unordered_flat_map(size_type bucket_count, hasher const &hash, key_equal const &eq)
+  constexpr unordered_flat_map(size_type buckets, hasher const &hash, key_equal const &eq)
       : base { hash, eq, allocator_type {} }
   {
-    if (bucket_count > 0) this->reserve(bucket_count);
+    if (buckets > 0) this->reserve(buckets);
   }
 
-  constexpr unordered_flat_map(size_type bucket_count, hasher const &hash, key_equal const &eq, allocator_type const &alloc)
+  constexpr unordered_flat_map(size_type buckets, hasher const &hash, key_equal const &eq, allocator_type const &alloc)
       : base { hash, eq, alloc }
   {
-    if (bucket_count > 0) this->reserve(bucket_count);
+    if (buckets > 0) this->reserve(buckets);
   }
 
   // ---------- iterator-range constructor ----------
@@ -205,50 +205,50 @@ public:
   }
 
   template <class Iter>
-  constexpr unordered_flat_map(Iter first, Iter last, size_type bucket_count)
+  constexpr unordered_flat_map(Iter first, Iter last, size_type buckets)
       : base { hasher {}, key_equal {}, allocator_type {} }
   {
-    if (bucket_count > 0) this->reserve(bucket_count);
+    if (buckets > 0) this->reserve(buckets);
     this->insert(first, last);
   }
 
   template <class Iter>
-  constexpr unordered_flat_map(Iter first, Iter last, size_type bucket_count, allocator_type const &alloc)
+  constexpr unordered_flat_map(Iter first, Iter last, size_type buckets, allocator_type const &alloc)
       : base { hasher {}, key_equal {}, alloc }
   {
-    if (bucket_count > 0) this->reserve(bucket_count);
+    if (buckets > 0) this->reserve(buckets);
     this->insert(first, last);
   }
 
   template <class Iter>
-  constexpr unordered_flat_map(Iter first, Iter last, size_type bucket_count, hasher const &hash)
+  constexpr unordered_flat_map(Iter first, Iter last, size_type buckets, hasher const &hash)
       : base { hash, key_equal {}, allocator_type {} }
   {
-    if (bucket_count > 0) this->reserve(bucket_count);
+    if (buckets > 0) this->reserve(buckets);
     this->insert(first, last);
   }
 
   template <class Iter>
-  constexpr unordered_flat_map(Iter first, Iter last, size_type bucket_count, hasher const &hash, allocator_type const &alloc)
+  constexpr unordered_flat_map(Iter first, Iter last, size_type buckets, hasher const &hash, allocator_type const &alloc)
       : base { hash, key_equal {}, alloc }
   {
-    if (bucket_count > 0) this->reserve(bucket_count);
+    if (buckets > 0) this->reserve(buckets);
     this->insert(first, last);
   }
 
   template <class Iter>
-  constexpr unordered_flat_map(Iter first, Iter last, size_type bucket_count, hasher const &hash, key_equal const &eq)
+  constexpr unordered_flat_map(Iter first, Iter last, size_type buckets, hasher const &hash, key_equal const &eq)
       : base { hash, eq, allocator_type {} }
   {
-    if (bucket_count > 0) this->reserve(bucket_count);
+    if (buckets > 0) this->reserve(buckets);
     this->insert(first, last);
   }
 
   template <class Iter>
-  constexpr unordered_flat_map(Iter first, Iter last, size_type bucket_count, hasher const &hash, key_equal const &eq, allocator_type const &alloc)
+  constexpr unordered_flat_map(Iter first, Iter last, size_type buckets, hasher const &hash, key_equal const &eq, allocator_type const &alloc)
       : base { hash, eq, alloc }
   {
-    if (bucket_count > 0) this->reserve(bucket_count);
+    if (buckets > 0) this->reserve(buckets);
     this->insert(first, last);
   }
 
@@ -269,50 +269,50 @@ public:
   }
 
   template <unordered_flat_detail::container_compatible_range<value_type> Rng>
-  constexpr unordered_flat_map(std::from_range_t, Rng &&rng, size_type bucket_count)
+  constexpr unordered_flat_map(std::from_range_t, Rng &&rng, size_type buckets)
       : base { hasher {}, key_equal {}, allocator_type {} }
   {
-    if (bucket_count > 0) this->reserve(bucket_count);
+    if (buckets > 0) this->reserve(buckets);
     this->insert_range(std::forward<Rng>(rng));
   }
 
   template <unordered_flat_detail::container_compatible_range<value_type> Rng>
-  constexpr unordered_flat_map(std::from_range_t, Rng &&rng, size_type bucket_count, allocator_type const &alloc)
+  constexpr unordered_flat_map(std::from_range_t, Rng &&rng, size_type buckets, allocator_type const &alloc)
       : base { hasher {}, key_equal {}, alloc }
   {
-    if (bucket_count > 0) this->reserve(bucket_count);
+    if (buckets > 0) this->reserve(buckets);
     this->insert_range(std::forward<Rng>(rng));
   }
 
   template <unordered_flat_detail::container_compatible_range<value_type> Rng>
-  constexpr unordered_flat_map(std::from_range_t, Rng &&rng, size_type bucket_count, hasher const &hash)
+  constexpr unordered_flat_map(std::from_range_t, Rng &&rng, size_type buckets, hasher const &hash)
       : base { hash, key_equal {}, allocator_type {} }
   {
-    if (bucket_count > 0) this->reserve(bucket_count);
+    if (buckets > 0) this->reserve(buckets);
     this->insert_range(std::forward<Rng>(rng));
   }
 
   template <unordered_flat_detail::container_compatible_range<value_type> Rng>
-  constexpr unordered_flat_map(std::from_range_t, Rng &&rng, size_type bucket_count, hasher const &hash, allocator_type const &alloc)
+  constexpr unordered_flat_map(std::from_range_t, Rng &&rng, size_type buckets, hasher const &hash, allocator_type const &alloc)
       : base { hash, key_equal {}, alloc }
   {
-    if (bucket_count > 0) this->reserve(bucket_count);
+    if (buckets > 0) this->reserve(buckets);
     this->insert_range(std::forward<Rng>(rng));
   }
 
   template <unordered_flat_detail::container_compatible_range<value_type> Rng>
-  constexpr unordered_flat_map(std::from_range_t, Rng &&rng, size_type bucket_count, hasher const &hash, key_equal const &eq)
+  constexpr unordered_flat_map(std::from_range_t, Rng &&rng, size_type buckets, hasher const &hash, key_equal const &eq)
       : base { hash, eq, allocator_type {} }
   {
-    if (bucket_count > 0) this->reserve(bucket_count);
+    if (buckets > 0) this->reserve(buckets);
     this->insert_range(std::forward<Rng>(rng));
   }
 
   template <unordered_flat_detail::container_compatible_range<value_type> Rng>
-  constexpr unordered_flat_map(std::from_range_t, Rng &&rng, size_type bucket_count, hasher const &hash, key_equal const &eq, allocator_type const &alloc)
+  constexpr unordered_flat_map(std::from_range_t, Rng &&rng, size_type buckets, hasher const &hash, key_equal const &eq, allocator_type const &alloc)
       : base { hash, eq, alloc }
   {
-    if (bucket_count > 0) this->reserve(bucket_count);
+    if (buckets > 0) this->reserve(buckets);
     this->insert_range(std::forward<Rng>(rng));
   }
 #endif // __cpp_lib_containers_ranges
@@ -330,45 +330,45 @@ public:
     this->insert(ilist.begin(), ilist.end());
   }
 
-  constexpr unordered_flat_map(std::initializer_list<value_type> ilist, size_type bucket_count)
+  constexpr unordered_flat_map(std::initializer_list<value_type> ilist, size_type buckets)
       : base { hasher {}, key_equal {}, allocator_type {} }
   {
-    if (bucket_count > 0) this->reserve(bucket_count);
+    if (buckets > 0) this->reserve(buckets);
     this->insert(ilist.begin(), ilist.end());
   }
 
-  constexpr unordered_flat_map(std::initializer_list<value_type> ilist, size_type bucket_count, allocator_type const &alloc)
+  constexpr unordered_flat_map(std::initializer_list<value_type> ilist, size_type buckets, allocator_type const &alloc)
       : base { hasher {}, key_equal {}, alloc }
   {
-    if (bucket_count > 0) this->reserve(bucket_count);
+    if (buckets > 0) this->reserve(buckets);
     this->insert(ilist.begin(), ilist.end());
   }
 
-  constexpr unordered_flat_map(std::initializer_list<value_type> ilist, size_type bucket_count, hasher const &hash)
+  constexpr unordered_flat_map(std::initializer_list<value_type> ilist, size_type buckets, hasher const &hash)
       : base { hash, key_equal {}, allocator_type {} }
   {
-    if (bucket_count > 0) this->reserve(bucket_count);
+    if (buckets > 0) this->reserve(buckets);
     this->insert(ilist.begin(), ilist.end());
   }
 
-  constexpr unordered_flat_map(std::initializer_list<value_type> ilist, size_type bucket_count, hasher const &hash, allocator_type const &alloc)
+  constexpr unordered_flat_map(std::initializer_list<value_type> ilist, size_type buckets, hasher const &hash, allocator_type const &alloc)
       : base { hash, key_equal {}, alloc }
   {
-    if (bucket_count > 0) this->reserve(bucket_count);
+    if (buckets > 0) this->reserve(buckets);
     this->insert(ilist.begin(), ilist.end());
   }
 
-  constexpr unordered_flat_map(std::initializer_list<value_type> ilist, size_type bucket_count, hasher const &hash, key_equal const &eq)
+  constexpr unordered_flat_map(std::initializer_list<value_type> ilist, size_type buckets, hasher const &hash, key_equal const &eq)
       : base { hash, eq, allocator_type {} }
   {
-    if (bucket_count > 0) this->reserve(bucket_count);
+    if (buckets > 0) this->reserve(buckets);
     this->insert(ilist.begin(), ilist.end());
   }
 
-  constexpr unordered_flat_map(std::initializer_list<value_type> ilist, size_type bucket_count, hasher const &hash, key_equal const &eq, allocator_type const &alloc)
+  constexpr unordered_flat_map(std::initializer_list<value_type> ilist, size_type buckets, hasher const &hash, key_equal const &eq, allocator_type const &alloc)
       : base { hash, eq, alloc }
   {
-    if (bucket_count > 0) this->reserve(bucket_count);
+    if (buckets > 0) this->reserve(buckets);
     this->insert(ilist.begin(), ilist.end());
   }
 

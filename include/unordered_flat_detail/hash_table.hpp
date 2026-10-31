@@ -160,11 +160,11 @@ private:
   }
 
 public:
-  constexpr hash_table(hasher const &hash_arg, key_equal const &key_eq, allocator_type const &alloc) noexcept(
+  constexpr hash_table(hasher const &hash_arg, key_equal const &key_eq_arg, allocator_type const &alloc) noexcept(
         std::is_nothrow_copy_constructible_v<hasher> &&
         std::is_nothrow_copy_constructible_v<key_equal> &&
         std::is_nothrow_copy_constructible_v<allocator_type>)
-      : base { hash_arg, key_eq, alloc }
+      : base { hash_arg, key_eq_arg, alloc }
   {
   }
 
@@ -216,7 +216,7 @@ private:
   {
     assert(source.group_count_() == dest.group_count_() && "same-layout transfer requires equal group counts");
 
-    destroy_source_elements_on_exit<Move> se { source };
+    [[maybe_unused]] destroy_source_elements_on_exit<Move> se { source };
 
     destroy_dest_elements_on_exit de { source, dest };
 
@@ -236,11 +236,24 @@ private:
       });
     };
 
-    if constexpr (std::is_trivially_copy_constructible_v<value_type> && (std::is_same_v<allocator_type, std::allocator<value_type>> || !requires (allocator_type &a, value_type *p, value_type const &v) { a.construct(p, v); })) {
+    if constexpr (std::is_trivially_copy_constructible_v<value_type> && std::is_trivially_destructible_v<value_type> &&
+                  (std::is_same_v<allocator_type, std::allocator<value_type>> || !requires (allocator_type &a, value_type *p, value_type const &v) { a.construct(p, v); })) {
       if (std::is_constant_evaluated()) {
         transfer_elements();
       } else {
-        std::memcpy(dest.elements_address_(), source.elements_address_(), source.capacity() * sizeof(value_type));
+        // `dest` is raw storage and the branch requires an implicit-lifetime
+        // value_type, so memcpy starts the lifetime of the copied elements
+        // instead of assigning over live objects.
+#if defined(__GNUC__) && !defined(__clang__)
+#  pragma GCC diagnostic push
+#  pragma GCC diagnostic ignored "-Wclass-memaccess"
+#endif
+        if (source.capacity() != 0) {
+          std::memcpy(dest.elements_address_(), source.elements_address_(), source.capacity() * sizeof(value_type));
+        }
+#if defined(__GNUC__) && !defined(__clang__)
+#  pragma GCC diagnostic pop
+#endif
         dest.size_ = source.size_;
       }
     } else {
@@ -256,7 +269,7 @@ private:
   {
     assert(dest.size_ == 0 && "rehash transfer destination must be empty");
 
-    destroy_source_elements_on_exit<Move> e { source };
+    [[maybe_unused]] destroy_source_elements_on_exit<Move> e { source };
 
     source.for_each_occupied_slot_unchecked_([&dest](auto *occupied_ptr, auto *, unsigned)
     {
@@ -316,13 +329,13 @@ public:
     if (this == std::addressof(other)) [[unlikely]]
       return *this;
 
-    auto hasher = other.hasher_;
-    auto key_eq = other.key_eq_;
+    auto hasher_copy = other.hasher_;
+    auto key_eq_copy = other.key_eq_;
 
     if (!empty()) destroy_elements_unchecked_();
 
-    std::ranges::swap(this->hasher_, hasher);
-    std::ranges::swap(this->key_eq_, key_eq);
+    std::ranges::swap(this->hasher_, hasher_copy);
+    std::ranges::swap(this->key_eq_, key_eq_copy);
 
     bool const is_propagator = is_pocca_v && !allocators_equal_(this->alloc_, other.alloc_);
     if (is_heap()) {
@@ -611,7 +624,7 @@ private:
       {
         auto hash = dest.hasher_(Traits::key_fn(*occupied_ptr));
         if constexpr (move_path) {
-          destroy_element_on_exit e { source, occupied_ptr };
+          [[maybe_unused]] destroy_element_on_exit e { source, occupied_ptr };
           dest.emplace_at_available_slot_unchecked_(hash, std::move(*occupied_ptr));
         } else {
           dest.emplace_at_available_slot_unchecked_(hash, *occupied_ptr);
@@ -1033,7 +1046,7 @@ public:
     assert(position != end() && "extract: position must be dereferenceable (not end())");
     auto *element_ptr = position.element_address_();
     node_type node { std::move(*element_ptr) };
-    erase_on_exit e { *this, position };
+    [[maybe_unused]] erase_on_exit e { *this, position };
     return node;
   }
 
@@ -1083,7 +1096,7 @@ public:
       group_type *group_ptr = a_groups + group_index;
       auto occupied_mask    = group_type::occupied_mask_excluding_sentinel(group_ptr, a_sentinel);
       while (occupied_mask) {
-        unsigned slot_index     = std::countr_zero(static_cast<unsigned>(occupied_mask));
+        unsigned slot_index     = static_cast<unsigned>(std::countr_zero(static_cast<unsigned>(occupied_mask)));
         value_type *element_ptr = a_elements + group_index * group_size_() + slot_index;
         auto it                 = b.find(Traits::key_fn(*element_ptr));
         if (it == b.end() || !(*it == *element_ptr)) return false;

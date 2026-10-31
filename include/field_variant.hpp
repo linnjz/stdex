@@ -214,9 +214,9 @@ struct storage_meta
       /// alone. The requires-expression models the exact call the hash
       /// operator performs, so cv-qualified and array members are handled.
       if constexpr (std::is_reference_v<member_type<I>>) {
-        m.are_all_mems_hashable &= requires { std::hash<std::remove_cv_t<std::remove_reference_t<member_type<I>>>> {}(std::declval<member_type<I> const &>()); };
+        m.are_all_mems_hashable &= requires { std::hash<std::remove_cvref_t<member_type<I>>> {}(std::declval<member_type<I> const &>()); };
       } else if constexpr (!std::is_empty_v<member_plain_t>) {
-        m.are_all_mems_hashable &= !std::is_array_v<member_plain_t> && requires { std::hash<std::remove_cv_t<member_plain_t>> {}(std::declval<member_type<I> const &>()); };
+        m.are_all_mems_hashable &= !std::is_array_v<member_plain_t> && requires { std::hash<member_plain_t> {}(std::declval<member_type<I> const &>()); };
       }
 
       if constexpr (std::is_reference_v<member_type<I>> && requires { sizeof(storage_plain_t); }) {
@@ -1155,7 +1155,7 @@ struct hash<field_variant<T>>
       using M = typename field_variant<T>::template member_type<I>;
       if constexpr (std::is_reference_v<M> || !std::is_empty_v<std::remove_cvref_t<M>>) {
         return field_variant_detail::hash_combine(
-            I, std::hash<std::remove_cv_t<std::remove_reference_t<M>>> {}(v.template get<I>()));
+            I, std::hash<std::remove_cvref_t<M>> {}(v.template get<I>()));
       } else {
         return field_variant_detail::hash_combine(I, 0);
       }

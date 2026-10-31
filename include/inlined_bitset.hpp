@@ -1139,7 +1139,7 @@ private:
       view_size const k = static_cast<view_size>(i);
       CharT const c     = str[pos + (len - view_size { 1 } - k)];
       if (c != zero && c != one) throw_invalid_argument_();
-      value |= static_cast<block_type>(c == one) << (i - lo);
+      value |= static_cast<block_type>(static_cast<block_type>(c == one) << (i - lo));
     }
     return value;
   }
@@ -1720,7 +1720,7 @@ public:
     for (; first != last; ++first) {
       push_back(static_cast<bool>(*first));
     }
-    std::rotate(begin() + pos, begin() + old_size, end());
+    std::rotate(begin() + static_cast<difference_type>(pos), begin() + static_cast<difference_type>(old_size), end());
     return iterator(data(), pos);
   }
 

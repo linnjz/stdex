@@ -212,6 +212,13 @@ public:
   }
 
 protected:
+  template <class It>
+  [[nodiscard]] static constexpr auto as_difference_(size_type const count) noexcept
+      -> std::iter_difference_t<It>
+  {
+    return static_cast<std::iter_difference_t<It>>(count);
+  }
+
   template <typename... Args>
   requires std::constructible_from<value_type, Args...> &&
            requires (allocator_type &a, value_type *p, Args &&...args) {
@@ -239,9 +246,9 @@ protected:
   {
     assert((dst_first != nullptr || count == size_type {}) && "construct_elements_unchecked_() requires non-null destination unless empty");
     if (is_heap()) {
-      (void) uninitialized_value_construct_n(dst_first, count, alloc_);
+      (void) stdex::uninitialized_value_construct_n(dst_first, as_difference_<value_type *>(count), alloc_);
     } else {
-      (void) uninitialized_value_construct_n(dst_first, count);
+      (void) stdex::uninitialized_value_construct_n(dst_first, as_difference_<value_type *>(count));
     }
   }
 
@@ -249,9 +256,9 @@ protected:
   {
     assert((dst_first != nullptr || count == size_type {}) && "construct_elements_unchecked_() requires non-null destination unless empty");
     if (is_heap()) {
-      (void) uninitialized_fill_n(dst_first, count, fill_value, alloc_);
+      (void) stdex::uninitialized_fill_n(dst_first, as_difference_<value_type *>(count), fill_value, alloc_);
     } else {
-      (void) uninitialized_fill_n(dst_first, count, fill_value);
+      (void) stdex::uninitialized_fill_n(dst_first, as_difference_<value_type *>(count), fill_value);
     }
   }
 
@@ -264,9 +271,9 @@ protected:
       assert(count == static_cast<size_type>(src_last - src_first) && "construct_elements_unchecked_() sized range must match count");
     }
     if (is_heap()) {
-      (void) uninitialized_copy(src_first, src_last, dst_first, dst_first + count, alloc_);
+      (void) stdex::uninitialized_copy(src_first, src_last, dst_first, dst_first + count, alloc_);
     } else {
-      (void) uninitialized_copy(src_first, src_last, dst_first, dst_first + count);
+      (void) stdex::uninitialized_copy(src_first, src_last, dst_first, dst_first + count);
     }
   }
 
@@ -277,15 +284,15 @@ protected:
     allocation_guard alloc_guard { new_block, new_capacity, alloc_ };
     value_type *const raw_new_block = std::to_address(new_block);
     if constexpr (sizeof...(Args) == 0) {
-      (void) uninitialized_value_construct_n(raw_new_block, count, alloc_);
+      (void) stdex::uninitialized_value_construct_n(raw_new_block, as_difference_<value_type *>(count), alloc_);
     } else if constexpr (sizeof...(Args) == 1) {
       if constexpr ((std::input_iterator<std::remove_cvref_t<Args>> && ...)) {
-        (void) uninitialized_copy_n(std::forward<Args>(args)..., count, raw_new_block, raw_new_block + count, alloc_);
+        (void) stdex::uninitialized_copy_n(std::forward<Args>(args)..., as_difference_<std::remove_cvref_t<Args>...>(count), raw_new_block, raw_new_block + count, alloc_);
       } else {
-        (void) uninitialized_fill_n(raw_new_block, count, std::forward<Args>(args)..., alloc_);
+        (void) stdex::uninitialized_fill_n(raw_new_block, as_difference_<value_type *>(count), std::forward<Args>(args)..., alloc_);
       }
     } else if constexpr (sizeof...(Args) == 2) {
-      (void) uninitialized_copy(std::forward<Args>(args)..., raw_new_block, raw_new_block + count, alloc_);
+      (void) stdex::uninitialized_copy(std::forward<Args>(args)..., raw_new_block, raw_new_block + count, alloc_);
     } else {
       static_assert(sizeof...(Args) <= 2, "unexpected number of arguments");
     }
@@ -305,15 +312,15 @@ protected:
       if (count > inline_capacity) return false;
 
       if constexpr (sizeof...(Args) == 0) {
-        (void) uninitialized_value_construct_n(stack_.elements_, count);
+        (void) stdex::uninitialized_value_construct_n(stack_.elements_, as_difference_<value_type *>(count));
       } else if constexpr (sizeof...(Args) == 1) {
         if constexpr ((std::input_iterator<std::remove_cvref_t<Args>> && ...)) {
-          (void) uninitialized_copy_n(std::forward<Args>(args)..., count, stack_.elements_, stack_.elements_ + count);
+          (void) stdex::uninitialized_copy_n(std::forward<Args>(args)..., as_difference_<std::remove_cvref_t<Args>...>(count), stack_.elements_, stack_.elements_ + count);
         } else {
-          (void) uninitialized_fill_n(stack_.elements_, count, std::forward<Args>(args)...);
+          (void) stdex::uninitialized_fill_n(stack_.elements_, as_difference_<value_type *>(count), std::forward<Args>(args)...);
         }
       } else if constexpr (sizeof...(Args) == 2) {
-        (void) uninitialized_copy(std::forward<Args>(args)..., stack_.elements_, stack_.elements_ + count);
+        (void) stdex::uninitialized_copy(std::forward<Args>(args)..., stack_.elements_, stack_.elements_ + count);
       } else {
         static_assert(sizeof...(Args) <= 2, "unexpected number of arguments");
       }
@@ -455,7 +462,7 @@ protected:
       value_type *const gap_first = raw_new + pos;
 
       reallocation_guard guard { new_block, new_capacity, gap_first, gap_first, alloc_ };
-      guard.constructed_last_  = uninitialized_copy_n(first, count, gap_first, gap_first + count, alloc_).out;
+      guard.constructed_last_  = stdex::uninitialized_copy_n(first, as_difference_<InIt>(count), gap_first, gap_first + count, alloc_).out;
       transfer_unchecked_(old_data, pos, raw_new, alloc_);
       guard.constructed_first_ = raw_new;
       transfer_unchecked_(old_data + pos, old_size - pos, gap_first + count, alloc_);
@@ -490,7 +497,7 @@ protected:
       }
       set_size_(new_size, get_flag_());
       std::move_backward(pos_ptr, old_end - count, old_end);
-      std::copy_n(first, count, pos_ptr);
+      (void) std::ranges::copy_n(first, as_difference_<InIt>(count), pos_ptr);
     } else {
       size_type const spill     = count - tail;
       value_type *const shifted = old_end + spill;
@@ -508,9 +515,9 @@ protected:
         *dst = *first;
       }
       if (is_heap()) {
-        (void) uninitialized_copy_n(first, spill, old_end, old_end + spill, alloc_);
+        (void) stdex::uninitialized_copy_n(first, as_difference_<InIt>(spill), old_end, old_end + spill, alloc_);
       } else {
-        (void) uninitialized_copy_n(first, spill, old_end, old_end + spill);
+        (void) stdex::uninitialized_copy_n(first, as_difference_<InIt>(spill), old_end, old_end + spill);
       }
       tail_holder.dismiss();
       set_size_(new_size, get_flag_());
@@ -681,7 +688,7 @@ protected:
     auto const [new_block, new_capacity] = allocate_unchecked_(growth);
     allocation_guard alloc_guard { new_block, new_capacity, alloc_ };
     value_type *const raw_new_block = std::to_address(new_block);
-    (void) uninitialized_copy_n(src, count, raw_new_block, raw_new_block + count, alloc_);
+    (void) stdex::uninitialized_copy_n(src, as_difference_<SrcIt>(count), raw_new_block, raw_new_block + count, alloc_);
     alloc_guard.dismiss();
 
     heap_.elements_ptr_ = new_block;
@@ -701,16 +708,16 @@ protected:
       // Single-pass: the assign loop consumes the first this_size inputs, and
       // the copy result resumes exactly where it stopped for tail construct
       // (ranges::copy_n returns both ends; std::copy_n returns only the output).
-      auto const assigned = std::ranges::copy_n(other_data, this_size, this_data);
+      auto const assigned = std::ranges::copy_n(other_data, as_difference_<InputIt>(this_size), this_data);
       if (is_heap()) {
-        (void) uninitialized_copy_n(assigned.in, other_size - this_size, 
+        (void) stdex::uninitialized_copy_n(assigned.in, as_difference_<InputIt>(other_size - this_size),
                                     this_data + this_size, this_data + other_size, alloc_);
       } else {
-        (void) uninitialized_copy_n(assigned.in, other_size - this_size, 
+        (void) stdex::uninitialized_copy_n(assigned.in, as_difference_<InputIt>(other_size - this_size),
                                     this_data + this_size, this_data + other_size);
       }
     } else {
-      std::copy_n(other_data, other_size, this_data);
+      (void) std::ranges::copy_n(other_data, as_difference_<InputIt>(other_size), this_data);
       destroy_elements_unchecked_(this_data + other_size, this_size - other_size);
     }
     set_size_(other_size, get_flag_());
@@ -1021,10 +1028,11 @@ protected:
            (std::same_as<std::remove_cvref_t<AllocArgs>, allocator_type> && ...)
   constexpr void transfer_unchecked_(value_type *const src, size_type const count, value_type *const dst, AllocArgs &&...alloc_args)
   {
+    // stdex::uninitialized_* already checked count != 0
     if constexpr (std::is_nothrow_move_constructible_v<value_type> || !std::is_copy_constructible_v<value_type>) {
-      (void) uninitialized_move(src, src + count, dst, dst + count, std::forward<AllocArgs>(alloc_args)...);
+      (void) stdex::uninitialized_move(src, src + count, dst, dst + count, std::forward<AllocArgs>(alloc_args)...);
     } else {
-      (void) uninitialized_copy(src, src + count, dst, dst + count, std::forward<AllocArgs>(alloc_args)...);
+      (void) stdex::uninitialized_copy(src, src + count, dst, dst + count, std::forward<AllocArgs>(alloc_args)...);
     }
   }
 
@@ -1160,9 +1168,9 @@ protected:
 
     reallocation_guard guard { new_block, new_capacity, appended_first, appended_first, alloc_ };
     if constexpr (sizeof...(Args) == 0) {
-      guard.constructed_last_ = uninitialized_value_construct_n(appended_first, newsize - oldsize, alloc_);
+      guard.constructed_last_ = stdex::uninitialized_value_construct_n(appended_first, as_difference_<value_type *>(newsize - oldsize), alloc_);
     } else {
-      guard.constructed_last_ = uninitialized_fill_n(appended_first, newsize - oldsize, std::forward<Args>(args)..., alloc_);
+      guard.constructed_last_ = stdex::uninitialized_fill_n(appended_first, as_difference_<value_type *>(newsize - oldsize), std::forward<Args>(args)..., alloc_);
     }
     transfer_unchecked_(old_data, oldsize, raw_new, alloc_);
     guard.dismiss();
