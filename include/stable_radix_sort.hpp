@@ -67,6 +67,19 @@
 namespace stdex
 {
 /**
+ * @brief Forward declarations keep @c int128.hpp optional for 32/64-bit instantiations.
+ *
+ * @details Including @c int128.hpp provides the complete types. In that case,
+ *          radix sorting a range of @c stdex::uint128_t / @c stdex::int128_t
+ *          uses the same 16-byte LSD/MSD machinery as any other arithmetic key.
+ *
+ * @note This design avoids forcing a dependency on @c int128.hpp for
+ *       32/64-bit instantiations.
+ */
+struct uint128_t;
+struct int128_t;
+
+/**
  * @brief Radix sort traversal strategy.
  *
  * @details
@@ -436,7 +449,7 @@ public:
 
   constexpr pointer data() noexcept { return data_; }
 
-  constexpr pointer const data() const noexcept { return data_; }
+  constexpr pointer data() const noexcept { return data_; }
 
   constexpr size_type size() const noexcept { return size_; }
 
@@ -450,17 +463,32 @@ private:
   bool is_hybrid_alloc_ { false };
 };
 
-// User key maps must return arithmetic keys.
+// The standard integral concepts do not cover the 128-bit wrappers, so the
+// radix layer spells out the extra cases once here.
+template <typename T>
+concept is_128bit = std::same_as<std::remove_cvref_t<T>, uint128_t> ||
+                    std::same_as<std::remove_cvref_t<T>, int128_t>;
+
+template <typename T>
+concept is_unsigned_integer = std::unsigned_integral<std::remove_cvref_t<T>> ||
+                              std::same_as<std::remove_cvref_t<T>, uint128_t>;
+
+template <typename T>
+concept is_signed_integer = std::signed_integral<std::remove_cvref_t<T>> ||
+                            std::same_as<std::remove_cvref_t<T>, int128_t>;
+
+// User key maps must return arithmetic keys (including the 128-bit wrappers).
 template <typename KeyMap, typename T>
-concept arithmetic_key_map = std::regular_invocable<KeyMap, T> &&
-                             std::is_arithmetic_v<std::invoke_result_t<KeyMap, T>>;
+concept arithmetic_key_map =
+    std::regular_invocable<KeyMap, T> &&
+    (std::is_arithmetic_v<std::invoke_result_t<KeyMap, T>> ||
+     is_128bit<std::invoke_result_t<KeyMap, T>>);
 
 // Internal projections must return unsigned radix keys.
 template <typename Projection, typename T>
-concept unsigned_integral_projection = requires (Projection p, T t) {
-  requires std::regular_invocable<Projection, T>;
-  { p(t) } -> std::unsigned_integral;
-};
+concept unsigned_integral_projection =
+    std::regular_invocable<Projection, T> &&
+    is_unsigned_integer<std::invoke_result_t<Projection, T>>;
 
 // Adjusts sort order for reverse iterators at compile time.
 template <typename Iter, radix_sort_order Order>
@@ -496,12 +524,12 @@ inline constexpr radix_key_map_fn radix_key_map {};
 template <typename T>
 struct sign_bit_traits
 {
-  static_assert(std::is_arithmetic_v<T>, "arithmetic type required");
-  using type                             = T;
-  using uint_t                           = unsigned_of_bits_t<sizeof(T) * CHAR_BIT>;
+  static_assert(std::is_arithmetic_v<T> || is_128bit<T>, "arithmetic type required");
+  using type                                  = T;
+  using uint_t                                = unsigned_of_bits_t<sizeof(T) * CHAR_BIT>;
   static constexpr std::size_t sign_bit_index = (sizeof(T) * CHAR_BIT) - 1;
-  static constexpr uint_t all_bit_mask   = ~uint_t(0);
-  static constexpr uint_t sign_bit_mask  = all_bit_mask << sign_bit_index;
+  static constexpr uint_t all_bit_mask        = static_cast<uint_t>(~uint_t {});
+  static constexpr uint_t sign_bit_mask       = static_cast<uint_t>(all_bit_mask << sign_bit_index);
 };
 
 ///< Radix sort traits (compile-time parameter bundle)
@@ -544,7 +572,7 @@ struct radix_sort_traits : sign_bit_traits<std::invoke_result_t<KeyMap, T>>
   // Whether sign correction is applied on the first pass
   static constexpr bool is_sign_handling_on_first_pass =
       (sort_strategy == radix_sort_strategy::msd || num_passes == 1) &&
-      std::is_signed_v<key_t>;
+      (is_signed_integer<key_t> || std::is_floating_point_v<key_t>);
 
   // Compile-time sequence of all pass indices
   static constexpr auto pass_indices = std::make_index_sequence<num_passes> {};
@@ -569,23 +597,23 @@ struct radix_uint_projection_fn
   {
     KeyMap km_;
 
-    using sign_bit_traits = sign_bit_traits<Arithmetic>;
-    using uint_t          = typename sign_bit_traits::uint_t;
+    using sign_bit_traits_t = sign_bit_traits<Arithmetic>;
+    using uint_t            = typename sign_bit_traits_t::uint_t;
 
     /// Transforms an arithmetic key into an unsigned integer.
     /// Unsigned → identity. Signed → flips sign bit (if IsSignBitHandling).
     /// IEEE 754 → maps negative floats to [0, 0x7F..FF], positive to
     /// [0x80..00, 0xFF..FF]; NaN goes to 0 or max if requested.
-    template <bool IsSignBitHandling = !std::unsigned_integral<Arithmetic>>
+    template <bool IsSignBitHandling = !is_unsigned_integer<Arithmetic>>
     static constexpr auto transform(Arithmetic key) noexcept -> uint_t
     {
-      if constexpr (std::same_as<Arithmetic, bool> || std::unsigned_integral<Arithmetic>) {
+      if constexpr (std::same_as<Arithmetic, bool> || is_unsigned_integer<Arithmetic>) {
         // Unsigned types need no transformation.
         return key;
-      } else if constexpr (std::signed_integral<Arithmetic>) {
+      } else if constexpr (is_signed_integer<Arithmetic>) {
         // Two's complement signed integers: flip sign bit for correct order.
-        return IsSignBitHandling ? static_cast<uint_t>(key) ^ sign_bit_traits::sign_bit_mask
-                                 : static_cast<uint_t>(key);
+        return IsSignBitHandling ? static_cast<uint_t>(to_unsigned(key)) ^ sign_bit_traits_t::sign_bit_mask
+                                 : static_cast<uint_t>(to_unsigned(key));
       } else if constexpr (std::floating_point<Arithmetic>) {
         static_assert(
             !(nans_pos_handling != radix_nans_pos_handling::unhandled && !std::numeric_limits<Arithmetic>::is_iec559),
@@ -597,7 +625,7 @@ struct radix_uint_projection_fn
             // Map NaN to either the smallest or largest possible key so
             // that it sorts to the beginning or end of the sequence.
             return nans_pos_handling == radix_nans_pos_handling::at_first
-                     ? uint_t(0)
+                     ? uint_t {}
                      : std::numeric_limits<uint_t>::max();
           }
         }
@@ -605,22 +633,23 @@ struct radix_uint_projection_fn
 
         // sign_mask is 0 for positive floats, ~0 for negative.
         // Computed as 0 - (v >> sign_bit_index) with unsigned wrap.
-        auto const sign_mask = (uint_t(0) - (v >> sign_bit_traits::sign_bit_index));
+        auto const sign_mask = (uint_t {} - (v >> sign_bit_traits_t::sign_bit_index));
 
         // Apply sign-bit flip and, for negatives, invert all bits except sign.
         uint_t base = IsSignBitHandling
-                        ? (v ^ sign_mask) | (sign_bit_traits::sign_bit_mask & ~sign_mask)
+                        ? (v ^ sign_mask) | (sign_bit_traits_t::sign_bit_mask & ~sign_mask)
                         : (v ^ sign_mask);
 
         // Shift finite values up by one if NaN occupies slot 0.
         if constexpr (nans_pos_handling == radix_nans_pos_handling::at_first) base += 1U;
         return base;
       } else {
-        static_assert(std::is_arithmetic_v<Arithmetic>, "transform() requires an arithmetic type");
+        static_assert(std::is_arithmetic_v<Arithmetic> || is_128bit<Arithmetic>,
+                      "transform() requires an arithmetic type");
       }
     }
 
-    template <bool IsSignBitHandling = !std::unsigned_integral<Arithmetic>>
+    template <bool IsSignBitHandling = !is_unsigned_integer<Arithmetic>>
     constexpr auto operator() (auto const &x) const noexcept -> uint_t
     {
       return transform<IsSignBitHandling>(km_(x));
@@ -653,9 +682,9 @@ RADIX_SORT_ALWAYS_INLINE
     constexpr auto nth_radix(typename RadixTraits::uint_t x, std::size_t pass) noexcept -> std::size_t
 {
   if constexpr (RadixTraits::sort_order == radix_sort_order::ascending) {
-    return (x >> RadixTraits::bits_per_pass * pass) & RadixTraits::radix_mask;
+    return static_cast<std::size_t>((x >> RadixTraits::bits_per_pass * pass) & RadixTraits::radix_mask);
   } else if constexpr (RadixTraits::sort_order == radix_sort_order::descending) {
-    return ((~x) >> RadixTraits::bits_per_pass * pass) & RadixTraits::radix_mask;
+    return static_cast<std::size_t>(((~x) >> RadixTraits::bits_per_pass * pass) & RadixTraits::radix_mask);
   } else {
     static_assert(RadixTraits::sort_order == radix_sort_order::ascending || 
                   RadixTraits::sort_order == radix_sort_order::descending, 
@@ -668,8 +697,8 @@ RADIX_SORT_ALWAYS_INLINE
 /// Thread-chunk descriptors for distributing work across OpenMP threads.
 struct thread_chunk_info
 {
-  std::uint32_t threads; ///< Total OpenMP threads.
-  std::uint32_t remain;  ///< Threads that process one extra element.
+  std::size_t threads; ///< Total OpenMP threads.
+  std::size_t remain;  ///< Threads that process one extra element.
   std::size_t step;      ///< floor(n / threads) — base elements per thread.
 };
 
@@ -914,7 +943,7 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
 
     auto run_sort = [&](auto &hist2d) constexpr {
       // Step 1: build histograms and check sortedness.
-      if (bool sorted = build_histogram(data, n, hist2d, proj)) {
+      if (build_histogram(data, n, hist2d, proj)) {
         return; // Already sorted; nothing to do.
       }
 
@@ -985,8 +1014,8 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
     auto comp = std::conditional_t<sort_order == radix_sort_order::ascending, std::greater_equal<>, std::less_equal<>> {};
 
     auto const &key_map = proj.get_key_map();
-    uint_t combined     = 0;
-    bool sorted         = true;
+    uint_t combined {};
+    bool sorted = true;
     for (std::size_t i = 0; i < n; ++i) {
       auto const key = key_map(data[i]);
       sorted         = sorted && comp(key, prev);
@@ -1197,8 +1226,8 @@ struct radix_sort_par_helpers : RadixTraits
         std::less_equal<>> {};
 
     auto const &key_map              = proj.get_key_map();
-    std::uint32_t const threads           = info.threads;
-    std::uint32_t const remain            = info.remain;
+    std::size_t const threads             = info.threads;
+    std::size_t const remain              = info.remain;
     std::size_t const step                = info.step;
     using thread_chunk_stats_wrapped = thread_chunk_stats<key_t>;
     auto const thread_bytes          = threads * sizeof(thread_chunk_stats_wrapped);
@@ -1215,7 +1244,7 @@ struct radix_sort_par_helpers : RadixTraits
 #  pragma omp parallel num_threads((int) threads)
     {
       int const tid         = omp_get_thread_num();
-      auto const [beg, end] = compute_thread_chunk_range(tid, step, remain);
+      auto const [beg, end] = compute_thread_chunk_range(static_cast<std::size_t>(tid), step, remain);
 
       bool sorted  = true;
       auto min_val = std::numeric_limits<key_t>::max();
@@ -1240,12 +1269,12 @@ struct radix_sort_par_helpers : RadixTraits
         if (key < min_val) min_val = key;
         if (key > max_val) max_val = key;
       }
-      stats_array[tid] = thread_chunk_stats { sorted, min_val, max_val };
+      stats_array[static_cast<std::size_t>(tid)] = thread_chunk_stats { sorted, min_val, max_val };
     }
 
     // Merge per-thread statistics.
     auto &[sorted_1, min_val_1, max_val_1] = stats_array[0];
-    uint_t combined                        = 0;
+    uint_t combined {};
     combined |= std::bit_cast<uint_t>(min_val_1) | std::bit_cast<uint_t>(max_val_1);
     for (std::size_t i = 1; i < threads; ++i) {
       auto const [sorted, min_val, max_val] = stats_array[i];
@@ -1269,13 +1298,13 @@ struct radix_sort_par_helpers : RadixTraits
       std::size_t const pass,
       Projection proj)
   {
-    std::uint32_t const threads = info.threads;
-    std::uint32_t const remain  = info.remain;
-    std::size_t const step      = info.step;
+    std::size_t const threads = info.threads;
+    std::size_t const remain  = info.remain;
+    std::size_t const step    = info.step;
 #  pragma omp parallel num_threads((int) threads)
     {
       int const tid         = omp_get_thread_num();
-      auto const [beg, end] = compute_thread_chunk_range(tid, step, remain);
+      auto const [beg, end] = compute_thread_chunk_range(static_cast<std::size_t>(tid), step, remain);
 
       for (std::size_t i = beg; i < end; ++i) {
         auto const x = proj.template operator()<IsSignBitHandling>(data[i]);
@@ -1317,13 +1346,13 @@ struct radix_sort_par_helpers : RadixTraits
       hist2d_t hist2d,
       Projection proj)
   {
-    std::uint32_t const threads = info.threads;
-    std::uint32_t const remain  = info.remain;
-    std::size_t const step      = info.step;
+    std::size_t const threads = info.threads;
+    std::size_t const remain  = info.remain;
+    std::size_t const step    = info.step;
 #  pragma omp parallel num_threads((int) threads)
     {
       int tid         = omp_get_thread_num();
-      auto [beg, end] = compute_thread_chunk_range(tid, step, remain);
+      auto [beg, end] = compute_thread_chunk_range(static_cast<std::size_t>(tid), step, remain);
       for (std::size_t i = end; i-- > beg;) {
         auto const x = proj.template operator()<IsSignBitHandling>(data[i]);
 
@@ -1374,7 +1403,7 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
     allocator_holder<Allocator> holder(n, allocator);
     auto *RADIX_SORT_RESTRICT buffer = holder.data();
 
-    std::size_t const threads = ::omp_get_max_threads();
+    std::size_t const threads = static_cast<std::size_t>(::omp_get_max_threads());
     // Per-thread histogram: hist2d[tid][bucket] avoids atomic contention.
     std::size_t const hist_size  = threads * num_buckets;
     std::size_t const hist_bytes = hist_size * sizeof(hist_t);
@@ -1477,8 +1506,9 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
     //   MSVC provides '/openmp' '/openmp:experimental' '/openmp:llvm'
     //   '/openmp' needs a signed index variable
     for (int i = 0; i < static_cast<int>(num_buckets); ++i) {
-      std::size_t chunk_beg = hist2d[0][i];
-      std::size_t chunk_end = (i + 1 < num_buckets) ? hist2d[0][i + 1] : n;
+      std::size_t const bucket = static_cast<std::size_t>(i);
+      std::size_t chunk_beg = hist2d[0][bucket];
+      std::size_t chunk_end = (bucket + 1 < num_buckets) ? hist2d[0][bucket + 1] : n;
 
       if (std::size_t chunk_size = chunk_end - chunk_beg; chunk_size > 1) {
         do_msd_recursion(
@@ -1508,7 +1538,7 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
   {
     // Disable nested parallelism once inside a parallel region. Recursing
     // with all threads would oversubscribe and hurt cache locality.
-    std::uint32_t const threads  = omp_in_parallel() ? 1U : info.threads;
+    std::size_t const threads = omp_in_parallel() ? std::size_t { 1 } : info.threads;
     std::size_t const hist_size  = std::size_t { threads } * num_buckets;
     std::size_t const hist_bytes = hist_size * sizeof(hist_t);
 
@@ -1530,8 +1560,7 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
 
     std::memset(hist_storage.data(), 0, hist_bytes);
 
-    auto [step, remain] = ::lldiv(n, threads);
-    thread_chunk_info const sub_info(threads, remain, step);
+    thread_chunk_info const sub_info(threads, n % threads, n / threads);
     build_histogram(data, sub_info, hist2d, pass, proj);
 
     if (prefix_sum(hist2d, threads) <= 1) {
@@ -1553,7 +1582,7 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
     allocator_holder<Allocator> holder(n, allocator);
     auto *RADIX_SORT_RESTRICT buffer = holder.data();
 
-    std::size_t const threads    = ::omp_get_max_threads();
+    std::size_t const threads    = static_cast<std::size_t>(::omp_get_max_threads());
     std::size_t const hist_size  = threads * num_buckets;
     std::size_t const hist_bytes = hist_size * sizeof(hist_t);
     thread_chunk_info const chunk_info(threads, n % threads, n / threads);
@@ -1625,7 +1654,7 @@ constexpr void stable_radix_sort_impl(
     // Invert order if descending is requested.
     sort_bool<RandIter, RadixTraits::sort_order != radix_sort_order::ascending>(first, last);
   } else {
-    std::size_t const size = last - first;
+    std::size_t const size = static_cast<std::size_t>(last - first);
 
     // 2. Small-array fallback: insertion sort avoids radix-sort overhead.
     if (size <= kRadixSortThreshold) [[unlikely]] {

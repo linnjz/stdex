@@ -27,6 +27,7 @@
 #include <string>
 #include <vector>
 
+#include "int128.hpp"
 #include "stable_radix_sort.hpp"
 
 namespace
@@ -456,7 +457,7 @@ static void test_counter_type64()
 static void test_insertion_threshold()
 {
   TEST_RADIX(InsertionThreshold);
-  for (auto n : { 63, 64, 65 }) {
+  for (std::size_t n : { std::size_t { 63 }, std::size_t { 64 }, std::size_t { 65 } }) {
     std::vector<uint32_t> v(n);
     std::iota(v.begin(), v.end(), uint32_t(0));
     std::shuffle(v.begin(), v.end(), rng);
@@ -465,7 +466,7 @@ static void test_insertion_threshold()
       return;
     }
   }
-  for (auto n : { 63, 64, 65 }) {
+  for (std::size_t n : { std::size_t { 63 }, std::size_t { 64 }, std::size_t { 65 } }) {
     std::vector<int64_t> v(n);
     std::iota(v.begin(), v.end(), int64_t(-32));
     std::shuffle(v.begin(), v.end(), rng);
@@ -780,6 +781,161 @@ static void test_bool_type()
 }
 
 // ============================================================================
+// 128-bit custom keys (stdex::uint128_t / stdex::int128_t)
+// ============================================================================
+template <typename T>
+std::vector<T> generate128(std::size_t n)
+{
+  std::vector<T> v(n);
+  for (auto &x : v) {
+    std::uint64_t const low  = rng();
+    std::uint64_t const high = rng();
+    x                        = T::from_words(low, high);
+  }
+  return v;
+}
+
+template <typename T>
+bool validate128(std::vector<T> v)
+{
+  auto expected = v;
+  std::stable_sort(expected.begin(), expected.end());
+  stdex::stable_radix_sort(v.begin(), v.end());
+  if (v != expected) {
+    std::fprintf(stderr, "FAIL: 128-bit sort mismatch\n");
+    return false;
+  }
+  return true;
+}
+
+template <typename T>
+bool validate128_descending(std::vector<T> v)
+{
+  auto expected = v;
+  std::stable_sort(expected.begin(), expected.end(), std::greater<T> {});
+  stdex::stable_radix_sort<kDescOpts>(v.begin(), v.end());
+  if (v != expected) {
+    std::fprintf(stderr, "FAIL: 128-bit descending sort mismatch\n");
+    return false;
+  }
+  return true;
+}
+
+static void test_uint128_keys()
+{
+  TEST_RADIX(Uint128Keys);
+  auto v = generate128<stdex::uint128_t>(700);
+  // Add extremes and duplicates so both the sign/unsigned boundary and stable
+  // ordering are exercised.
+  v.push_back(stdex::uint128_t {});
+  v.push_back(~stdex::uint128_t {});
+  v.push_back(stdex::uint128_t::from_u64(1));
+  v.push_back(stdex::uint128_t::from_words(0, 0x8000'0000'0000'0000ULL));
+  v.push_back(v.front());
+
+  if (!validate128(v)) {
+    FAIL_MSG("uint128 ascending");
+    return;
+  }
+  if (!validate128_descending(v)) {
+    FAIL_MSG("uint128 descending");
+    return;
+  }
+
+  constexpr auto kMsdOpts = [] {
+    return stdex::radix_sort_options {
+      .sort_strategy    = stdex::radix_sort_strategy::msd,
+      .execution_policy = stdex::radix_execution_policy::seq
+    };
+  }();
+  auto msd = v;
+  auto expected = v;
+  std::stable_sort(expected.begin(), expected.end());
+  stdex::stable_radix_sort<kMsdOpts>(msd.begin(), msd.end());
+  if (msd != expected) {
+    FAIL_MSG("uint128 msd");
+    return;
+  }
+
+  constexpr auto kBits16Opts = [] {
+    return stdex::radix_sort_options {
+      .sort_strategy    = stdex::radix_sort_strategy::lsd,
+      .execution_policy = stdex::radix_execution_policy::seq,
+      .bits_per_pass    = stdex::radix_bits_per_pass::bits16
+    };
+  }();
+  auto bits16 = v;
+  stdex::stable_radix_sort<kBits16Opts>(bits16.begin(), bits16.end());
+  if (bits16 != expected) {
+    FAIL_MSG("uint128 bits16");
+    return;
+  }
+  PASS();
+}
+
+static void test_int128_keys()
+{
+  TEST_RADIX(Int128Keys);
+  auto v = generate128<stdex::int128_t>(700);
+  v.push_back(stdex::int128_t::from_i64(-1));
+  v.push_back(stdex::int128_t::from_i64(0));
+  v.push_back(stdex::int128_t::from_i64(1));
+  v.push_back(std::numeric_limits<stdex::int128_t>::min());
+  v.push_back(std::numeric_limits<stdex::int128_t>::max());
+
+  if (!validate128(v)) {
+    FAIL_MSG("int128 ascending");
+    return;
+  }
+  if (!validate128_descending(v)) {
+    FAIL_MSG("int128 descending");
+    return;
+  }
+
+  constexpr auto kMsdOpts = [] {
+    return stdex::radix_sort_options {
+      .sort_strategy    = stdex::radix_sort_strategy::msd,
+      .execution_policy = stdex::radix_execution_policy::seq
+    };
+  }();
+  auto msd      = v;
+  auto expected = v;
+  std::stable_sort(expected.begin(), expected.end());
+  stdex::stable_radix_sort<kMsdOpts>(msd.begin(), msd.end());
+  if (msd != expected) {
+    FAIL_MSG("int128 msd");
+    return;
+  }
+  PASS();
+}
+
+static void test_int128_projection()
+{
+  TEST_RADIX(Int128Projection);
+  struct Record
+  {
+    stdex::uint128_t key;
+    int tag;
+    bool operator== (Record const &) const = default;
+  };
+
+  std::vector<Record> records;
+  for (int i = 0; i < 400; ++i) {
+    records.push_back({ stdex::uint128_t::from_words(rng(), rng() >> (i % 4 == 0 ? 32U : 0U)), i });
+  }
+  auto expected = records;
+  std::stable_sort(expected.begin(), expected.end(), [](Record const &a, Record const &b) {
+    return a.key < b.key;
+  });
+  stdex::stable_radix_sort(records.begin(), records.end(), [](Record const &r) { return r.key; });
+  if (records != expected) {
+    FAIL_MSG("uint128 projection");
+    return;
+  }
+  PASS();
+}
+
+// ============================================================================
 // main
 // ============================================================================
 int main()
@@ -817,6 +973,10 @@ int main()
   test_descending_chunk16();
   test_msd_bits16();
   test_bool_type();
+
+  test_uint128_keys();
+  test_int128_keys();
+  test_int128_projection();
 
   std::printf("\n=== Results: %d/%d passed ===\n", g_tests_passed, g_tests_run);
   return g_tests_passed == g_tests_run ? 0 : 1;
