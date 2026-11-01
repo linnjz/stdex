@@ -152,12 +152,19 @@ public:
   LINN_PROPERTY_CREATE(LPS_MEMBER(int, AfterAssign, 1), LPS_SETTER(int, LPS_POST_ACTION(this->capture())), LPS_GETTER(int))
 };
 
+class SplitPropsPrivate;
+
 class SplitProps
 {
-public:
-  int touches = 0;
+  LINN_Q_CREATE(SplitProps)
 
-  void touch() noexcept { ++touches; }
+public:
+  SplitProps();
+  ~SplitProps();
+
+  void touch() noexcept;
+  [[nodiscard]] int touches() const noexcept;
+
   LINN_PROPERTY_CREATE_H(LPS_MEMBER(int, xCount), LPS_SETTER(int), LPS_GETTER(int))
   LINN_PROPERTY_CREATE_H(LPS_MEMBER(int, Count), LPS_SETTER(int), LPS_GETTER(int))
   LINN_PROPERTY_CREATE_H(LPS_MEMBER(std::string, Name), LPS_SETTER(std::string const &), LPS_GETTER(std::string))
@@ -167,6 +174,13 @@ public:
   LINN_PROPERTY_CREATE_H(int, SimpleCount)
   LINN_PROPERTY_CREATE_H(LPS_SCREF(std::string), SimpleName)
 
+};
+
+class SplitPropsPrivate
+{
+  LINN_D_CREATE(SplitProps)
+
+public:
 #define INT_TYPE   int
 #define COUNT_NAME Count
 
@@ -181,7 +195,30 @@ public:
   LINN_PROPERTY_CREATE_D(int, Posted, 1)
   LINN_PROPERTY_CREATE_D(int, SimpleCount, 5)
   LINN_PROPERTY_CREATE_D(std::string, SimpleName, "simple")
+
+  int touches = 0;
 };
+
+SplitProps::SplitProps()
+    : d_ptr(std::make_unique<SplitPropsPrivate>())
+{
+  LINN_D(SplitProps);
+  d->q_ptr = this;
+}
+
+SplitProps::~SplitProps() = default;
+
+void SplitProps::touch() noexcept
+{
+  LINN_D(SplitProps);
+  ++d->touches;
+}
+
+int SplitProps::touches() const noexcept
+{
+  LINN_CONST_D(SplitProps);
+  return d->touches;
+}
 
 // MSVC evaluates `this->member()` in an in-class exception specification as
 // potentially-throwing, but the out-of-class definition as noexcept. Split-mode
@@ -210,53 +247,87 @@ public:
 
   int update_calls = 0;
 
-  Q_PROPERTY_CREATE(QPS_MEMBER(int, Count, 7), QPS_SETTER(int, QPS_POST_ACTION(Q_EMIT this->signalCount())), QPS_GETTER(int))
-  Q_PROPERTY_CREATE(QPS_MEMBER(QString, Name, QString("guest")), QPS_SETTER(QString const &, QPS_POST_ACTION(Q_EMIT this->signalName())), QPS_GETTER(QString))
+  Q_PROPERTY_CREATE(QPS_MEMBER(int, Count, 7), QPS_SETTER(int, QPS_POST_ACTION(Q_EMIT this->signalCountChanged())), QPS_GETTER(int))
+  Q_PROPERTY_CREATE(QPS_MEMBER(QString, Name, QString("guest")), QPS_SETTER(QString const &, QPS_POST_ACTION(Q_EMIT this->signalNameChanged())), QPS_GETTER(QString))
   Q_PROPERTY_CREATE(int, SimpleCount)
   Q_PROPERTY_CREATE(QPS_SCREF(QString), SimpleName)
+  Q_PROPERTY_CREATE(QPS_PAEMIT(QString), ValueEmitName)
   Q_PROPERTY_CREATE(QPS_SCREF_PAEMIT(QString), EmitName)
   Q_PROPERTY_CREATE(QPS_SCREF_PAUPEMIT(QString), UpdateEmitName)
   Q_PROPERTY_CREATE(QPS_SCREF_GOVLD_PAEMIT(QString), RefEmitName)
   Q_PROPERTY_CREATE(QPS_SCREF_GOVLD_PAUPEMIT(QString), RefUpdateEmitName)
-  Q_PROPERTY_CREATE(QPS_MEMBER(QString, ExplicitEmit, QString("seed")),
-                    QPS_SETTER(QString const &, QPS_POST_ACTION_EMIT(ExplicitEmit)),
-                    QPS_GETTER(QString))
+  Q_PROPERTY_CREATE(QPS_MEMBER(QString, ExplicitEmit, QString("seed")), QPS_SETTER(QString const &, QPS_POST_ACTION_EMIT(ExplicitEmit)), QPS_GETTER(QString))
 };
+
+class QtSplitPropsPrivate;
 
 class QtSplitProps : public QObject
 {
   Q_OBJECT
+  Q_Q_CREATE(QtSplitProps)
 
 public:
-  using QObject::QObject;
+  explicit QtSplitProps(QObject *parent = nullptr);
+  ~QtSplitProps() override;
 
-  void update() noexcept { ++update_calls; }
-
-  int update_calls = 0;
+  void update() noexcept;
+  [[nodiscard]] int updateCalls() const noexcept;
 
   Q_PROPERTY_CREATE_H(QPS_MEMBER(int, Count), QPS_SETTER(int), QPS_GETTER(int))
   Q_PROPERTY_CREATE_H(QPS_MEMBER(QString, Name), QPS_SETTER(QString const &), QPS_GETTER(QString))
   Q_PROPERTY_CREATE_H(int, SimpleCount)
   Q_PROPERTY_CREATE_H(QPS_SCREF(QString), SimpleName)
+  Q_PROPERTY_CREATE_H(QPS_PAEMIT(QString), ValueEmitName)
   Q_PROPERTY_CREATE_H(QPS_SCREF_PAEMIT(QString), EmitName)
   Q_PROPERTY_CREATE_H(QPS_SCREF_PAUPEMIT(QString), UpdateEmitName)
   Q_PROPERTY_CREATE_H(QPS_SCREF_GOVLD_PAEMIT(QString), RefEmitName)
   Q_PROPERTY_CREATE_H(QPS_SCREF_GOVLD_PAUPEMIT(QString), RefUpdateEmitName)
+};
 
+class QtSplitPropsPrivate
+{
+  Q_D_CREATE(QtSplitProps)
+
+public:
   Q_PROPERTY_CREATE_D(int, Count, 7)
   Q_PROPERTY_CREATE_D(QString, Name, QString("guest"))
   Q_PROPERTY_CREATE_D(int, SimpleCount, 5)
   Q_PROPERTY_CREATE_D(QString, SimpleName, QString("simple"))
+  Q_PROPERTY_CREATE_D(QString, ValueEmitName, QString("value-emit-default"))
   Q_PROPERTY_CREATE_D(QString, EmitName, QString("emit-default"))
   Q_PROPERTY_CREATE_D(QString, UpdateEmitName, QString("update-emit-default"))
   Q_PROPERTY_CREATE_D(QString, RefEmitName, QString("ref-emit-default"))
   Q_PROPERTY_CREATE_D(QString, RefUpdateEmitName, QString("ref-update-emit-default"))
+
+  int update_calls = 0;
 };
 
-Q_PROPERTY_CREATE_CPP(QtSplitProps, QPS_MEMBER(int, Count), QPS_SETTER(int, QPS_POST_ACTION(Q_EMIT this->signalCount())), QPS_GETTER(int))
-Q_PROPERTY_CREATE_CPP(QtSplitProps, QPS_MEMBER(QString, Name), QPS_SETTER(QString const &, QPS_POST_ACTION(Q_EMIT this->signalName())), QPS_GETTER(QString))
+QtSplitProps::QtSplitProps(QObject *parent)
+    : QObject(parent), d_ptr(std::make_unique<QtSplitPropsPrivate>())
+{
+  LINN_D(QtSplitProps);
+  d->q_ptr = this;
+}
+
+QtSplitProps::~QtSplitProps() = default;
+
+void QtSplitProps::update() noexcept
+{
+  LINN_D(QtSplitProps);
+  ++d->update_calls;
+}
+
+int QtSplitProps::updateCalls() const noexcept
+{
+  LINN_CONST_D(QtSplitProps);
+  return d->update_calls;
+}
+
+Q_PROPERTY_CREATE_CPP(QtSplitProps, QPS_MEMBER(int, Count), QPS_SETTER(int, QPS_POST_ACTION(Q_EMIT this->signalCountChanged())), QPS_GETTER(int))
+Q_PROPERTY_CREATE_CPP(QtSplitProps, QPS_MEMBER(QString, Name), QPS_SETTER(QString const &, QPS_POST_ACTION(Q_EMIT this->signalNameChanged())), QPS_GETTER(QString))
 Q_PROPERTY_CREATE_CPP(QtSplitProps, int, SimpleCount)
 Q_PROPERTY_CREATE_CPP(QtSplitProps, QPS_SCREF(QString), SimpleName)
+Q_PROPERTY_CREATE_CPP(QtSplitProps, QPS_PAEMIT(QString), ValueEmitName)
 Q_PROPERTY_CREATE_CPP(QtSplitProps, QPS_SCREF_PAEMIT(QString), EmitName)
 Q_PROPERTY_CREATE_CPP(QtSplitProps, QPS_SCREF_PAUPEMIT(QString), UpdateEmitName)
 Q_PROPERTY_CREATE_CPP(QtSplitProps, QPS_SCREF_GOVLD_PAEMIT(QString), RefEmitName)
@@ -269,9 +340,7 @@ Q_PROPERTY_CREATE_CPP(QtSplitProps, QPS_SCREF_GOVLD_PAUPEMIT(QString), RefUpdate
 /// NOTIFY signal. Signal is the generated notify member, so the direct-connection
 /// overload can be used instead of a string-based SIGNAL() lookup.
 template <class Object, class Signal>
-void check_property_meta(Object *object, QMetaObject const *meta, char const *property_name,
-                         char const *type_name, char const *signal_name, Signal signal,
-                         QVariant const &first, QVariant const &second, bool expects_notify = true)
+void check_property_meta(Object *object, QMetaObject const *meta, char const *property_name, char const *type_name, char const *signal_name, Signal signal, QVariant const &first, QVariant const &second, bool expects_notify = true)
 {
   int const index = meta->indexOfProperty(property_name);
   CHECK(index >= 0);
@@ -508,7 +577,7 @@ int main(int argc, char *argv[])
 
   split.setPosted(6);
   CHECK(split.getPosted() == 6);
-  CHECK(split.touches == 1);
+  CHECK(split.touches() == 1);
 
   CHECK(split.getSimpleCount() == 5);
   split.setSimpleCount(13);
@@ -534,31 +603,26 @@ int main(int argc, char *argv[])
     CHECK(object.getCount() == 7);
     CHECK(object.getName() == QLatin1String("guest"));
     CHECK(object.getSimpleName().isEmpty());
+    CHECK(object.getValueEmitName().isEmpty());
     CHECK(object.getExplicitEmit() == QLatin1String("seed"));
-    check_property_meta(&object, &qt_test::QtInlineProps::staticMetaObject, "Count", "int", "signalCount",
-                        &qt_test::QtInlineProps::signalCount, QVariant(42), QVariant(7));
-    check_property_meta(&object, &qt_test::QtInlineProps::staticMetaObject, "Name", "QString", "signalName",
-                        &qt_test::QtInlineProps::signalName, QVariant(QStringLiteral("alice")), QVariant(QStringLiteral("bob")));
-    check_property_meta(&object, &qt_test::QtInlineProps::staticMetaObject, "SimpleCount", "int", "signalSimpleCount",
-                        &qt_test::QtInlineProps::signalSimpleCount, QVariant(21), QVariant(3), false);
-    check_property_meta(&object, &qt_test::QtInlineProps::staticMetaObject, "SimpleName", "QString", "signalSimpleName",
-                        &qt_test::QtInlineProps::signalSimpleName, QVariant(QStringLiteral("first")), QVariant(QStringLiteral("second")), false);
+
+    check_property_meta(&object, &qt_test::QtInlineProps::staticMetaObject, "Count", "int", "signalCountChanged", &qt_test::QtInlineProps::signalCountChanged, QVariant(42), QVariant(7));
+    check_property_meta(&object, &qt_test::QtInlineProps::staticMetaObject, "Name", "QString", "signalNameChanged", &qt_test::QtInlineProps::signalNameChanged, QVariant(QStringLiteral("alice")), QVariant(QStringLiteral("bob")));
+    check_property_meta(&object, &qt_test::QtInlineProps::staticMetaObject, "SimpleCount", "int", "signalSimpleCountChanged", &qt_test::QtInlineProps::signalSimpleCountChanged, QVariant(21), QVariant(3), false);
+    check_property_meta(&object, &qt_test::QtInlineProps::staticMetaObject, "SimpleName", "QString", "signalSimpleNameChanged", &qt_test::QtInlineProps::signalSimpleNameChanged, QVariant(QStringLiteral("first")), QVariant(QStringLiteral("second")), false);
+    check_property_meta(&object, &qt_test::QtInlineProps::staticMetaObject, "ValueEmitName", "QString", "signalValueEmitNameChanged", &qt_test::QtInlineProps::signalValueEmitNameChanged, QVariant(QStringLiteral("value-a")), QVariant(QStringLiteral("value-b")));
     int updates = object.update_calls;
-    check_property_meta(&object, &qt_test::QtInlineProps::staticMetaObject, "EmitName", "QString", "signalEmitName",
-                        &qt_test::QtInlineProps::signalEmitName, QVariant(QStringLiteral("a")), QVariant(QStringLiteral("b")));
+    check_property_meta(&object, &qt_test::QtInlineProps::staticMetaObject, "EmitName", "QString", "signalEmitNameChanged", &qt_test::QtInlineProps::signalEmitNameChanged, QVariant(QStringLiteral("a")), QVariant(QStringLiteral("b")));
     CHECK(object.update_calls == updates);
-    check_property_meta(&object, &qt_test::QtInlineProps::staticMetaObject, "UpdateEmitName", "QString", "signalUpdateEmitName",
-                        &qt_test::QtInlineProps::signalUpdateEmitName, QVariant(QStringLiteral("c")), QVariant(QStringLiteral("d")));
+    check_property_meta(&object, &qt_test::QtInlineProps::staticMetaObject, "UpdateEmitName", "QString", "signalUpdateEmitNameChanged", &qt_test::QtInlineProps::signalUpdateEmitNameChanged, QVariant(QStringLiteral("c")), QVariant(QStringLiteral("d")));
     CHECK(object.update_calls == updates + 2);
     updates = object.update_calls;
-    check_property_meta(&object, &qt_test::QtInlineProps::staticMetaObject, "RefEmitName", "QString", "signalRefEmitName",
-                        &qt_test::QtInlineProps::signalRefEmitName, QVariant(QStringLiteral("e")), QVariant(QStringLiteral("f")));
+    check_property_meta(&object, &qt_test::QtInlineProps::staticMetaObject, "RefEmitName", "QString", "signalRefEmitNameChanged", &qt_test::QtInlineProps::signalRefEmitNameChanged, QVariant(QStringLiteral("e")), QVariant(QStringLiteral("f")));
     CHECK(object.update_calls == updates);
-    check_property_meta(&object, &qt_test::QtInlineProps::staticMetaObject, "RefUpdateEmitName", "QString", "signalRefUpdateEmitName",
-                        &qt_test::QtInlineProps::signalRefUpdateEmitName, QVariant(QStringLiteral("g")), QVariant(QStringLiteral("h")));
+    check_property_meta(&object, &qt_test::QtInlineProps::staticMetaObject, "RefUpdateEmitName", "QString", "signalRefUpdateEmitNameChanged", &qt_test::QtInlineProps::signalRefUpdateEmitNameChanged, QVariant(QStringLiteral("g")), QVariant(QStringLiteral("h")));
     CHECK(object.update_calls == updates + 2);
-    check_property_meta(&object, &qt_test::QtInlineProps::staticMetaObject, "ExplicitEmit", "QString", "signalExplicitEmit",
-                        &qt_test::QtInlineProps::signalExplicitEmit, QVariant(QStringLiteral("x")), QVariant(QStringLiteral("y")));
+    check_property_meta(&object, &qt_test::QtInlineProps::staticMetaObject, "ExplicitEmit", "QString", "signalExplicitEmitChanged", &qt_test::QtInlineProps::signalExplicitEmitChanged, QVariant(QStringLiteral("x")), QVariant(QStringLiteral("y")));
+
     object.setCount(9);
     CHECK(object.getCount() == 9);
     object.setName(QStringLiteral("carol"));
@@ -567,6 +631,8 @@ int main(int argc, char *argv[])
     CHECK(object.getSimpleCount() == 12);
     object.setSimpleName(QStringLiteral("inline-simple"));
     CHECK(object.getSimpleName() == QLatin1String("inline-simple"));
+    object.setValueEmitName(QStringLiteral("value-emit"));
+    CHECK(object.getValueEmitName() == QLatin1String("value-emit"));
     object.setEmitName(QStringLiteral("emit"));
     CHECK(object.getEmitName() == QLatin1String("emit"));
     object.setUpdateEmitName(QStringLiteral("update-emit"));
@@ -583,32 +649,28 @@ int main(int argc, char *argv[])
     CHECK(object.getName() == QLatin1String("guest"));
     CHECK(object.getSimpleCount() == 5);
     CHECK(object.getSimpleName() == QLatin1String("simple"));
+    CHECK(object.getValueEmitName() == QLatin1String("value-emit-default"));
     CHECK(object.getEmitName() == QLatin1String("emit-default"));
     CHECK(object.getUpdateEmitName() == QLatin1String("update-emit-default"));
     CHECK(object.getRefEmitName() == QLatin1String("ref-emit-default"));
     CHECK(object.getRefUpdateEmitName() == QLatin1String("ref-update-emit-default"));
-    check_property_meta(&object, &qt_test::QtSplitProps::staticMetaObject, "Count", "int", "signalCount",
-                        &qt_test::QtSplitProps::signalCount, QVariant(42), QVariant(7));
-    check_property_meta(&object, &qt_test::QtSplitProps::staticMetaObject, "Name", "QString", "signalName",
-                        &qt_test::QtSplitProps::signalName, QVariant(QStringLiteral("alice")), QVariant(QStringLiteral("bob")));
-    check_property_meta(&object, &qt_test::QtSplitProps::staticMetaObject, "SimpleCount", "int", "signalSimpleCount",
-                        &qt_test::QtSplitProps::signalSimpleCount, QVariant(21), QVariant(3), false);
-    check_property_meta(&object, &qt_test::QtSplitProps::staticMetaObject, "SimpleName", "QString", "signalSimpleName",
-                        &qt_test::QtSplitProps::signalSimpleName, QVariant(QStringLiteral("first")), QVariant(QStringLiteral("second")), false);
-    int updates = object.update_calls;
-    check_property_meta(&object, &qt_test::QtSplitProps::staticMetaObject, "EmitName", "QString", "signalEmitName",
-                        &qt_test::QtSplitProps::signalEmitName, QVariant(QStringLiteral("a")), QVariant(QStringLiteral("b")));
-    CHECK(object.update_calls == updates);
-    check_property_meta(&object, &qt_test::QtSplitProps::staticMetaObject, "UpdateEmitName", "QString", "signalUpdateEmitName",
-                        &qt_test::QtSplitProps::signalUpdateEmitName, QVariant(QStringLiteral("c")), QVariant(QStringLiteral("d")));
-    CHECK(object.update_calls == updates + 2);
-    updates = object.update_calls;
-    check_property_meta(&object, &qt_test::QtSplitProps::staticMetaObject, "RefEmitName", "QString", "signalRefEmitName",
-                        &qt_test::QtSplitProps::signalRefEmitName, QVariant(QStringLiteral("e")), QVariant(QStringLiteral("f")));
-    CHECK(object.update_calls == updates);
-    check_property_meta(&object, &qt_test::QtSplitProps::staticMetaObject, "RefUpdateEmitName", "QString", "signalRefUpdateEmitName",
-                        &qt_test::QtSplitProps::signalRefUpdateEmitName, QVariant(QStringLiteral("g")), QVariant(QStringLiteral("h")));
-    CHECK(object.update_calls == updates + 2);
+
+    check_property_meta(&object, &qt_test::QtSplitProps::staticMetaObject, "Count", "int", "signalCountChanged", &qt_test::QtSplitProps::signalCountChanged, QVariant(42), QVariant(7));
+    check_property_meta(&object, &qt_test::QtSplitProps::staticMetaObject, "Name", "QString", "signalNameChanged", &qt_test::QtSplitProps::signalNameChanged, QVariant(QStringLiteral("alice")), QVariant(QStringLiteral("bob")));
+    check_property_meta(&object, &qt_test::QtSplitProps::staticMetaObject, "SimpleCount", "int", "signalSimpleCountChanged", &qt_test::QtSplitProps::signalSimpleCountChanged, QVariant(21), QVariant(3), false);
+    check_property_meta(&object, &qt_test::QtSplitProps::staticMetaObject, "SimpleName", "QString", "signalSimpleNameChanged", &qt_test::QtSplitProps::signalSimpleNameChanged, QVariant(QStringLiteral("first")), QVariant(QStringLiteral("second")), false);
+    check_property_meta(&object, &qt_test::QtSplitProps::staticMetaObject, "ValueEmitName", "QString", "signalValueEmitNameChanged", &qt_test::QtSplitProps::signalValueEmitNameChanged, QVariant(QStringLiteral("value-a")), QVariant(QStringLiteral("value-b")));
+    int updates = object.updateCalls();
+    check_property_meta(&object, &qt_test::QtSplitProps::staticMetaObject, "EmitName", "QString", "signalEmitNameChanged", &qt_test::QtSplitProps::signalEmitNameChanged, QVariant(QStringLiteral("a")), QVariant(QStringLiteral("b")));
+    CHECK(object.updateCalls() == updates);
+    check_property_meta(&object, &qt_test::QtSplitProps::staticMetaObject, "UpdateEmitName", "QString", "signalUpdateEmitNameChanged", &qt_test::QtSplitProps::signalUpdateEmitNameChanged, QVariant(QStringLiteral("c")), QVariant(QStringLiteral("d")));
+    CHECK(object.updateCalls() == updates + 2);
+    updates = object.updateCalls();
+    check_property_meta(&object, &qt_test::QtSplitProps::staticMetaObject, "RefEmitName", "QString", "signalRefEmitNameChanged", &qt_test::QtSplitProps::signalRefEmitNameChanged, QVariant(QStringLiteral("e")), QVariant(QStringLiteral("f")));
+    CHECK(object.updateCalls() == updates);
+    check_property_meta(&object, &qt_test::QtSplitProps::staticMetaObject, "RefUpdateEmitName", "QString", "signalRefUpdateEmitNameChanged", &qt_test::QtSplitProps::signalRefUpdateEmitNameChanged, QVariant(QStringLiteral("g")), QVariant(QStringLiteral("h")));
+    CHECK(object.updateCalls() == updates + 2);
+
     object.setCount(11);
     CHECK(object.getCount() == 11);
     object.setName(QStringLiteral("dave"));
@@ -617,6 +679,8 @@ int main(int argc, char *argv[])
     CHECK(object.getSimpleCount() == 14);
     object.setSimpleName(QStringLiteral("split-simple"));
     CHECK(object.getSimpleName() == QLatin1String("split-simple"));
+    object.setValueEmitName(QStringLiteral("split-value-emit"));
+    CHECK(object.getValueEmitName() == QLatin1String("split-value-emit"));
     object.setEmitName(QStringLiteral("split-emit"));
     CHECK(object.getEmitName() == QLatin1String("split-emit"));
     object.setUpdateEmitName(QStringLiteral("split-update-emit"));
