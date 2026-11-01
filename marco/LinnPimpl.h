@@ -37,11 +37,11 @@
     return q_ptr;                                           \
   }
 
-#define LINN_D(CLASS) auto *const d = d_func()
-#define LINN_Q(CLASS) auto *const q = q_func()
+#define LINN_D(CLASS) CLASS##Private *const d = d_func()
+#define LINN_Q(CLASS) CLASS##Private *const q = q_func()
 
-#define LINN_CONST_D(CLASS) auto const *const d = d_func()
-#define LINN_CONST_Q(CLASS) auto const *const q = q_func()
+#define LINN_CONST_D(CLASS) CLASS##Private const *const d = d_func()
+#define LINN_CONST_Q(CLASS) CLASS##Private const *const q = q_func()
 
 #define LINN_Q_CREATE(CLASS)             \
                                          \

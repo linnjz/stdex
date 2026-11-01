@@ -108,14 +108,17 @@ LINN_ALWAYS_INLINE void assign_property(Member &member, SetType &&value) noexcep
 #  define LINN_PROPERTY_HELPER_SETTER_PREFIX Set
 #  define LINN_PROPERTY_HELPER_GETTER_PREFIX Get
 #  define LINN_PROPERTY_HELPER_SIGNAL_PREFIX Signal
+#  define LINN_PROPERTY_HELPER_SIGNAL_SUFFIX Changed
 #elif defined(LINN_PROPERTY_ACCESSOR_PREFIX_CAMEL)
 #  define LINN_PROPERTY_HELPER_SETTER_PREFIX set
 #  define LINN_PROPERTY_HELPER_GETTER_PREFIX get
 #  define LINN_PROPERTY_HELPER_SIGNAL_PREFIX signal
+#  define LINN_PROPERTY_HELPER_SIGNAL_SUFFIX Changed
 #elif defined(LINN_PROPERTY_ACCESSOR_PREFIX_SNAKE)
 #  define LINN_PROPERTY_HELPER_SETTER_PREFIX set_
 #  define LINN_PROPERTY_HELPER_GETTER_PREFIX get_
 #  define LINN_PROPERTY_HELPER_SIGNAL_PREFIX signal_
+#  define LINN_PROPERTY_HELPER_SIGNAL_SUFFIX _changed
 #endif
 
 #define LINN_PROPERTY_HELPER_STRATEGY_TAG_EXTRA_QT_PROPERTY             ~
@@ -336,7 +339,7 @@ public:                                                                         
       MEMBER_TYPE, MEMBER_NAME,                                                                                                                  \
       LINN_CAT(LINN_PROPERTY_HELPER_SETTER_PREFIX, MEMBER_NAME),                                                                                 \
       LINN_CAT(LINN_PROPERTY_HELPER_GETTER_PREFIX, MEMBER_NAME),                                                                                 \
-      LINN_CAT(LINN_PROPERTY_HELPER_SIGNAL_PREFIX, MEMBER_NAME))                                                                                 \
+      LINN_CAT3(LINN_PROPERTY_HELPER_SIGNAL_PREFIX, MEMBER_NAME, LINN_PROPERTY_HELPER_SIGNAL_SUFFIX))                                            \
   LINN_PROPERTY_HELPER_CREATE_DISPATCH(                                                                                                          \
       MEMBER_TYPE, MEMBER_NAME, MEMBER_DEFAULT_VALUE, SET_TYPE, CONTRACT_DESC, POST_ACTION_DESC, GETTER_DESC)
 
@@ -345,15 +348,22 @@ public:                                                                         
       MEMBER_TYPE, MEMBER_NAME,                                                                                                                    \
       LINN_CAT(LINN_PROPERTY_HELPER_SETTER_PREFIX, MEMBER_NAME),                                                                                   \
       LINN_CAT(LINN_PROPERTY_HELPER_GETTER_PREFIX, MEMBER_NAME),                                                                                   \
-      LINN_CAT(LINN_PROPERTY_HELPER_SIGNAL_PREFIX, MEMBER_NAME))                                                                                   \
+      LINN_CAT3(LINN_PROPERTY_HELPER_SIGNAL_PREFIX, MEMBER_NAME, LINN_PROPERTY_HELPER_SIGNAL_SUFFIX))                                              \
   LINN_PROPERTY_HELPER_CREATE_H_DISPATCH(                                                                                                          \
       MEMBER_TYPE, MEMBER_NAME, MEMBER_DEFAULT_VALUE, SET_TYPE, CONTRACT_DESC, POST_ACTION_DESC, GETTER_DESC)
 
 #define LINN_PROPERTY_HELPER_QT_POST_EMIT(MEMBER_NAME) \
-  (Q_EMIT this->LINN_CAT(LINN_PROPERTY_HELPER_SIGNAL_PREFIX, MEMBER_NAME)())
+  (Q_EMIT this->LINN_CAT3(LINN_PROPERTY_HELPER_SIGNAL_PREFIX, MEMBER_NAME, LINN_PROPERTY_HELPER_SIGNAL_SUFFIX)())
 
 #define LINN_PROPERTY_HELPER_QT_POST_UPDATE_EMIT(MEMBER_NAME) \
-  (this->update(), Q_EMIT this->LINN_CAT(LINN_PROPERTY_HELPER_SIGNAL_PREFIX, MEMBER_NAME)())
+  (this->update(), Q_EMIT this->LINN_CAT3(LINN_PROPERTY_HELPER_SIGNAL_PREFIX, MEMBER_NAME, LINN_PROPERTY_HELPER_SIGNAL_SUFFIX)())
+
+#define LINN_PROPERTY_HELPER_CREATE_CPP_KIND_LPST_QT_PAEMIT(CLASS, TYPE, MEMBER_NAME) \
+  LINN_PROPERTY_HELPER_CREATE_CPP_BODY(                                               \
+      CLASS, TYPE, MEMBER_NAME, TYPE,                                                 \
+      LINN_CAT(LINN_PROPERTY_HELPER_SETTER_PREFIX, MEMBER_NAME),                      \
+      ((void) 0), LINN_PROPERTY_HELPER_QT_POST_EMIT(MEMBER_NAME),                     \
+      TYPE, LINN_CAT(LINN_PROPERTY_HELPER_GETTER_PREFIX, MEMBER_NAME), 1)
 
 #define LINN_PROPERTY_HELPER_CREATE_CPP_KIND_LPST_QT_SCREF_PAEMIT(CLASS, TYPE, MEMBER_NAME) \
   LINN_PROPERTY_HELPER_CREATE_CPP_BODY(                                                     \
@@ -384,15 +394,15 @@ public:                                                                         
       TYPE, LINN_CAT(LINN_PROPERTY_HELPER_GETTER_PREFIX, MEMBER_NAME), 0)
 
 #define LINN_PROPERTY_HELPER_CREATE_QT_SIMPLE_BODY(TYPE, MEMBER_NAME, SETTER_TYPE, POST_NOEXCEPT, POST_RUN, GETTER_KIND) \
-  LINN_PROPERTY_HELPER_CREATE_QT_DECL(                                                                                    \
-      TYPE, MEMBER_NAME,                                                                                                  \
-      LINN_CAT(LINN_PROPERTY_HELPER_SETTER_PREFIX, MEMBER_NAME),                                                          \
-      LINN_CAT(LINN_PROPERTY_HELPER_GETTER_PREFIX, MEMBER_NAME),                                                          \
-      LINN_CAT(LINN_PROPERTY_HELPER_SIGNAL_PREFIX, MEMBER_NAME))                                                          \
-  LINN_PROPERTY_HELPER_CREATE_BODY(                                                                                       \
-      TYPE, MEMBER_NAME, LINN_PROPERTY_HELPER_MEMBER_INIT_NONE, SETTER_TYPE,                                              \
-      LINN_CAT(LINN_PROPERTY_HELPER_SETTER_PREFIX, MEMBER_NAME),                                                          \
-      true, ((void) 0), POST_NOEXCEPT, POST_RUN,                                                                          \
+  LINN_PROPERTY_HELPER_CREATE_QT_DECL(                                                                                   \
+      TYPE, MEMBER_NAME,                                                                                                 \
+      LINN_CAT(LINN_PROPERTY_HELPER_SETTER_PREFIX, MEMBER_NAME),                                                         \
+      LINN_CAT(LINN_PROPERTY_HELPER_GETTER_PREFIX, MEMBER_NAME),                                                         \
+      LINN_CAT3(LINN_PROPERTY_HELPER_SIGNAL_PREFIX, MEMBER_NAME, LINN_PROPERTY_HELPER_SIGNAL_SUFFIX))                    \
+  LINN_PROPERTY_HELPER_CREATE_BODY(                                                                                      \
+      TYPE, MEMBER_NAME, LINN_PROPERTY_HELPER_MEMBER_INIT_NONE, SETTER_TYPE,                                             \
+      LINN_CAT(LINN_PROPERTY_HELPER_SETTER_PREFIX, MEMBER_NAME),                                                         \
+      true, ((void) 0), POST_NOEXCEPT, POST_RUN,                                                                         \
       TYPE, LINN_CAT(LINN_PROPERTY_HELPER_GETTER_PREFIX, MEMBER_NAME), GETTER_KIND)
 
 #define LINN_PROPERTY_HELPER_CREATE_QT_SIMPLE_0(TYPE, MEMBER_NAME) \
@@ -402,11 +412,17 @@ public:                                                                         
   LINN_CAT(LINN_PROPERTY_HELPER_QT_SIMPLE_SECOND_, LINN_IS_PAREN(LINN_PAIR_SECOND(PAIR)))(PAIR, MEMBER_NAME)
 
 #define LINN_PROPERTY_HELPER_QT_SIMPLE_SECOND_0(PAIR, MEMBER_NAME) \
-  LINN_PROPERTY_HELPER_CREATE_QT_SIMPLE_BODY(                     \
+  LINN_PROPERTY_HELPER_CREATE_QT_SIMPLE_BODY(                      \
       LINN_PAIR_FIRST(PAIR), MEMBER_NAME, LINN_PAIR_SECOND(PAIR), true, ((void) 0), 1)
 
 #define LINN_PROPERTY_HELPER_QT_SIMPLE_SECOND_1(PAIR, MEMBER_NAME) \
   LINN_CAT(LINN_PROPERTY_HELPER_QT_SIMPLE_KIND_, LINN_UNPAREN(LINN_PAIR_SECOND(PAIR)))(LINN_PAIR_FIRST(PAIR), MEMBER_NAME)
+
+#define LINN_PROPERTY_HELPER_QT_SIMPLE_KIND_LPST_QT_PAEMIT(TYPE, MEMBER_NAME) \
+  LINN_PROPERTY_HELPER_CREATE_QT_SIMPLE_BODY(                                 \
+      TYPE, MEMBER_NAME, TYPE,                                                \
+      noexcept(LINN_PROPERTY_HELPER_QT_POST_EMIT(MEMBER_NAME)),               \
+      LINN_PROPERTY_HELPER_QT_POST_EMIT(MEMBER_NAME), 1)
 
 #define LINN_PROPERTY_HELPER_QT_SIMPLE_KIND_LPST_QT_SCREF_PAEMIT(TYPE, MEMBER_NAME) \
   LINN_PROPERTY_HELPER_CREATE_QT_SIMPLE_BODY(                                       \
@@ -432,15 +448,15 @@ public:                                                                         
       noexcept(LINN_PROPERTY_HELPER_QT_POST_UPDATE_EMIT(MEMBER_NAME)),                      \
       LINN_PROPERTY_HELPER_QT_POST_UPDATE_EMIT(MEMBER_NAME), 0)
 
-#define LINN_PROPERTY_HELPER_CREATE_H_QT_SIMPLE_BODY(TYPE, MEMBER_NAME, SETTER_TYPE, GETTER_KIND) \
-  LINN_PROPERTY_HELPER_CREATE_H_QT_DECL(                                                          \
-      TYPE, MEMBER_NAME,                                                                          \
-      LINN_CAT(LINN_PROPERTY_HELPER_SETTER_PREFIX, MEMBER_NAME),                                  \
-      LINN_CAT(LINN_PROPERTY_HELPER_GETTER_PREFIX, MEMBER_NAME),                                  \
-      LINN_CAT(LINN_PROPERTY_HELPER_SIGNAL_PREFIX, MEMBER_NAME))                                  \
-  LINN_PROPERTY_HELPER_CREATE_H_BODY(                                                             \
-      TYPE, MEMBER_NAME, SETTER_TYPE,                                                             \
-      LINN_CAT(LINN_PROPERTY_HELPER_SETTER_PREFIX, MEMBER_NAME),                                  \
+#define LINN_PROPERTY_HELPER_CREATE_H_QT_SIMPLE_BODY(TYPE, MEMBER_NAME, SETTER_TYPE, GETTER_KIND)     \
+  LINN_PROPERTY_HELPER_CREATE_H_QT_DECL(                                                              \
+      TYPE, MEMBER_NAME,                                                                              \
+      LINN_CAT(LINN_PROPERTY_HELPER_SETTER_PREFIX, MEMBER_NAME),                                      \
+      LINN_CAT(LINN_PROPERTY_HELPER_GETTER_PREFIX, MEMBER_NAME),                                      \
+      LINN_CAT3(LINN_PROPERTY_HELPER_SIGNAL_PREFIX, MEMBER_NAME, LINN_PROPERTY_HELPER_SIGNAL_SUFFIX)) \
+  LINN_PROPERTY_HELPER_CREATE_H_BODY(                                                                 \
+      TYPE, MEMBER_NAME, SETTER_TYPE,                                                                 \
+      LINN_CAT(LINN_PROPERTY_HELPER_SETTER_PREFIX, MEMBER_NAME),                                      \
       TYPE, LINN_CAT(LINN_PROPERTY_HELPER_GETTER_PREFIX, MEMBER_NAME), GETTER_KIND)
 
 #define LINN_PROPERTY_HELPER_CREATE_H_QT_SIMPLE_0(TYPE, MEMBER_NAME) \
@@ -455,6 +471,9 @@ public:                                                                         
 
 #define LINN_PROPERTY_HELPER_CREATE_H_QT_SIMPLE_SECOND_1(PAIR, MEMBER_NAME) \
   LINN_CAT(LINN_PROPERTY_HELPER_CREATE_H_QT_KIND_, LINN_UNPAREN(LINN_PAIR_SECOND(PAIR)))(LINN_PAIR_FIRST(PAIR), MEMBER_NAME)
+
+#define LINN_PROPERTY_HELPER_CREATE_H_QT_KIND_LPST_QT_PAEMIT(TYPE, MEMBER_NAME) \
+  LINN_PROPERTY_HELPER_CREATE_H_QT_SIMPLE_BODY(TYPE, MEMBER_NAME, TYPE, 1)
 
 #define LINN_PROPERTY_HELPER_CREATE_H_QT_KIND_LPST_QT_SCREF_PAEMIT(TYPE, MEMBER_NAME) \
   LINN_PROPERTY_HELPER_CREATE_H_QT_SIMPLE_BODY(TYPE, MEMBER_NAME, TYPE const &, 1)
@@ -512,7 +531,7 @@ public:                                                                         
   void CLASS::SETTER_NAME(SET_TYPE MEMBER_NAME)                                                                                                               \
   {                                                                                                                                                           \
     PRE_CHECK;                                                                                                                                                \
-    ::linn_property_detail::assign_property<MEMBER_TYPE, SET_TYPE>(m_##MEMBER_NAME, std::forward<SET_TYPE>(MEMBER_NAME));                                     \
+    ::linn_property_detail::assign_property<MEMBER_TYPE, SET_TYPE>(d_func()->m_##MEMBER_NAME, std::forward<SET_TYPE>(MEMBER_NAME));                           \
     POST_RUN;                                                                                                                                                 \
   }                                                                                                                                                           \
   LINN_PROPERTY_HELPER_CPP_GETTER_##GETTER_KIND(CLASS, MEMBER_TYPE, MEMBER_NAME, GET_TYPE, GETTER_NAME)
@@ -520,17 +539,17 @@ public:                                                                         
 #define LINN_PROPERTY_HELPER_CPP_GETTER_1(CLASS, MEMBER_TYPE, MEMBER_NAME, GET_TYPE, GETTER_NAME) \
   GET_TYPE CLASS::GETTER_NAME() const noexcept(std::is_nothrow_copy_constructible_v<GET_TYPE>)    \
   {                                                                                               \
-    return m_##MEMBER_NAME;                                                                       \
+    return d_func()->m_##MEMBER_NAME;                                                             \
   }
 
 #define LINN_PROPERTY_HELPER_CPP_GETTER_0(CLASS, MEMBER_TYPE, MEMBER_NAME, GET_TYPE, GETTER_NAME) \
   MEMBER_TYPE const &CLASS::GETTER_NAME() const & noexcept                                        \
   {                                                                                               \
-    return m_##MEMBER_NAME;                                                                       \
+    return d_func()->m_##MEMBER_NAME;                                                             \
   }                                                                                               \
   MEMBER_TYPE CLASS::GETTER_NAME() && noexcept(std::is_nothrow_move_constructible_v<MEMBER_TYPE>) \
   {                                                                                               \
-    return std::move(m_##MEMBER_NAME);                                                            \
+    return std::move(d_func()->m_##MEMBER_NAME);                                                  \
   }
 
 
@@ -742,21 +761,45 @@ private:                                                                        
 
 /**
  * @brief Qt/moc aliases for property and enum generation.
+ * 
+ * @code
+ * Q_PROPERTY_CREATE(QPS_MEMBER(MEMBER_TYPE, MEMBER_NAME, MEMBER_NAME_DEFAULT_VALUE), QPS_SETTER(SETTER_TYPE, QPS_PRE_CONTRACT(PRE_COND, PRE_CONTRACT_HANDLE), QPS_POST_ACTION(POST_FUNCS)), QPS_GETTER(GETTER_TYPE))
+ * Q_PROPERTY_CREATE [_CPP] ( [CLASS,] QPS_MEMBER(MEMBER_TYPE, MEMBER_NAME), QPS_SETTER(SETTER_TYPE, QPS_PRE_CONTRACT(PRE_COND, PRE_CONTRACT_HANDLE), QPS_POST_ACTION(POST_FUNCS)), QPS_GETTER(GETTER_TYPE))
+ * Q_PROPERTY_CREATE [_CPP] ( [CLASS,] QPS_MEMBER(MEMBER_TYPE, MEMBER_NAME), QPS_SETTER(SETTER_TYPE, QPS_PRE_CONTRACT(PRE_COND, PRE_CONTRACT_HANDLE)), QPS_GETTER(GETTER_TYPE))
+ * Q_PROPERTY_CREATE [_CPP] ( [CLASS,] QPS_MEMBER(MEMBER_TYPE, MEMBER_NAME), QPS_SETTER(SETTER_TYPE, QPS_PRE_CONTRACT(PRE_COND)), QPS_GETTER(GETTER_TYPE))
+ * Q_PROPERTY_CREATE [_CPP] ( [CLASS,] QPS_MEMBER(MEMBER_TYPE, MEMBER_NAME), QPS_SETTER(SETTER_TYPE, QPS_POST_ACTION(POST_FUNCS)), QPS_GETTER(GETTER_TYPE))
+ * Q_PROPERTY_CREATE [_CPP] ( [CLASS,] QPS_MEMBER(MEMBER_TYPE, MEMBER_NAME), QPS_SETTER(SETTER_TYPE), QPS_GETTER(GETTER_TYPE))
+ * Q_PROPERTY_CREATE [_CPP] ( [CLASS,] QPS_MEMBER(MEMBER_TYPE, MEMBER_NAME), QPS_SETTER(SETTER_TYPE), QPS_GETTER_REF_QUALIFIED_OVERLOAD)
+ * 
+ * Q_PROPERTY_CREATE [_CPP] ( [CLASS,] TYPE, MEMBER_NAME)
+ * Q_PROPERTY_CREATE [_CPP] ( [CLASS,] QPS_SCREF(TYPE), MEMBER_NAME)
+ * Q_PROPERTY_CREATE [_CPP] ( [CLASS,] QPS_PAEMIT(TYPE), MEMBER_NAME)
+ * Q_PROPERTY_CREATE [_CPP] ( [CLASS,] QPS_SCREF_PAEMIT(TYPE), MEMBER_NAME)
+ * Q_PROPERTY_CREATE [_CPP] ( [CLASS,] QPS_SCREF_PAUPEMIT(TYPE), MEMBER_NAME)
+ * Q_PROPERTY_CREATE [_CPP] ( [CLASS,] QPS_SCREF_GOVLD_PAEMIT(TYPE), MEMBER_NAME)
+ * Q_PROPERTY_CREATE [_CPP] ( [CLASS,] QPS_SCREF_GOVLD_PAUPEMIT(TYPE), MEMBER_NAME)
+ * 
+ * Q_PROPERTY_CREATE_H(TYPE, MEMBER_NAME)
+ * Q_PROPERTY_CREATE_H(QPS_SCREF(TYPE), MEMBER_NAME)
+ * Q_PROPERTY_CREATE_h(QPS_MEMBER(MEMBER_TYPE, MEMBER_NAME), QPS_SETTER(SETTER_TYPE), QPS_GETTER(GETTER_TYPE))
+ * Q_PROPERTY_CREATE_h(QPS_MEMBER(MEMBER_TYPE, MEMBER_NAME), QPS_SETTER(SETTER_TYPE), QPS_GETTER_REF_QUALIFIED_OVERLOAD)
+ * @endcode
  */
 #if defined(QT_DEBUG) || defined(QT_NO_DEBUG) || defined(QT_CORE_LIB) || defined(QT_WIDGETS_LIB) || defined(Q_OBJECT)
-#  define QPS_MEMBER(...)        LINN_PROPERTY_HELPER_SELECT_2_3(__VA_ARGS__, LPS_MEMBER_3, LPS_MEMBER_2)(__VA_ARGS__)
-#  define QPS_SCREF(TYPE)        (TYPE, TYPE const &)
+#  define QPS_MEMBER(...)                LINN_PROPERTY_HELPER_SELECT_2_3(__VA_ARGS__, LPS_MEMBER_3, LPS_MEMBER_2)(__VA_ARGS__)
+#  define QPS_SCREF(TYPE)                (TYPE, TYPE const &)
+#  define QPS_PAEMIT(TYPE)               (TYPE, (LPST_QT_PAEMIT))
 // In split mode use the same shortcut in _H and _CPP: _H declares the accessor
 // shape, while _CPP applies the post action.
 #  define QPS_SCREF_PAEMIT(TYPE)         (TYPE, (LPST_QT_SCREF_PAEMIT))
 #  define QPS_SCREF_PAUPEMIT(TYPE)       (TYPE, (LPST_QT_SCREF_PAUPEMIT))
 #  define QPS_SCREF_GOVLD_PAEMIT(TYPE)   (TYPE, (LPST_QT_SCREF_GOVLD_PAEMIT))
 #  define QPS_SCREF_GOVLD_PAUPEMIT(TYPE) (TYPE, (LPST_QT_SCREF_GOVLD_PAUPEMIT))
-#  define QPS_GETTER(GET_TYPE)   (LINN_PROPERTY_HELPER_STRATEGY_TAG_GETTER_VALUE_TYPE, GET_TYPE)
-#  define QPS_SETTER(...)        LINN_PROPERTY_HELPER_SELECT_1_2_3(__VA_ARGS__, LPS_SETTER_3, LPS_SETTER_2, LPS_SETTER_1)(__VA_ARGS__)
-#  define QPS_PRE_CONTRACTD(...) LINN_PROPERTY_HELPER_SELECT_1_2(__VA_ARGS__, LPS_PRE_CONTRACTD_2, LPS_PRE_CONTRACTD_1)(__VA_ARGS__)
-#  define QPS_PRE_CONTRACT(...)  LINN_PROPERTY_HELPER_SELECT_1_2(__VA_ARGS__, LPS_PRE_CONTRACT_2, LPS_PRE_CONTRACT_1)(__VA_ARGS__)
-#  define QPS_POST_ACTION(...)   (LINN_PROPERTY_HELPER_STRATEGY_TAG_SETTER_POST_ACTION, (__VA_ARGS__))
+#  define QPS_GETTER(GET_TYPE)           (LINN_PROPERTY_HELPER_STRATEGY_TAG_GETTER_VALUE_TYPE, GET_TYPE)
+#  define QPS_SETTER(...)                LINN_PROPERTY_HELPER_SELECT_1_2_3(__VA_ARGS__, LPS_SETTER_3, LPS_SETTER_2, LPS_SETTER_1)(__VA_ARGS__)
+#  define QPS_PRE_CONTRACTD(...)         LINN_PROPERTY_HELPER_SELECT_1_2(__VA_ARGS__, LPS_PRE_CONTRACTD_2, LPS_PRE_CONTRACTD_1)(__VA_ARGS__)
+#  define QPS_PRE_CONTRACT(...)          LINN_PROPERTY_HELPER_SELECT_1_2(__VA_ARGS__, LPS_PRE_CONTRACT_2, LPS_PRE_CONTRACT_1)(__VA_ARGS__)
+#  define QPS_POST_ACTION(...)           (LINN_PROPERTY_HELPER_STRATEGY_TAG_SETTER_POST_ACTION, (__VA_ARGS__))
 
 #  define QPS_GETTER_REF_QUALIFIED_OVERLOAD (LINN_PROPERTY_HELPER_STRATEGY_TAG_GETTER_REF_QUALIFIED_OVERLOAD, ~)
 

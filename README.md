@@ -85,7 +85,7 @@ static_assert(LINN_IS_PAREN((x)) == 1);
 
 - `LINN_DISABLE_COPY` / `LINN_DISABLE_MOVE` / `LINN_DISABLE_COPY_MOVE`.
 - `LINN_Q_CREATE(CLASS)` adds `std::unique_ptr<CLASS##Private> d_ptr`, declares `explicit CLASS(CLASS##Private &)`, disables copying, and generates `d_func()`. `LINN_D_CREATE(CLASS)` adds the `CLASS *q_ptr` back-pointer and generates `q_func()`.
-- `LINN_D(CLASS)` / `LINN_Q(CLASS)` bind local raw pointers; `LINN_CONST_D` / `LINN_CONST_Q` bind const pointers.
+- `LINN_D(CLASS)` / `LINN_Q(CLASS)` bind local `CLASS##Private *const` pointers; `LINN_CONST_D` / `LINN_CONST_Q` bind `CLASS##Private const *const` pointers.
 - Qt aliases `Q_Q_CREATE`, `Q_D_CREATE`, `Q_CONST_D`, `Q_CONST_Q` are available when Qt is detected.
 
 ```cpp
@@ -146,8 +146,8 @@ Generates a private member plus setter/getter from strategy descriptors. Entry p
 | --- | --- |
 | `LINN_PROPERTY_CREATE(...)` | Inline member, setter, and getter. |
 | `LINN_PROPERTY_CREATE_H(...)` | Setter/getter declarations in a header; the member comes from `_D`. |
-| `LINN_PROPERTY_CREATE_CPP(CLASS, ...)` | Out-of-line setter/getter definitions. |
-| `LINN_PROPERTY_CREATE_D(TYPE, NAME[, DEFAULT])` | Private member definition for split mode; the only split form that accepts a default. |
+| `LINN_PROPERTY_CREATE_CPP(CLASS, ...)` | Out-of-line setter/getter definitions; accesses the member through `d_func()`, so split mode requires PIMPL. |
+| `LINN_PROPERTY_CREATE_D(TYPE, NAME[, DEFAULT])` | Private member definition for split mode, normally inside `CLASS##Private`; the only split form that accepts a default. |
 
 Pre/post hooks belong in the `_CPP` descriptor; `_H` rejects them with a `static_assert`. A two-argument shortcut expands to the three-descriptor form (with a leading `CLASS` argument for `_CPP`):
 
@@ -179,7 +179,7 @@ Accessor names use exactly one of `LINN_PROPERTY_ACCESSOR_PREFIX_CAMEL` (default
 
 Define `LINN_PROPERTY_ENABLE_SHORT_MACROS` for `MEMBER`, `SETTER`, `GETTER`, `GETTER_REF_QUALIFIED_OVERLOAD`, `PRE_CONTRACT`, `PRE_CONTRACTD`, `POST_ACTION`, `PROPERTY_CREATE`, `PROPERTY_CREATE_H`, `PROPERTY_CREATE_CPP`, and `PROPERTY_CREATE_D`.
 
-Qt mode is enabled automatically when Qt is detected. It adds `Q_PROPERTY_CREATE`, `Q_PROPERTY_CREATE_H`, `Q_PROPERTY_CREATE_CPP`, and `Q_PROPERTY_CREATE_D`, which emit `Q_PROPERTY(... NOTIFY signalName)` plus the signal declaration. `QPS_*` mirrors `LPS_*`, with `QPS_POST_ACTION_EMIT`, `QPS_POST_ACTION_UPDATE`, and `QPS_POST_ACTION_UPDATEMIT` as Qt-specific post actions. `QPS_SCREF(TYPE)` declares the NOTIFY signal without emitting it. `QPS_SCREF_PAEMIT(TYPE)`, `QPS_SCREF_PAUPEMIT(TYPE)`, `QPS_SCREF_GOVLD_PAEMIT(TYPE)`, and `QPS_SCREF_GOVLD_PAUPEMIT(TYPE)` add emit or update+emit post actions; the `GOVLD` variants use a ref-qualified overload getter. In split mode pass the same shortcut to `_H` and `_CPP`: `_H` declares the accessor shape, while `_CPP` applies the post action.
+Qt mode is enabled automatically when Qt is detected. It adds `Q_PROPERTY_CREATE`, `Q_PROPERTY_CREATE_H`, `Q_PROPERTY_CREATE_CPP`, and `Q_PROPERTY_CREATE_D`, which emit `Q_PROPERTY(... NOTIFY signalNameChanged)` plus the `signalNameChanged` signal declaration. The signal name follows the accessor prefix: `SignalNameChanged` with `LINN_PROPERTY_ACCESSOR_PREFIX_PASCAL`, or `signal_name_changed` with `_SNAKE`. `QPS_*` mirrors `LPS_*`, with `QPS_POST_ACTION_EMIT`, `QPS_POST_ACTION_UPDATE`, and `QPS_POST_ACTION_UPDATEMIT` as Qt-specific post actions. `QPS_SCREF(TYPE)` declares the NOTIFY signal without emitting it; `QPS_PAEMIT(TYPE)` is the by-value emitting counterpart. `QPS_SCREF_PAEMIT(TYPE)`, `QPS_SCREF_PAUPEMIT(TYPE)`, `QPS_SCREF_GOVLD_PAEMIT(TYPE)`, and `QPS_SCREF_GOVLD_PAUPEMIT(TYPE)` add emit or update+emit post actions; the `GOVLD` variants use a ref-qualified overload getter. In split mode pass the same shortcut to `_H` and `_CPP`: `_H` declares the accessor shape, while `_CPP` applies the post action.
 
 Inline example:
 
@@ -191,16 +191,38 @@ class Counter {
 };
 ```
 
+Split mode requires the owning class to be PIMPL-backed (`LINN_Q_CREATE` / `LINN_D_CREATE`): `_H` declares the accessors in the public class, `_D` defines the member in `CLASS##Private`, and `_CPP` reads and writes it through `d_func()`.
+
 Split example:
 
 ```cpp
 // header
+class SamplePrivate;
+
 class Sample {
+  LINN_Q_CREATE(Sample)
+public:
+  Sample();
+  ~Sample();
+
   LINN_PROPERTY_CREATE_H(LPS_MEMBER(int, Count), LPS_SETTER(int), LPS_GETTER(int))
+};
+
+class SamplePrivate {
+  LINN_D_CREATE(Sample)
+public:
   LINN_PROPERTY_CREATE_D(int, Count, 0)
 };
 
 // source
+Sample::Sample() : d_ptr(std::make_unique<SamplePrivate>())
+{
+  LINN_D(Sample);
+  d->q_ptr = this;
+}
+
+Sample::~Sample() = default;
+
 LINN_PROPERTY_CREATE_CPP(Sample, LPS_MEMBER(int, Count),
                          LPS_SETTER(int, LPS_PRE_CONTRACT(Count >= 0)),
                          LPS_GETTER(int))
@@ -215,6 +237,7 @@ class Counter : public QObject {
 public:
   void update() noexcept {}
 
+  Q_PROPERTY_CREATE(QPS_PAEMIT(QString), Title)
   Q_PROPERTY_CREATE(QPS_SCREF_PAEMIT(QString), Name)
   Q_PROPERTY_CREATE(QPS_SCREF_GOVLD_PAUPEMIT(QString), Label)
 };
