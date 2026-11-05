@@ -353,14 +353,24 @@ struct inline_storage : public Traits
       std::start_lifetime(stack_);
 #else
       if (std::is_constant_evaluated()) {
-#if defined(__GNUC__) && !defined(__clang__)
-#  pragma GCC diagnostic push
-#  pragma GCC diagnostic ignored "-Wterminate"
-#endif
+#  if defined(__clang__)
+#    pragma clang diagnostic push
+#    pragma clang diagnostic ignored "-Wterminate"
+#  elif defined(__GNUC__) && !defined(__clang__)
+#    pragma GCC diagnostic push
+#    pragma GCC diagnostic ignored "-Wterminate"
+#  elif defined(_MSC_VER) && !defined(__clang__)
+#    pragma warning(push)
+#    pragma warning(disable : 4297)
+#  endif
         throw "stdex: stack storage requires std::start_lifetime for constant evaluation";
-#if defined(__GNUC__) && !defined(__clang__)
-#  pragma GCC diagnostic pop
-#endif
+#  if defined(__clang__)
+#    pragma clang diagnostic pop
+#  elif defined(__GNUC__) && !defined(__clang__)
+#    pragma GCC diagnostic pop
+#  elif defined(_MSC_VER) && !defined(__clang__)
+#    pragma warning(pop)
+#  endif
       } else {
         std::construct_at(&stack_);
       }
@@ -406,14 +416,24 @@ struct inline_storage : public Traits
       std::start_lifetime(stack_);
 #else
       if (std::is_constant_evaluated()) {
-#if defined(__GNUC__) && !defined(__clang__)
-#  pragma GCC diagnostic push
-#  pragma GCC diagnostic ignored "-Wterminate"
-#endif
+#  if defined(__clang__)
+#    pragma clang diagnostic push
+#    pragma clang diagnostic ignored "-Wterminate"
+#  elif defined(__GNUC__) && !defined(__clang__)
+#    pragma GCC diagnostic push
+#    pragma GCC diagnostic ignored "-Wterminate"
+#  elif defined(_MSC_VER) && !defined(__clang__)
+#    pragma warning(push)
+#    pragma warning(disable : 4297)
+#  endif
         throw "stdex: stack storage requires std::start_lifetime for constant evaluation";
-#if defined(__GNUC__) && !defined(__clang__)
-#  pragma GCC diagnostic pop
-#endif
+#  if defined(__clang__)
+#    pragma clang diagnostic pop
+#  elif defined(__GNUC__) && !defined(__clang__)
+#    pragma GCC diagnostic pop
+#  elif defined(_MSC_VER) && !defined(__clang__)
+#    pragma warning(pop)
+#  endif
       } else {
         std::construct_at(&stack_);
       }
@@ -613,6 +633,17 @@ struct inline_storage : public Traits
 #endif
 
 
+#if defined(__clang__)
+#  pragma clang diagnostic push
+#  pragma clang diagnostic ignored "-Wpadded"
+#elif defined(__GNUC__) && !defined(__clang__)
+#  pragma GCC diagnostic push
+#  pragma GCC diagnostic ignored "-Wpadded"
+#elif defined(_MSC_VER) && !defined(__clang__)
+#  pragma warning(push)
+#  pragma warning(disable : 4324) // 'structure was padded due to alignment specifier'
+#endif
+
   struct alignas(16) heap_block
   {
     pointer elements_ptr_     = nullptr;
@@ -637,6 +668,14 @@ struct inline_storage : public Traits
     constexpr stack_block() noexcept {}
     constexpr ~stack_block() noexcept {}
   };
+
+#if defined(__clang__)
+#  pragma clang diagnostic pop
+#elif defined(__GNUC__) && !defined(__clang__)
+#  pragma GCC diagnostic pop
+#elif defined(_MSC_VER) && !defined(__clang__)
+#  pragma warning(pop)
+#endif
 
   union
   {

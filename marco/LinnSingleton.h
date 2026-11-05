@@ -102,49 +102,118 @@
 namespace linn_singleton_detail
 {
 /**
- * @brief Trivially destructible wrapper around a static std::unique_ptr<T>.
+ * @brief Trivially destructible pointer holder embedded in the singleton object.
  *
- * The unique_ptr is a static member, so this wrapper's destructor stays
- * trivial: `inline static UniqueStorage<CLASS> s_Instance` can then be
- * defined while CLASS is still incomplete. The unique_ptr itself is
- * instantiated on first use, after CLASS is complete.
+ * The pointer lives in the wrapper object itself rather than in a
+ * `UniqueStorage<T>` static member. `s_Instance` is a static data member of
+ * the exported singleton class, so DLL and EXE modules share that object. A
+ * template-level static would be emitted once per module even when the class
+ * (and its `s_InitFlag`) is imported from a DLL: the first module would set its
+ * own copy and `call_once` would then make every other module return its null
+ * copy.
  *
- * @warning Single-storage handle. Do not create a second UniqueStorage<T>,
- * since every instance shares s_Pointer.
+ * Keeping the destructor trivial also allows `inline static UniqueStorage<CLASS>
+ * s_Instance` to be declared while CLASS is still incomplete.
+ *
+ * @note
+ * This is a historical bug record. It has now been fixed, and it is intended to remind us
+ * why the current design is the way it is.
+ * Static members of a template class are not exported together with the class’s export
+ * attributes. Therefore, if a template unique_ptr static pointer is used for storage,
+ * the EXE and the DLL will each have their own copy of the static member. This conflicts
+ * with the design of a globally shared inline static std::once_flag s_InitFlag, and the
+ * result will not be as expected. See the @code @endcode example below for illustration.
+ *
+ * @code
+ * // ----------------- Application.h (in dll, EXPORT_MACRO = __declspec(dllexport)) -----------------
+ * class EXPORT_MACRO Application
+ * {
+ *   // The storage member of the macro-expanded UniqueStorage<CLASS> is a unique_ptr.
+ *   Q_SINGLETON_CREATE(QSS_UNIQUE(Application))
+ * private:
+ *   Application();
+ *   ~Application();
+ * };
+ *
+ * // ----------------- YourCustomMainWindow.h (also in dll) -----------------
+ * class EXPORT_MACRO YourCustomMainWindow : public QMainWindow
+ * {
+ * public:
+ *   YourCustomMainWindow(QObject *parent = nullptr);
+ *   // ...
+ * };
+ *
+ * // ----------------- YourCustomMainWindow.cpp (in dll) -----------------
+ * YourCustomMainWindow::YourCustomMainWindow(QObject *parent)
+ *   : QMainWindow(parent)
+ * {
+ *   // WRONG with the old template-static implementation(UniqueStorage<T> member is inline static unique_ptr<T>):
+ *   // EXE already called getInstance() once, so the shared
+ *   // Application::s_InitFlag is "done". call_once short-circuits and
+ *   // returns the DLL's own UniqueStorage<Application>::s_Pointer, which
+ *   // was never written -> nullptr -> crash here.
+ *   Application::getInstance()->doSomething();
+ * }
+ *
+ * class MainWindow : public YourCustomMainWindow { //... };
+ * // ----------------- main.cpp (in the EXE) -----------------
+ * int main(int argc, char *argv[])
+ * {
+ *   QApplication a(argc, argv);
+ *
+ *   // EXE instantiates getInstance(): writes the pointer into the EXE's
+ *   // copy of UniqueStorage<Application>::s_Pointer, and marks the
+ *   // shared Application::s_InitFlag as completed.
+ *   Application::getInstance()->init();
+ *
+ *   MainWindow w; // constructs YourCustomMainWindow inside the DLL
+ *   w.show();
+ *   return a.exec();
+ * }
+ * @endcode
  */
 template <typename T>
 struct UniqueStorage
 {
-  inline static std::unique_ptr<T> s_Pointer { nullptr };
+  T *m_Pointer { nullptr };
 
   UniqueStorage() = default;
 
   template <typename U, typename = std::enable_if_t<std::is_convertible_v<U *, T *>>>
   UniqueStorage &operator= (std::unique_ptr<U> &&other) noexcept
   {
-    s_Pointer = std::move(other);
+    reset(other.release());
     return *this;
   }
 
   UniqueStorage &operator= (T *raw) noexcept
   {
-    s_Pointer.reset(raw);
+    reset(raw);
     return *this;
   }
 
   UniqueStorage &operator= (std::nullptr_t) noexcept
   {
-    s_Pointer.reset();
+    reset(nullptr);
     return *this;
   }
 
   [[nodiscard]] T *get() const noexcept
   {
-    return s_Pointer.get();
+    return m_Pointer;
   }
 
   UniqueStorage(UniqueStorage const &)             = delete;
   UniqueStorage &operator= (UniqueStorage const &) = delete;
+
+private:
+  void reset(T *pointer) noexcept
+  {
+    if (m_Pointer != pointer) {
+      std::default_delete<T> {}(m_Pointer);
+      m_Pointer = pointer;
+    }
+  }
 };
 
 ///definitions of helper macros
@@ -166,8 +235,9 @@ struct UniqueStorage
  * definition) instead of deferring them to the end of the TU. CLASS is still
  * incomplete there, so default_delete<CLASS>'s sizeof check fires
  * (https://github.com/llvm/llvm-project/issues/74963). UniqueStorage keeps
- * the unique_ptr behind a trivially destructible wrapper and instantiates it
- * on first use, after CLASS is complete.
+ * the raw pointer behind a trivially destructible wrapper and performs
+ * `default_delete` only from member functions instantiated after CLASS is
+ * complete.
  *
  * @note SHARED does not need this: ~shared_ptr does not require complete T.
  */

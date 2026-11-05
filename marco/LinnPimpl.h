@@ -32,7 +32,7 @@
   {                                                         \
     return q_ptr;                                           \
   }                                                         \
-  [[nodiscard]] inline const CLASS *q_func() const noexcept \
+  [[nodiscard]] inline CLASS const *q_func() const noexcept \
   {                                                         \
     return q_ptr;                                           \
   }
@@ -50,7 +50,6 @@ protected:                               \
   std::unique_ptr<CLASS##Private> d_ptr; \
                                          \
 private:                                 \
-  LINN_DISABLE_COPY(CLASS)               \
   LINN_DECLARE_PRIVATE(CLASS)
 
 #define LINN_D_CREATE(CLASS) \

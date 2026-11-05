@@ -2715,7 +2715,7 @@ void test_insert_overloads()
   CHECK(!r2.second);
   CHECK_EQ(r2.first->second, 100);
 
-  auto r3 = t.insert(std::pair<short, short> { 11, 110 });
+  auto r3 = t.insert(std::pair<short, short> { short { 11 }, short { 110 } });
   CHECK(r3.second);
   CHECK_EQ(r3.first->second, 110);
 
