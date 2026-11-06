@@ -20,6 +20,7 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdio>
+#include <cstring>
 #include <iterator>
 #include <memory>
 #include <new>
@@ -153,6 +154,11 @@ struct copy_only
   ~copy_only() { --live; }
   static void reset() { live = 0; copies = 0; }
   static void reset_counts() { copies = 0; }
+};
+
+struct value_init_aggregate
+{
+  int value;
 };
 
 struct throw_default
@@ -1784,6 +1790,19 @@ static void test_vc_plain_loop()
   CHECK(move_tracker::live == 0);
 }
 
+static void test_vc_plain_aggregate()
+{
+  SECTION("value_construct/plain: aggregate members are value-initialized");
+  alignas(value_init_aggregate) unsigned char buf[2 * sizeof(value_init_aggregate)];
+  std::memset(buf, 0xA5, sizeof(buf));
+  auto* dst = reinterpret_cast<value_init_aggregate*>(buf);
+
+  auto r = stdex::uninitialized_value_construct(dst, dst + 2);
+  CHECK((r == dst + 2));
+  CHECK(dst[0].value == 0 && dst[1].value == 0);
+  std::destroy(dst, dst + 2);
+}
+
 static void test_vc_plain_throw_backout()
 {
   SECTION("value_construct/plain: throwing default ctor destroys prefix");
@@ -2012,6 +2031,14 @@ static void test_vc_n_plain()
   }
   CHECK(move_tracker::live == 0);
 
+  alignas(value_init_aggregate) unsigned char abuf[2 * sizeof(value_init_aggregate)];
+  std::memset(abuf, 0xA5, sizeof(abuf));
+  auto* adst = reinterpret_cast<value_init_aggregate*>(abuf);
+  auto ra    = stdex::uninitialized_value_construct_n(adst, 2);
+  CHECK((ra == adst + 2));
+  CHECK(adst[0].value == 0 && adst[1].value == 0);
+  std::destroy(adst, adst + 2);
+
 #if defined(__cpp_lib_constexpr_new)
   constexpr auto run = [] {
     int d[2] = { 9, 9 };
@@ -2048,6 +2075,14 @@ static void test_vc_n_alloc()
   std::destroy(cdst, cdst + 2);
   cal.deallocate(cdst, 2);
 
+  std::allocator<value_init_aggregate> aal;
+  value_init_aggregate* ap = aal.allocate(2);
+  auto rap = stdex::uninitialized_value_construct_n(ap, 2, aal);
+  CHECK((rap == ap + 2));
+  CHECK(ap[0].value == 0 && ap[1].value == 0);
+  std::destroy(ap, ap + 2);
+  aal.deallocate(ap, 2);
+
   fancy_alloc<int> fal;
   fancy_ptr<int> fdst = fal.allocate(2);
   auto rf = stdex::uninitialized_value_construct_n(fdst, 2, fal);
@@ -2055,6 +2090,292 @@ static void test_vc_n_alloc()
   CHECK(fdst[0] == 0 && fdst[1] == 0);
   std::destroy(std::to_address(fdst), std::to_address(fdst + 2));
   fal.deallocate(fdst, 2);
+}
+
+// ------------------------------------------------------------------
+// uninitialized_default_construct, plain (no allocator)
+// ------------------------------------------------------------------
+static void test_dc_plain_trivial()
+{
+  SECTION("default_construct/plain: trivial fast path leaves storage untouched");
+  alignas(int) unsigned char buf[3 * sizeof(int)];
+  std::memset(buf, 0xA5, sizeof(buf));
+  int* dst = reinterpret_cast<int*>(buf);
+
+  auto r = stdex::uninitialized_default_construct(dst, dst + 3);
+  CHECK((r == dst + 3));
+  CHECK(buf[0] == 0xA5 && buf[sizeof(int)] == 0xA5 && buf[2 * sizeof(int)] == 0xA5);
+
+  auto r0 = stdex::uninitialized_default_construct(dst, dst);
+  CHECK((r0 == dst));
+
+  int raw[2] = { 1, 2 };
+  fancy_ptr<int> fdst(raw);
+  auto rf = stdex::uninitialized_default_construct(fdst, fdst + 2);
+  CHECK((rf == fdst + 2));
+}
+
+static void test_dc_plain_nontrivial()
+{
+  SECTION("default_construct/plain: non-trivial default construction");
+  throw_default::reset();
+  {
+    alignas(throw_default) unsigned char buf[3 * sizeof(throw_default)];
+    auto* dst = reinterpret_cast<throw_default*>(buf);
+
+    auto r = stdex::uninitialized_default_construct(dst, dst + 3);
+    CHECK((r == dst + 3));
+    CHECK(throw_default::alive == 3);
+    CHECK(throw_default::built == 3);
+    CHECK(dst[0].value == 7 && dst[1].value == 7 && dst[2].value == 7);
+
+    std::destroy(dst, dst + 3);
+    CHECK(throw_default::destroyed == 3);
+  }
+  CHECK(throw_default::alive == 0);
+}
+
+static void test_dc_plain_throw_backout()
+{
+  SECTION("default_construct/plain: throwing default ctor destroys prefix");
+  throw_default::reset();
+  {
+    throw_default::throw_at = 2; // third construction throws
+    alignas(throw_default) unsigned char buf[4 * sizeof(throw_default)];
+    auto* dst = reinterpret_cast<throw_default*>(buf);
+
+    bool threw = false;
+    try {
+      (void) stdex::uninitialized_default_construct(dst, dst + 4);
+    } catch (std::runtime_error const&) {
+      threw = true;
+    }
+    CHECK(threw);
+    CHECK(throw_default::alive == 0);
+    CHECK(throw_default::destroyed == 2);
+  }
+  CHECK(throw_default::alive == 0);
+}
+
+static void test_dc_n_plain()
+{
+  SECTION("default_construct_n/plain: count/empty/negative/nontrivial");
+  throw_default::reset();
+  {
+    alignas(throw_default) unsigned char buf[3 * sizeof(throw_default)];
+    auto* dst = reinterpret_cast<throw_default*>(buf);
+
+    auto r = stdex::uninitialized_default_construct_n(dst, 3);
+    CHECK((r == dst + 3));
+    CHECK(throw_default::alive == 3);
+    CHECK(throw_default::built == 3);
+    CHECK(dst[0].value == 7 && dst[2].value == 7);
+
+    std::destroy(dst, dst + 3);
+  }
+  CHECK(throw_default::alive == 0);
+
+  alignas(int) unsigned char ibuf[sizeof(int)];
+  int* idst = reinterpret_cast<int*>(ibuf);
+  auto r0   = stdex::uninitialized_default_construct_n(idst, 0);
+  CHECK((r0 == idst));
+  auto rn = stdex::uninitialized_default_construct_n(idst, -3);
+  CHECK((rn == idst));
+
+  int raw[2] = { 1, 2 };
+  fancy_ptr<int> fidst(raw);
+  auto rf = stdex::uninitialized_default_construct_n(fidst, 2);
+  CHECK((rf == fidst + 2));
+
+#if defined(__cpp_lib_constexpr_new)
+  constexpr auto run = [] {
+    int d[2] = { 9, 9 };
+    auto r = stdex::uninitialized_default_construct_n(d, 2);
+    return r == d + 2 && d[0] == 9 && d[1] == 9; // trivial default-init writes nothing
+  };
+  static_assert(run());
+  CHECK(run());
+#else
+  CHECK(true);
+#endif
+}
+
+// ------------------------------------------------------------------
+// uninitialized_default_construct with raw allocator
+// ------------------------------------------------------------------
+static void test_dc_alloc_raw_trivial()
+{
+  SECTION("default_construct/alloc-raw: trivial fast path + custom construct");
+  std::allocator<int> al;
+  int* dst = al.allocate(3);
+  auto r   = stdex::uninitialized_default_construct(dst, dst + 3, al);
+  CHECK((r == dst + 3));
+  al.deallocate(dst, 3);
+
+  counting_alloc<int>::reset();
+  counting_alloc<int> cal;
+  int* cdst = cal.allocate(3);
+  auto rc   = stdex::uninitialized_default_construct(cdst, cdst + 3, cal);
+  CHECK((rc == cdst + 3));
+  CHECK(counting_alloc<int>::construct_count == 3); // custom construct must not be skipped
+  std::destroy(cdst, cdst + 3);
+  cal.deallocate(cdst, 3);
+}
+
+static void test_dc_alloc_raw_nontrivial()
+{
+  SECTION("default_construct/alloc-raw: non-trivial via counting allocator");
+  counting_alloc<throw_default>::reset();
+  throw_default::reset();
+  {
+    counting_alloc<throw_default> al;
+    throw_default* dst = al.allocate(2);
+    auto r             = stdex::uninitialized_default_construct(dst, dst + 2, al);
+    CHECK((r == dst + 2));
+    CHECK(counting_alloc<throw_default>::construct_count == 2);
+    CHECK(throw_default::alive == 2);
+    CHECK(dst[0].value == 7 && dst[1].value == 7);
+    std::destroy(dst, dst + 2);
+    al.deallocate(dst, 2);
+  }
+  CHECK(throw_default::alive == 0);
+}
+
+static void test_dc_alloc_raw_throw_backout()
+{
+  SECTION("default_construct/alloc-raw: throwing ctor calls allocator destroy");
+  counting_alloc<throw_default>::reset();
+  throw_default::reset();
+  {
+    counting_alloc<throw_default> al;
+    throw_default::throw_at = 1;
+    throw_default* dst      = al.allocate(3);
+    bool threw              = false;
+    try {
+      (void) stdex::uninitialized_default_construct(dst, dst + 3, al);
+    } catch (std::runtime_error const&) {
+      threw = true;
+    }
+    CHECK(threw);
+    CHECK(counting_alloc<throw_default>::construct_count == 2);
+    CHECK(counting_alloc<throw_default>::destroy_count == 1);
+    CHECK(throw_default::alive == 0);
+    al.deallocate(dst, 3);
+  }
+  CHECK(throw_default::alive == 0);
+}
+
+// ------------------------------------------------------------------
+// uninitialized_default_construct with fancy allocator
+// ------------------------------------------------------------------
+static void test_dc_alloc_fancy_trivial()
+{
+  SECTION("default_construct/alloc-fancy: trivial fast path + custom construct");
+  fancy_alloc<int> al;
+  fancy_ptr<int> dst = al.allocate(3);
+  auto r             = stdex::uninitialized_default_construct(dst, dst + 3, al);
+  CHECK((r == dst + 3));
+  al.deallocate(dst, 3);
+
+  fancy_counting_alloc<int>::reset();
+  fancy_counting_alloc<int> cal;
+  fancy_ptr<int> cdst = cal.allocate(2);
+  auto rc             = stdex::uninitialized_default_construct(cdst, cdst + 2, cal);
+  CHECK((rc == cdst + 2));
+  CHECK(fancy_counting_alloc<int>::construct_count == 2);
+  std::destroy(std::to_address(cdst), std::to_address(cdst + 2));
+  cal.deallocate(cdst, 2);
+}
+
+static void test_dc_alloc_fancy_nontrivial()
+{
+  SECTION("default_construct/alloc-fancy: non-trivial via fancy");
+  fancy_alloc<throw_default> al;
+  throw_default::reset();
+  {
+    fancy_ptr<throw_default> dst = al.allocate(3);
+    auto r                       = stdex::uninitialized_default_construct(dst, dst + 3, al);
+    CHECK((r == dst + 3));
+    CHECK(throw_default::alive == 3);
+    CHECK(dst[0].value == 7 && dst[2].value == 7);
+    std::destroy(std::to_address(dst), std::to_address(dst + 3));
+    al.deallocate(dst, 3);
+  }
+  CHECK(throw_default::alive == 0);
+}
+
+static void test_dc_alloc_fancy_throw_custom_destroy()
+{
+  SECTION("default_construct/alloc-fancy: throw -> custom destroy on prefix");
+  fancy_counting_alloc<throw_default>::reset();
+  throw_default::reset();
+  {
+    fancy_counting_alloc<throw_default> al;
+    throw_default::throw_at = 1;
+    fancy_ptr<throw_default> dst = al.allocate(3);
+    bool threw                   = false;
+    try {
+      (void) stdex::uninitialized_default_construct(dst, dst + 3, al);
+    } catch (std::runtime_error const&) {
+      threw = true;
+    }
+    CHECK(threw);
+    CHECK(fancy_counting_alloc<throw_default>::destroy_count == 1);
+    CHECK(throw_default::alive == 0);
+    al.deallocate(dst, 3);
+  }
+  CHECK(throw_default::alive == 0);
+}
+
+// ------------------------------------------------------------------
+// default_construct_n (plain + alloc)
+// ------------------------------------------------------------------
+static void test_dc_n_alloc()
+{
+  SECTION("default_construct_n/alloc: raw + fancy");
+  std::allocator<int> al;
+  int* dst = al.allocate(3);
+  auto r   = stdex::uninitialized_default_construct_n(dst, 3, al);
+  CHECK((r == dst + 3));
+  auto r0 = stdex::uninitialized_default_construct_n(dst, 0, al);
+  CHECK((r0 == dst));
+  auto rn = stdex::uninitialized_default_construct_n(dst, -2, al);
+  CHECK((rn == dst));
+  al.deallocate(dst, 3);
+
+  fancy_alloc<int> fal_int;
+  fancy_ptr<int> fdst_int = fal_int.allocate(2);
+  auto rf_int             = stdex::uninitialized_default_construct_n(fdst_int, 2, fal_int);
+  CHECK((rf_int == fdst_int + 2));
+  fal_int.deallocate(fdst_int, 2);
+
+  counting_alloc<throw_default>::reset();
+  throw_default::reset();
+  {
+    counting_alloc<throw_default> cal;
+    throw_default* cdst = cal.allocate(2);
+    auto rc             = stdex::uninitialized_default_construct_n(cdst, 2, cal);
+    CHECK((rc == cdst + 2));
+    CHECK(counting_alloc<throw_default>::construct_count == 2);
+    CHECK(throw_default::alive == 2);
+    CHECK(cdst[0].value == 7 && cdst[1].value == 7);
+    std::destroy(cdst, cdst + 2);
+    cal.deallocate(cdst, 2);
+  }
+  CHECK(throw_default::alive == 0);
+
+  fancy_alloc<throw_default> fal;
+  throw_default::reset();
+  {
+    fancy_ptr<throw_default> fdst = fal.allocate(3);
+    auto rf                       = stdex::uninitialized_default_construct_n(fdst, 3, fal);
+    CHECK((rf == fdst + 3));
+    CHECK(throw_default::alive == 3);
+    CHECK(fdst[0].value == 7 && fdst[2].value == 7);
+    std::destroy(std::to_address(fdst), std::to_address(fdst + 3));
+    fal.deallocate(fdst, 3);
+  }
+  CHECK(throw_default::alive == 0);
 }
 
 // ------------------------------------------------------------------
@@ -2264,6 +2585,7 @@ int main()
   test_vc_traits();
   test_vc_plain_memset();
   test_vc_plain_loop();
+  test_vc_plain_aggregate();
   test_vc_plain_throw_backout();
   test_vc_plain_constexpr();
 
@@ -2280,6 +2602,21 @@ int main()
 
   test_vc_n_plain();
   test_vc_n_alloc();
+
+  test_dc_plain_trivial();
+  test_dc_plain_nontrivial();
+  test_dc_plain_throw_backout();
+  test_dc_n_plain();
+
+  test_dc_alloc_raw_trivial();
+  test_dc_alloc_raw_nontrivial();
+  test_dc_alloc_raw_throw_backout();
+
+  test_dc_alloc_fancy_trivial();
+  test_dc_alloc_fancy_nontrivial();
+  test_dc_alloc_fancy_throw_custom_destroy();
+
+  test_dc_n_alloc();
 
   test_copy_move_iter_equiv_traits();
   test_copy_move_iter_equiv_memcpy();

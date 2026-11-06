@@ -811,6 +811,91 @@ constexpr OutIt uninitialized_fill_n(OutIt dest_first, std::iter_difference_t<Ou
 
 template <std::forward_iterator OutIt, std::sentinel_for<OutIt> OutSent>
 requires std::default_initializable<std::iter_value_t<OutIt>>
+constexpr OutIt uninitialized_default_construct(OutIt dest_first, OutSent dest_last)
+{
+  if constexpr (std::is_trivially_default_constructible_v<std::iter_value_t<OutIt>>) {
+    auto last = std::move(dest_first);
+    std::ranges::advance(last, dest_last);
+    return last;
+  } else {
+    uninitialized_backout<OutIt> backout { std::move(dest_first) };
+    while (backout.last() != dest_last) {
+      backout.emplace_default();
+    }
+    return backout.release();
+  }
+}
+
+template <std::contiguous_iterator OutIt, std::sentinel_for<OutIt> OutSent, class Allocator>
+requires std::default_initializable<std::iter_value_t<OutIt>> &&
+         std::same_as<typename std::allocator_traits<Allocator>::value_type, std::iter_value_t<OutIt>>
+constexpr OutIt uninitialized_default_construct(OutIt dest_first, OutSent dest_last, Allocator &alloc)
+{
+  constexpr bool use_alloc = has_custom_construct<Allocator,
+                               typename std::allocator_traits<Allocator>::value_type *>;
+
+  if constexpr (std::is_trivially_default_constructible_v<std::iter_value_t<OutIt>> && !use_alloc) {
+    auto last = std::move(dest_first);
+    std::ranges::advance(last, dest_last);
+    return last;
+  } else {
+    uninitialized_backout_al<Allocator, OutIt> backout { dest_first, alloc };
+    while (backout.last() != dest_last) {
+      backout.emplace_default();
+    }
+    return backout.release();
+  }
+}
+
+template <std::forward_iterator OutIt>
+requires std::default_initializable<std::iter_value_t<OutIt>>
+constexpr OutIt uninitialized_default_construct_n(OutIt dest_first, std::iter_difference_t<OutIt> count)
+{
+  if (count <= 0) {
+    return dest_first;
+  }
+
+  if constexpr (std::is_trivially_default_constructible_v<std::iter_value_t<OutIt>>) {
+    auto last = std::move(dest_first);
+    std::ranges::advance(last, count);
+    return last;
+  } else {
+    uninitialized_backout<OutIt> backout { std::move(dest_first) };
+    for (; count > 0; --count) {
+      backout.emplace_default();
+    }
+    return backout.release();
+  }
+}
+
+template <std::contiguous_iterator OutIt, class Allocator>
+requires std::default_initializable<std::iter_value_t<OutIt>> &&
+         std::same_as<typename std::allocator_traits<Allocator>::value_type, std::iter_value_t<OutIt>>
+constexpr OutIt uninitialized_default_construct_n(OutIt dest_first, std::iter_difference_t<OutIt> count,
+                                                  Allocator &alloc)
+{
+  if (count <= 0) {
+    return dest_first;
+  }
+
+  constexpr bool use_alloc = has_custom_construct<Allocator,
+                               typename std::allocator_traits<Allocator>::value_type *>;
+
+  if constexpr (std::is_trivially_default_constructible_v<std::iter_value_t<OutIt>> && !use_alloc) {
+    auto last = std::move(dest_first);
+    std::ranges::advance(last, count);
+    return last;
+  } else {
+    uninitialized_backout_al<Allocator, OutIt> backout { dest_first, alloc };
+    for (; count > 0; --count) {
+      backout.emplace_default();
+    }
+    return backout.release();
+  }
+}
+
+template <std::forward_iterator OutIt, std::sentinel_for<OutIt> OutSent>
+requires std::default_initializable<std::iter_value_t<OutIt>>
 constexpr OutIt uninitialized_value_construct(OutIt dest_first, OutSent dest_last)
 {
   constexpr bool sized     = std::sized_sentinel_for<OutSent, OutIt>;
@@ -826,7 +911,7 @@ constexpr OutIt uninitialized_value_construct(OutIt dest_first, OutSent dest_las
 
   uninitialized_backout<OutIt> backout { std::move(dest_first) };
   while (backout.last() != dest_last) {
-    backout.emplace_default();
+    backout.emplace_back();
   }
   return backout.release();
 }
@@ -851,7 +936,7 @@ constexpr OutIt uninitialized_value_construct(OutIt dest_first, OutSent dest_las
 
   uninitialized_backout_al<Allocator, OutIt> backout { dest_first, alloc };
   while (backout.last() != dest_last) {
-    backout.emplace_default();
+    backout.emplace_back();
   }
   return backout.release();
 }
@@ -875,7 +960,7 @@ constexpr OutIt uninitialized_value_construct_n(OutIt dest_first, std::iter_diff
 
   uninitialized_backout<OutIt> backout { std::move(dest_first) };
   for (; count > 0; --count) {
-    backout.emplace_default();
+    backout.emplace_back();
   }
   return backout.release();
 }
@@ -902,7 +987,7 @@ constexpr OutIt uninitialized_value_construct_n(OutIt dest_first, std::iter_diff
 
   uninitialized_backout_al<Allocator, OutIt> backout { dest_first, alloc };
   for (; count > 0; --count) {
-    backout.emplace_default();
+    backout.emplace_back();
   }
   return backout.release();
 }
