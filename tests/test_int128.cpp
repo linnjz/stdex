@@ -463,6 +463,17 @@ static_assert(!ci_neg_one.equal_min());
 // Parked (step 3): stdex::div is not implemented yet.
 static_assert(stdex::abs(ci_neg_one) == ci_one);
 static_assert(stdex::abs(ci_min) == ci_min);
+static_assert(std::is_same_v<decltype(stdex::abs(ci_neg_one)), uint128_t>);
+static_assert(std::is_same_v<decltype(stdex::abs(std::int32_t { -7 })), std::make_unsigned_t<std::int32_t>>);
+static_assert(stdex::abs(std::int32_t { -7 }) == 7U);
+static_assert(stdex::abs(std::numeric_limits<std::int32_t>::min()) ==
+              (std::make_unsigned_t<std::int32_t> { 1 } << 31U));
+static_assert(stdex::abs(std::numeric_limits<std::int64_t>::min()) ==
+              (std::make_unsigned_t<std::int64_t> { 1 } << 63U));
+static_assert(stdex::abs(std::int8_t { -128 }) == std::make_unsigned_t<std::int8_t> { 128 });
+static_assert(uint128_t::from_u64(0x80).to_integral<std::int8_t>() == std::int8_t { -128 });
+static_assert(uint128_t::from_u64(0x8000'0000'0000'0000ULL).to_integral<std::int64_t>() ==
+              std::numeric_limits<std::int64_t>::min());
 // static_assert(stdex::div(ci_neg_one, ci_two).quot.is_zero());
 // static_assert(stdex::div(ci_neg_one, ci_two).rem == ci_neg_one);
 // static_assert(stdex::div(uint128_t::from_u64(7), cu_two).quot == cu_three);
@@ -470,9 +481,13 @@ static_assert(stdex::abs(ci_min) == ci_min);
 static_assert(stdex::gcd(uint128_t::from_u64(12), uint128_t::from_u64(18)) == uint128_t::from_u64(6));
 static_assert(stdex::gcd(int128_t::from_i64(-12), int128_t::from_i64(18)) == int128_t::from_u64(6));
 static_assert(stdex::gcd(12, uint128_t::from_u64(18)) == uint128_t::from_u64(6));
+static_assert(stdex::gcd(6, uint128_t::from_u64(4)) == uint128_t::from_u64(2));
 static_assert(stdex::lcm(uint128_t::from_u64(4), uint128_t::from_u64(6)) == uint128_t::from_u64(12));
 static_assert(stdex::lcm(int128_t::from_i64(-4), int128_t::from_i64(6)) == int128_t::from_u64(12));
 static_assert(stdex::lcm(4, int128_t::from_i64(6)) == int128_t::from_u64(12));
+static_assert(stdex::lcm(6, int128_t::from_i64(4)) == int128_t::from_u64(12));
+static_assert(std::is_same_v<std::common_type_t<int, uint128_t>, uint128_t>);
+static_assert(std::is_same_v<std::common_type_t<int, int128_t>, int128_t>);
 // static_assert(stdex::div(cu_max, cu_one).quot == cu_max);
 // static_assert(stdex::div(ci_min, ci_one).quot == ci_min);
 static_assert(stdex::gcd(cu_max, cu_max) == cu_max);
@@ -489,6 +504,13 @@ static_assert(stdex::midpoint(ci_min, ci_max) == ci_neg_one);
 static_assert(stdex::midpoint(ci_max, ci_min) == ci_zero);
 static_assert(stdex::midpoint(ci_zero, ci_min) == int128_t::from_words(0, 0xC000'0000'0000'0000ULL));
 static_assert(stdex::midpoint(ci_min, ci_zero) == int128_t::from_words(0, 0xC000'0000'0000'0000ULL));
+// std::midpoint rounds an odd sum toward the first argument: (5 + 2) / 2 -> 4.
+static_assert(stdex::midpoint(int128_t::from_i64(5), int128_t::from_i64(2)) ==
+              int128_t::from_i64(std::midpoint(5, 2)));
+static_assert(stdex::midpoint(int128_t::from_i64(-2), int128_t::from_i64(-1)) ==
+              int128_t::from_i64(std::midpoint(-2, -1)));
+static_assert(stdex::midpoint(int128_t::from_i64(-1), int128_t::from_i64(0)) ==
+              int128_t::from_i64(std::midpoint(-1, 0)));
 static_assert(stdex::pow(uint128_t::from_u64(2), 10) == uint128_t::from_u64(1024));
 static_assert(stdex::pow(uint128_t::from_u64(2), uint128_t::from_u64(10)) == uint128_t::from_u64(1024));
 static_assert(stdex::pow(int128_t::from_i64(-2), 3) == int128_t::from_i64(-8));

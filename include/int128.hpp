@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <bit>         // std::bit_cast
 #include <cassert>     // assert
 #include <charconv>    // std::to_chars
 #include <climits>     // CHAR_MAX
@@ -456,6 +457,9 @@ struct alignas(16) base128
 #endif
   }
 
+  /// Returns the object representation. The mutable overload is intended for
+  /// serialization; after writing through it, rebuild with from_le_bytes or
+  /// from_be_bytes instead of reading the value.
   [[nodiscard]] constexpr std::uint8_t *data() noexcept { return bytes; }
   [[nodiscard]] constexpr std::uint8_t const *data() const noexcept { return bytes; }
 
@@ -479,11 +483,14 @@ struct alignas(16) base128
     }
   }
 
+  /// \note Conversions to narrower types preserve the low bits of the
+  ///       destination width.
   template <standard_integral_operand T>
   [[nodiscard]] constexpr T to_integral() const noexcept
   {
     if constexpr (sizeof(T) <= 8) {
-      return static_cast<T>(lo());
+      using unsigned_type = std::make_unsigned_t<T>;
+      return std::bit_cast<T>(static_cast<unsigned_type>(lo()));
     } else {
       using unsigned_type = std::make_unsigned_t<T>;
       return static_cast<T>((static_cast<unsigned_type>(hi()) << 64U) | static_cast<unsigned_type>(lo()));
@@ -1809,6 +1816,9 @@ constexpr uint128_t::uint128_t(int128_t const &bits) noexcept
 STDEX_INT128_DEFINE_MIXED(uint128_t)
 STDEX_INT128_DEFINE_MIXED(int128_t)
 
+/// Returns the absolute value as an unsigned magnitude type.
+/// Using an unsigned result keeps the minimum value of every signed type
+/// representable instead of triggering signed overflow.
 template <class T>
 requires std::signed_integral<T> ||
          std::floating_point<T> ||
@@ -1817,6 +1827,11 @@ requires std::signed_integral<T> ||
 {
   if constexpr (std::same_as<std::remove_cvref_t<T>, int128_t>) {
     return uint128_t { value.unsigned_abs() };
+  } else if constexpr (std::signed_integral<T>) {
+    using unsigned_type = std::make_unsigned_t<T>;
+    return static_cast<unsigned_type>(value < 0
+                  ? unsigned_type { 0 } - static_cast<unsigned_type>(value)
+                  : static_cast<unsigned_type>(value));
   } else {
     return std::abs(value);
   }
@@ -1995,6 +2010,8 @@ requires (!std::is_reference_v<T>) &&
   }
 }
 
+/// \note For integral operands, an unrepresentable result and a negative
+///       exponent (except for bases 1 and -1) return `T{}`.
 template <class T, class U>
 requires (!std::is_reference_v<T>) &&
          is_int128_v<std::remove_cvref_t<T>> &&
