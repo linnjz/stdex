@@ -32,6 +32,7 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <forward_list>
 #include <iterator>
 #include <limits>
@@ -236,6 +237,38 @@ struct throw_copy {
   ~throw_copy() { --alive; }
 };
 
+// Copy ctor throws on demand; the move ctor is deliberately not noexcept so
+// move_if_noexcept and transfer_unchecked_ fall back to copying. This lets
+// swap/shrink_to_fit exercise throwing transfers, which throw_copy skips by
+// advertising a noexcept move.
+struct throw_copy_slow_move {
+  int value = 0;
+  static inline int alive = 0;
+  static inline int count = 0;
+  static inline int throw_after = 1000000;
+  static void reset() { alive = 0; count = 0; throw_after = 1000000; }
+
+  throw_copy_slow_move() { ++alive; }
+  explicit throw_copy_slow_move(int v) : value(v) { ++alive; }
+  throw_copy_slow_move(throw_copy_slow_move const& o) : value(o.value)
+  {
+    if (count++ >= throw_after) throw std::runtime_error("copy throws");
+    ++alive;
+  }
+  throw_copy_slow_move(throw_copy_slow_move&& o) noexcept(false) : value(o.value) { ++alive; }
+  throw_copy_slow_move& operator=(throw_copy_slow_move const& o) noexcept
+  {
+    value = o.value;
+    return *this;
+  }
+  throw_copy_slow_move& operator=(throw_copy_slow_move&& o) noexcept
+  {
+    value = o.value;
+    return *this;
+  }
+  ~throw_copy_slow_move() { --alive; }
+};
+
 struct throw_move {
   int value = 0;
   static inline int alive = 0;
@@ -383,6 +416,27 @@ struct leak_alloc {
   bool operator==(leak_alloc const&) const noexcept { return true; }
 };
 
+template <class T>
+struct throwing_alloc {
+  using value_type      = T;
+  using size_type       = std::size_t;
+  using difference_type = std::ptrdiff_t;
+  static inline bool fail = false;
+
+  throwing_alloc() noexcept = default;
+  template <class U>
+  throwing_alloc(throwing_alloc<U> const&) noexcept
+  {
+  }
+  T* allocate(std::size_t n)
+  {
+    if (fail) throw std::bad_alloc();
+    return static_cast<T*>(::operator new(n * sizeof(T)));
+  }
+  void deallocate(T* p, std::size_t) noexcept { ::operator delete(p); }
+  bool operator==(throwing_alloc const&) const noexcept { return true; }
+};
+
 // ------------------------------------------------------------------
 // fancy pointer harness (mirrors test_uninitialized_algorithms.cpp)
 // ------------------------------------------------------------------
@@ -512,6 +566,42 @@ struct fancy_counting_alloc {
     std::destroy_at(p);
   }
 };
+
+// Models fancy pointers whose operator->() requires a live object; std::to_address
+// must therefore never be called on the null pointer stored by an empty N == 0 block.
+template <class T>
+struct strict_fancy_ptr : fancy_ptr<T> {
+  using fancy_ptr<T>::fancy_ptr;
+
+  constexpr T* operator->() const noexcept
+  {
+    if (this->p_ == nullptr) std::abort();
+    return this->p_;
+  }
+};
+
+template <class T>
+struct strict_fancy_alloc {
+  using value_type = T;
+  using pointer = strict_fancy_ptr<T>;
+  using size_type = std::size_t;
+  using difference_type = std::ptrdiff_t;
+
+  pointer allocate(size_type n) { return pointer(static_cast<T*>(::operator new(n * sizeof(T)))); }
+  void deallocate(pointer p, size_type) noexcept { ::operator delete(p.p_); }
+};
+
+using fancy_storage = stdex::inline_storage<int, 4, fancy_alloc<int>>;
+static_assert(std::same_as<fancy_storage::iterator, int *>);
+static_assert(std::same_as<fancy_storage::const_iterator, int const *>);
+static_assert(std::same_as<decltype(std::declval<fancy_storage &>().data()), int *>);
+static_assert(std::same_as<decltype(std::declval<fancy_storage const &>().data()), int const *>);
+static_assert(std::same_as<decltype(std::declval<fancy_storage &>().begin()), int *>);
+static_assert(std::same_as<decltype(std::declval<fancy_storage const &>().begin()), int const *>);
+static_assert(std::same_as<decltype(std::declval<fancy_storage &>().end()), int *>);
+static_assert(std::same_as<decltype(std::declval<fancy_storage const &>().end()), int const *>);
+static_assert(std::contiguous_iterator<fancy_storage::iterator>);
+static_assert(std::contiguous_iterator<fancy_storage::const_iterator>);
 
 // input-only (single pass) iterator for the uncounted range path
 struct input_only_it {
@@ -1106,6 +1196,7 @@ static void test_element_primitives()
     {
       fix<track, 4> h(std::allocator<track>{});
       h.promote_to_heap_();
+      CHECK(h.is_heap() && h.size() == 0);
       h.construct_heap_n_unchecked_(3);
       CHECK(h.size() == 3 && h.is_heap());
       h.dispose_();
@@ -1117,6 +1208,22 @@ static void test_element_primitives()
       CHECK(h.data()[0].value == 1);
     }
     CHECK(track::live == 0);
+  }
+  {
+    // allocation failure after promotion leaves an empty, usable heap-state object
+    throwing_alloc<int>::fail = false;
+    fix<int, 4, throwing_alloc<int>> f((throwing_alloc<int> {}));
+    int values[2] { 1, 2 };
+    f.assign_counted_range_(values, 2);
+    throwing_alloc<int>::fail = true;
+    bool threw = false;
+    try {
+      f.assign_counted_range_(values, 6);
+    } catch (std::bad_alloc const&) { threw = true; }
+    throwing_alloc<int>::fail = false;
+    CHECK(threw && f.is_heap() && f.empty() && f.invariants());
+    f.emplace_one_at_back_(9);
+    CHECK(f.size() == 1 && f.data()[0] == 9 && f.invariants());
   }
 }
 
@@ -1613,11 +1720,131 @@ static void test_exceptions()
     }
     CHECK(throw_moveonly::alive == 0);
   }
+  {
+    // heap <-> stack swap: the second transfer copy throws; the finalizer
+    // commits the transferred prefix and hands the heap block to the other side
+    throw_copy_slow_move::reset();
+    {
+      fix<throw_copy_slow_move, 2> a(std::allocator<throw_copy_slow_move>{});
+      fix<throw_copy_slow_move, 2> b(std::allocator<throw_copy_slow_move>{});
+      a.emplace_one_at_back_(11);
+      a.emplace_one_at_back_(22);
+      a.emplace_one_at_back_(33); // spill to heap
+      b.emplace_one_at_back_(44);
+      b.emplace_one_at_back_(55);
+      CHECK(a.is_heap() && a.size() == 3 && b.is_stack() && b.size() == 2);
+      throw_copy_slow_move::count = 0;
+      throw_copy_slow_move::throw_after = 1; // second transfer copy throws
+      bool threw = false;
+      try {
+        a.swap(b);
+      } catch (std::runtime_error const&) { threw = true; }
+      CHECK(threw);
+      throw_copy_slow_move::throw_after = 1000000;
+      CHECK(a.invariants() && b.invariants());
+      CHECK(a.is_stack() && a.size() == 1 && a.data()[0].value == 44);
+      CHECK(b.is_heap() && b.size() == 3);
+      CHECK(b.data()[0].value == 11 && b.data()[1].value == 22 && b.data()[2].value == 33);
+      CHECK(throw_copy_slow_move::alive == static_cast<int>(a.size() + b.size()));
+    }
+    CHECK(throw_copy_slow_move::alive == 0);
+    throw_copy_slow_move::reset();
+  }
+  {
+    // stack <-> stack swap: the common prefix swaps, then the longer tail's
+    // second copy throws; both sizes commit to the reached state
+    throw_copy_slow_move::reset();
+    {
+      fix<throw_copy_slow_move, 4> a(std::allocator<throw_copy_slow_move>{});
+      fix<throw_copy_slow_move, 4> b(std::allocator<throw_copy_slow_move>{});
+      a.emplace_one_at_back_(11);
+      a.emplace_one_at_back_(22);
+      b.emplace_one_at_back_(44);
+      b.emplace_one_at_back_(55);
+      b.emplace_one_at_back_(66);
+      b.emplace_one_at_back_(77);
+      CHECK(a.is_stack() && a.size() == 2 && b.is_stack() && b.size() == 4);
+      throw_copy_slow_move::count = 0;
+      throw_copy_slow_move::throw_after = 1; // second tail copy throws
+      bool threw = false;
+      try {
+        a.swap(b);
+      } catch (std::runtime_error const&) { threw = true; }
+      CHECK(threw);
+      throw_copy_slow_move::throw_after = 1000000;
+      CHECK(a.invariants() && b.invariants());
+      CHECK(a.size() == 3 && b.size() == 2);
+      CHECK(a.data()[0].value == 44 && a.data()[1].value == 55 && a.data()[2].value == 66);
+      CHECK(b.data()[0].value == 11 && b.data()[1].value == 22);
+      CHECK(throw_copy_slow_move::alive == static_cast<int>(a.size() + b.size()));
+    }
+    CHECK(throw_copy_slow_move::alive == 0);
+    throw_copy_slow_move::reset();
+  }
+  {
+    // shrink_to_fit heap -> stack: the second copy throws; the restore guard
+    // reinstates the heap block so capacity and values survive a retry
+    throw_copy_slow_move::reset();
+    {
+      fix<throw_copy_slow_move, 4> f(std::allocator<throw_copy_slow_move>{});
+      for (int i = 1; i <= 6; ++i) f.emplace_one_at_back_(i);
+      f.clear();
+      for (int i = 1; i <= 3; ++i) f.emplace_one_at_back_(i);
+      CHECK(f.is_heap() && f.size() == 3);
+      auto const old_capacity = f.capacity();
+      throw_copy_slow_move::count = 0;
+      throw_copy_slow_move::throw_after = 1; // second transfer copy throws
+      bool threw = false;
+      try {
+        f.shrink_to_fit();
+      } catch (std::runtime_error const&) { threw = true; }
+      CHECK(threw);
+      throw_copy_slow_move::throw_after = 1000000;
+      CHECK(f.invariants());
+      CHECK(f.is_heap() && f.size() == 3 && f.capacity() == old_capacity);
+      CHECK(f.data()[0].value == 1 && f.data()[1].value == 2 && f.data()[2].value == 3);
+      CHECK(throw_copy_slow_move::alive == 3);
+      throw_copy_slow_move::count = 0;
+      f.shrink_to_fit(); // retry succeeds
+      CHECK(f.invariants() && f.is_stack() && f.size() == 3);
+      CHECK(f.data()[0].value == 1 && f.data()[1].value == 2 && f.data()[2].value == 3);
+    }
+    CHECK(throw_copy_slow_move::alive == 0);
+    throw_copy_slow_move::reset();
+  }
+  {
+    // shrink_to_fit heap -> stack with a move-only type: the second move
+    // throws, leaving the heap active (basic guarantee) and retryable
+    throw_moveonly::reset();
+    {
+      fix<throw_moveonly, 4> f(std::allocator<throw_moveonly>{});
+      for (int i = 1; i <= 6; ++i) f.emplace_one_at_back_(i);
+      f.clear();
+      for (int i = 1; i <= 3; ++i) f.emplace_one_at_back_(i);
+      CHECK(f.is_heap() && f.size() == 3);
+      auto const old_capacity = f.capacity();
+      throw_moveonly::count = 0;
+      throw_moveonly::throw_after = 1; // second transfer move throws
+      bool threw = false;
+      try {
+        f.shrink_to_fit();
+      } catch (std::runtime_error const&) { threw = true; }
+      CHECK(threw);
+      throw_moveonly::throw_after = 1000000;
+      CHECK(f.invariants());
+      CHECK(f.is_heap() && f.size() == 3 && f.capacity() == old_capacity);
+      CHECK(throw_moveonly::alive == 3); // partial stack moves rolled back
+      throw_moveonly::count = 0;
+      f.shrink_to_fit(); // retry succeeds
+      CHECK(f.invariants() && f.is_stack() && f.size() == 3);
+    }
+    CHECK(throw_moveonly::alive == 0);
+    throw_moveonly::reset();
+  }
 }
 
 // ------------------------------------------------------------------
-// 16. fancy pointers end to end (raw-pointer observers; iterators need
-//     implicit raw->fancy conversion, which the explicit fancy ctor blocks)
+// 16. fancy pointers end to end (raw-pointer observers and iterators)
 // ------------------------------------------------------------------
 static void test_fancy()
 {
@@ -1632,9 +1859,16 @@ static void test_fancy()
       f.emplace_one_at_back_(1);
       f.emplace_one_at_back_(2);
       CHECK(fancy_counting_alloc<track>::construct_count == 0); // stack bypasses alloc
+      CHECK(f.begin()[0].value == 1 && f.begin()[1].value == 2);
+      CHECK(f.begin()->value == 1);
+      CHECK(f.cbegin() == f.begin());
+      CHECK(std::to_address(f.begin()) == f.data());
+      CHECK(f.end() - f.begin() == static_cast<F::difference_type>(f.size()));
       for (int i = 3; i <= 6; ++i) f.emplace_one_at_back_(i); // spill to heap
       CHECK(f.is_heap() && f.size() == 6);
       CHECK(fancy_counting_alloc<track>::construct_count == 6);
+      CHECK(f.begin()[5].value == 6);
+      CHECK(f.end() - f.begin() == static_cast<F::difference_type>(f.size()));
       for (int i = 0; i < 6; ++i) CHECK(f.data()[i].value == i + 1);
       CHECK(std::to_address(f.data()) != nullptr);
       f.reserve(32);
@@ -1668,14 +1902,31 @@ static void test_fancy()
     CHECK(m.size() == 1 && s.size() == 5 && s.data()[4] == 5);
     s.reset();
     CHECK(s.empty() && s.is_stack());
+    F g((fancy_alloc<int>{}));
+    for (int i = 0; i < 6; ++i) g.emplace_one_at_back_(i);
+    g.clear();
+    g.emplace_one_at_back_(7);
+    g.shrink_to_fit();
+    CHECK(g.is_stack() && g.size() == 1 && g.data()[0] == 7);
   }
   {
     // N == 0 fancy: pure heap from the first element
     using F = fix<int, 0, fancy_alloc<int>>;
     F f((fancy_alloc<int>{}));
-    CHECK(f.data() == nullptr);
+    CHECK(f.data() == nullptr && f.begin() == f.end());
     for (int i = 0; i < 5; ++i) f.emplace_one_at_back_(i);
     CHECK(f.size() == 5 && f.data()[4] == 4);
+    CHECK(f.end() - f.begin() == static_cast<F::difference_type>(f.size()));
+  }
+  {
+    // A null fancy pointer must not be passed to std::to_address().
+    using F = fix<int, 0, strict_fancy_alloc<int>>;
+    F f((strict_fancy_alloc<int>{}));
+    CHECK(f.data() == nullptr && f.begin() == f.end());
+    F const& cf = f;
+    CHECK(cf.data() == nullptr && cf.begin() == cf.end());
+    f.emplace_one_at_back_(42);
+    CHECK(f.data()[0] == 42);
   }
 }
 

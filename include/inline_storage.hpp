@@ -30,7 +30,6 @@
 #include <type_traits> // std::is_unsigned_v, std::is_nothrow_default_constructible_v
 #include <utility>     // std::forward
 
-#include "pointer_iterator.hpp"
 #include "uninitialized_algorithms.hpp"
 
 #if defined(__clang__)
@@ -56,6 +55,10 @@ inline constexpr stay_on_heap_t stay_on_heap {};
 template <class T, std::size_t N, class Allocator = std::allocator<T>>
 struct inline_storage
 {
+protected:
+  struct heap_block;
+  struct stack_block;
+
 public:
   using value_type       = T;
   using allocator_type   = typename std::allocator_traits<Allocator>::template rebind_alloc<value_type>;
@@ -68,15 +71,17 @@ public:
   using const_reference = value_type const &;
   using reference       = value_type &;
 
-  using const_iterator         = pointer_iterator<value_type, const_pointer, inline_storage>;
-  using iterator               = pointer_iterator<value_type, pointer, inline_storage>;
+  // Public observers expose raw pointers, matching the standard container
+  // model; allocator_traits::pointer remains an allocation detail only.
+  using const_iterator         = value_type const *;
+  using iterator               = value_type *;
   using const_reverse_iterator = std::reverse_iterator<const_iterator>;
   using reverse_iterator       = std::reverse_iterator<iterator>;
 
   static constexpr size_type inline_capacity = N;
 
-  /// LSB steals one bit for the heap/stack flag so the encoding is independent
-  /// of the width of size_type; 0 = stack keeps zero-initialization valid.
+  // LSB steals one bit for the heap/stack flag so the encoding is independent
+  // of the width of size_type; 0 = stack keeps zero-initialization valid.
   static constexpr size_type heap_flag  = size_type { 1 };
   static constexpr size_type stack_flag = size_type { 0 };
   static_assert(std::is_unsigned_v<size_type>, "size_type must be an unsigned integer type");
@@ -573,15 +578,20 @@ protected:
     // of repeatedly calling the decrement instruction in destroy_elements_unchecked_.
   }
 
+  constexpr void destroy_heap_elements_unchecked_(value_type *const elements_ptr, size_type const n) noexcept
+  {
+    if constexpr (std::disjunction_v<std::negation<std::is_trivially_destructible<value_type>>,
+                                     std::bool_constant<has_custom_destroy<allocator_type, value_type *>>>) {
+      for (size_type i = 0; i < n; ++i) {
+        allocator_traits::destroy(alloc_, elements_ptr + i);
+      }
+    }
+  }
+
   constexpr void destroy_elements_unchecked_(value_type *const elements_ptr, size_type const n) noexcept
   {
     if (is_heap()) {
-      if constexpr (std::disjunction_v<std::negation<std::is_trivially_destructible<value_type>>,
-                                       std::bool_constant<has_custom_destroy<allocator_type, value_type *>>>) {
-        for (size_type i = 0; i < n; ++i) {
-          allocator_traits::destroy(alloc_, elements_ptr + i);
-        }
-      }
+      destroy_heap_elements_unchecked_(elements_ptr, n);
     } else if constexpr (!std::is_trivially_destructible_v<value_type>) {
       for (size_type i = 0; i < n; ++i) {
         std::destroy_at(elements_ptr + i);
@@ -839,6 +849,29 @@ public:
   inline_storage &operator= (inline_storage const &) = delete;
 
 protected:
+  /// Scope-exit finalizer for swap_stack_elements_: commits both stack sizes
+  /// (replacing the caller's former size swap) and, on exception, destroys
+  /// src's unreached tail so both containers stay consistent.
+  struct swap_stack_elements_finalizer
+  {
+    inline_storage &dst_;
+    inline_storage &src_;
+    size_type common_;
+    size_type extra_;
+    size_type new_dst_size_;
+
+    constexpr ~swap_stack_elements_finalizer() noexcept
+    {
+      // Exception path: destroy src's tail that the loop did not reach. On
+      // normal exit new_dst_size_ == extra_ and this loop is empty.
+      for (size_type i = new_dst_size_; i < extra_; ++i) {
+        std::destroy_at(std::addressof(src_.stack_.elements_[i]));
+      }
+      dst_.set_size_(new_dst_size_, stack_flag);
+      src_.set_size_(common_, stack_flag);
+    }
+  };
+
   constexpr void swap_stack_elements_(inline_storage &a, inline_storage &b) noexcept(
       std::is_nothrow_swappable_v<value_type> &&
       (std::is_nothrow_move_constructible_v<value_type> ||
@@ -848,17 +881,45 @@ protected:
       size_type const a_size = a.size(), b_size = b.size();
       size_type const common = (a_size < b_size) ? a_size : b_size;
       size_type const extra  = (a_size > b_size) ? a_size : b_size;
+
       for (size_type i = 0; i < common; ++i) {
         std::ranges::swap(a.stack_.elements_[i], b.stack_.elements_[i]);
       }
-      inline_storage *const src = (a_size > b_size) ? &a : &b;
-      inline_storage *const dst = (a_size > b_size) ? &b : &a;
-      for (size_type i = common; i < extra; ++i) {
-        std::construct_at(std::addressof(dst->stack_.elements_[i]), std::move_if_noexcept(src->stack_.elements_[i]));
-        std::destroy_at(std::addressof(src->stack_.elements_[i]));
+
+      inline_storage &src = (a_size > b_size) ? a : b;
+      inline_storage &dst = (a_size > b_size) ? b : a;
+
+      swap_stack_elements_finalizer finalizer { dst, src, common, extra, common };
+      for (size_type i = common; i < extra; ++i, ++finalizer.new_dst_size_) {
+        std::construct_at(std::addressof(dst.stack_.elements_[i]), std::move_if_noexcept(src.stack_.elements_[i]));
+        std::destroy_at(std::addressof(src.stack_.elements_[i]));
       }
     }
   }
+
+  /// Scope-exit finalizer for the heap->stack leg of swap(): owns this's old
+  /// heap block and unconditionally commits on exit (normal or exception), so
+  /// a throwing move/copy can't leak that block or leave this's size stale.
+  struct swap_heap_to_stack_finalizer
+  {
+    heap_block this_heap_;
+    size_type this_size_;
+    size_type new_this_size_ = 0;
+    inline_storage &this_;
+    inline_storage &other_;
+
+    constexpr ~swap_heap_to_stack_finalizer() noexcept
+    {
+      size_type const other_count = other_.size();
+      for (size_type i = new_this_size_; i < other_count; ++i) {
+        std::destroy_at(std::addressof(other_.stack_.elements_[i]));
+      }
+      this_.set_size_(new_this_size_, stack_flag);
+      other_.promote_to_heap_();
+      other_.heap_ = this_heap_;
+      other_.size_ = this_size_;
+    }
+  };
 
   constexpr void swap_heap_to_stack_(inline_storage &other) noexcept(
       std::is_nothrow_swappable_v<value_type> &&
@@ -866,17 +927,12 @@ protected:
        std::is_nothrow_copy_constructible_v<value_type>) )
   {
     if constexpr (inline_capacity != 0) {
-      heap_block const this_heap = heap_;
-      size_type const this_size  = size_;
-
+      swap_heap_to_stack_finalizer finalizer { heap_, size_, 0, *this, other };
       demote_to_stack_();
-      set_size_(size_type {}, stack_flag);
-      swap_stack_elements_(*this, other);
-      size_ = other.size_;
-
-      other.promote_to_heap_();
-      other.heap_ = this_heap;
-      other.size_ = this_size;
+      for (size_type i = 0; i < other.size(); ++i, ++finalizer.new_this_size_) {
+        std::construct_at(std::addressof(stack_.elements_[i]), std::move_if_noexcept(other.stack_.elements_[i]));
+        std::destroy_at(std::addressof(other.stack_.elements_[i]));
+      }
     }
   }
 
@@ -910,7 +966,6 @@ public:
     } else {
       // Both stack: layouts are identical, only elements and counts move.
       swap_stack_elements_(*this, other);
-      std::ranges::swap(size_, other.size_);
     }
   }
 
@@ -970,7 +1025,13 @@ public:
 
   [[nodiscard]] constexpr value_type const *data() const noexcept
   {
-    if (is_heap()) return std::to_address(heap_.elements_ptr_);
+    if (is_heap()) {
+      if constexpr (std::is_same_v<pointer, value_type *>) {
+        return heap_.elements_ptr_;
+      } else {
+        return heap_.elements_ptr_ == pointer {} ? nullptr : std::to_address(heap_.elements_ptr_);
+      }
+    }
     if constexpr (inline_capacity != 0) {
       return stack_.elements_;
     } else {
@@ -980,7 +1041,13 @@ public:
 
   [[nodiscard]] constexpr value_type *data() noexcept
   {
-    if (is_heap()) return std::to_address(heap_.elements_ptr_);
+    if (is_heap()) {
+      if constexpr (std::is_same_v<pointer, value_type *>) {
+        return heap_.elements_ptr_;
+      } else {
+        return heap_.elements_ptr_ == pointer {} ? nullptr : std::to_address(heap_.elements_ptr_);
+      }
+    }
     if constexpr (inline_capacity != 0) {
       return stack_.elements_;
     } else {
@@ -988,10 +1055,10 @@ public:
     }
   }
 
-  [[nodiscard]] constexpr iterator begin() noexcept { return iterator(data()); }
-  [[nodiscard]] constexpr const_iterator begin() const noexcept { return const_iterator(data()); }
-  [[nodiscard]] constexpr iterator end() noexcept { return iterator(data() + size()); }
-  [[nodiscard]] constexpr const_iterator end() const noexcept { return const_iterator(data() + size()); }
+  [[nodiscard]] constexpr iterator begin() noexcept { return data(); }
+  [[nodiscard]] constexpr const_iterator begin() const noexcept { return data(); }
+  [[nodiscard]] constexpr iterator end() noexcept { return empty() ? begin() : begin() + size(); }
+  [[nodiscard]] constexpr const_iterator end() const noexcept { return empty() ? begin() : begin() + size(); }
   [[nodiscard]] constexpr reverse_iterator rbegin() noexcept { return reverse_iterator(end()); }
   [[nodiscard]] constexpr const_reverse_iterator rbegin() const noexcept { return const_reverse_iterator(end()); }
   [[nodiscard]] constexpr reverse_iterator rend() noexcept { return reverse_iterator(begin()); }
@@ -1005,18 +1072,22 @@ protected:
   /// Stack and heap share the union: writing the first stack element
   /// already clobbers heap_. Keep flag heap until commit so destroy
   /// still uses the allocator path and the guard below can recover.
-  struct heap_restore_on_exit
+  struct heap_restore_guard
   {
     inline_storage *self_;
     pointer data_;
     size_type capacity_;
+    size_type size_;
     bool dismissed_ = false;
 
-    constexpr ~heap_restore_on_exit() noexcept
+    constexpr ~heap_restore_guard() noexcept
     {
       if (!dismissed_) {
+        std::destroy_at(&self_->stack_);
+        std::construct_at(&self_->heap_);
         self_->heap_.elements_ptr_ = data_;
         self_->heap_.capacity_     = capacity_;
+        self_->set_size_(size_, heap_flag);
       }
     }
 
@@ -1028,7 +1099,7 @@ protected:
            (std::same_as<std::remove_cvref_t<AllocArgs>, allocator_type> && ...)
   constexpr void transfer_unchecked_(value_type *const src, size_type const count, value_type *const dst, AllocArgs &&...alloc_args)
   {
-    // stdex::uninitialized_* already checked count != 0
+    if (count == 0) return;
     if constexpr (std::is_nothrow_move_constructible_v<value_type> || !std::is_copy_constructible_v<value_type>) {
       (void) stdex::uninitialized_move(src, src + count, dst, dst + count, std::forward<AllocArgs>(alloc_args)...);
     } else {
@@ -1054,21 +1125,22 @@ public:
       if (count == 0) {
         if (heap_.elements_ptr_ != pointer {}) deallocate_unchecked_();
         demote_to_stack_();
-        set_size_(size_type {}, stack_flag);
         return;
       }
 
       pointer const old_data       = heap_.elements_ptr_;
       size_type const old_capacity = heap_.capacity_;
 
-      heap_restore_on_exit restore { this, old_data, old_capacity };
+      heap_restore_guard restore { this, old_data, old_capacity, count };
+      // Activate stack storage before constructing into stack_.elements_;
+      // the guard restores the heap state if element transfer throws.
+      demote_to_stack_();
       transfer_unchecked_(std::to_address(old_data), count, stack_.elements_);
       restore.dismiss();
 
-      destroy_elements_unchecked_(std::to_address(old_data), count);
+      destroy_heap_elements_unchecked_(std::to_address(old_data), count);
       allocator_traits::deallocate(alloc_, old_data, old_capacity);
 
-      demote_to_stack_();
       set_size_(count, stack_flag);
     }
   }
@@ -1107,7 +1179,6 @@ public:
       if (is_heap() && heap_.elements_ptr_ != pointer {}) {
         deallocate_unchecked_();
         demote_to_stack_();
-        set_size_(size_type {}, stack_flag);
         return;
       }
     }
@@ -1222,6 +1293,21 @@ public:
   }
 
 protected:
+  /// Postcondition: heap_ is active and the object is a valid empty heap
+  /// container (size() == 0, capacity() == 0). Callers that still need the old
+  /// count must save it first; stack elements must already be destroyed/moved.
+  constexpr void promote_to_heap_() noexcept
+  requires (inline_capacity != 0)
+  {
+    assert(is_stack());
+    std::destroy_at(&stack_);
+    std::construct_at(&heap_);
+    set_size_(size_type {}, heap_flag);
+  }
+
+  /// Postcondition: stack_ is active and the object is a valid empty stack
+  /// container (size() == 0). The caller publishes the count after constructing
+  /// the elements in stack storage.
   constexpr void demote_to_stack_() noexcept
   requires (inline_capacity != 0)
   {
@@ -1232,14 +1318,7 @@ protected:
 #else
     std::construct_at(&stack_);
 #endif
-  }
-
-  constexpr void promote_to_heap_() noexcept
-  requires (inline_capacity != 0)
-  {
-    assert(is_stack());
-    std::destroy_at(&stack_);
-    std::construct_at(&heap_);
+    set_size_(size_type {}, stack_flag);
   }
 
   constexpr size_type calculate_growth_(size_type const new_size) const noexcept
