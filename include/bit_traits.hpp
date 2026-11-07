@@ -23,7 +23,7 @@
 #include <cstddef>     // std::size_t, std::byte, std::to_integer
 #include <cstdint>     // std::uint64_t, std::uint32_t, std::uint16_t, std::uint8_t
 #include <span>        // std::span
-#include <type_traits> // std::remove_cvref_t, std::is_enum_v, std::make_unsigned_t, std::underlying_type_t, std::conditional_t
+#include <type_traits> // std::remove_cvref_t, std::is_enum_v, std::make_unsigned_t, std::underlying_type_t
 #include <utility>     // std::make_index_sequence
 #include <version>
 
@@ -158,14 +158,23 @@ struct unsigned_equivalent<T>
   using type = std::make_unsigned_t<T>;
 };
 
+template <class T, bool = std::same_as<T, bool>>
+struct unsigned_of_underlying
+{
+  using type = std::make_unsigned_t<T>;
+};
+
+template <class T>
+struct unsigned_of_underlying<T, true>
+{
+  using type = std::uint8_t;
+};
+
 template <class T>
 requires std::is_enum_v<T>
 struct unsigned_equivalent<T>
 {
-  using type = std::conditional_t<
-      std::same_as<std::underlying_type_t<T>, bool>,
-      std::uint8_t,
-      std::make_unsigned_t<std::underlying_type_t<T>>>;
+  using type = typename unsigned_of_underlying<std::underlying_type_t<T>>::type;
 };
 
 template <std::floating_point T>
@@ -442,7 +451,7 @@ template <bit_operand T>
     uint_t const top = static_cast<uint_t>(uint_t { 1 } << (bit_size<T> - 1));
     return bits == top ? bit_detail::from_unsigned<T>(top) : T {};
   }
-  return bit_detail::from_unsigned<T>(static_cast<uint_t>(uint_t { 1 } << width));
+  return bit_detail::from_unsigned<T>(static_cast<uint_t>(uint_t { 1 } << bit_width(static_cast<uint_t>(bits - 1))));
 }
 
 template <bit_operand T, bit_detail::bit_shift_count S>
@@ -631,8 +640,7 @@ requires (std::is_trivially_copyable_v<T> && !std::is_member_pointer_v<T> && !st
   } else if constexpr (sizeof(T) == 8) {
     return std::bit_cast<std::uint64_t>(val) == 0;
   } else {
-    return std::bit_cast<std::array<unsigned char, sizeof(T)>>(val) ==
-           std::bit_cast<std::array<unsigned char, sizeof(T)>>(T {});
+    return std::bit_cast<std::array<unsigned char, sizeof(T)>>(val) == std::array<unsigned char, sizeof(T)> {};
   }
 }
 

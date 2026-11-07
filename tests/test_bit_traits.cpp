@@ -22,6 +22,7 @@
 #include <array>
 #include <bit>
 #include <climits>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -132,12 +133,12 @@ constexpr UInt bit_ceil_ref(UInt value) noexcept
   if (value <= UInt { 1 }) {
     return UInt { 1 };
   }
-  int const result_width = bit_width_ref(value);
-  if (result_width >= width) {
+  int const value_width = bit_width_ref(value);
+  if (value_width >= width) {
     UInt const top = static_cast<UInt>(UInt { 1 } << (width - 1));
     return value == top ? value : UInt {};
   }
-  return static_cast<UInt>(UInt { 1 } << result_width);
+  return static_cast<UInt>(UInt { 1 } << bit_width_ref(static_cast<UInt>(value - UInt { 1 })));
 }
 
 template <class UInt>
@@ -314,8 +315,52 @@ constexpr stdex::int128_t int128_from_bits(stdex::uint128_t const bits) noexcept
   return stdex::int128_t::from_words(bits.lo(), bits.hi());
 }
 
+enum class bool_backed_flag : bool
+{
+  off = false,
+  on  = true,
+};
+
+enum class int16_backed_flag : std::int16_t
+{
+  minus_one = -1,
+};
+
+struct wide_default_nonzero
+{
+  long long first  = 5;
+  long long second = 6;
+};
+
+constexpr auto wide_zero_bytes = std::array<unsigned char, sizeof(wide_default_nonzero)> {};
+constexpr auto wide_zeroed     = std::bit_cast<wide_default_nonzero>(wide_zero_bytes);
+
+struct wide_no_default
+{
+  long long first;
+  long long second;
+  wide_no_default() = delete;
+};
+
+constexpr auto wide_no_default_zero_bytes = std::array<unsigned char, sizeof(wide_no_default)> {};
+constexpr auto wide_no_default_zeroed     = std::bit_cast<wide_no_default>(wide_no_default_zero_bytes);
+
 static_assert(stdex::to_unsigned(stdex::int128_t::from_i64(-1)) == ~stdex::uint128_t {});
 static_assert(stdex::to_unsigned(std::int8_t { -1 }) == std::uint8_t { 0xFF });
+static_assert(std::same_as<stdex::unsigned_equivalent_t<bool_backed_flag>, std::uint8_t>);
+static_assert(stdex::to_unsigned(bool_backed_flag::on) == std::uint8_t { 1 });
+static_assert(std::same_as<stdex::unsigned_equivalent_t<int16_backed_flag>, std::uint16_t>);
+static_assert(stdex::to_unsigned(int16_backed_flag::minus_one) == std::uint16_t { 0xFFFF });
+static_assert(stdex::countl_zero(bool_backed_flag::on) == 7);
+static_assert(stdex::countr_zero(bool_backed_flag::on) == 0);
+static_assert(stdex::popcount(bool_backed_flag::on) == 1);
+static_assert(stdex::bit_width(bool_backed_flag::on) == 1);
+static_assert(stdex::bit_ceil(bool_backed_flag::on) == bool_backed_flag::on);
+static_assert(stdex::bit_ceil(bool_backed_flag::off) == bool_backed_flag::on);
+static_assert(sizeof(wide_default_nonzero) > 8);
+static_assert(stdex::is_all_bits_zero(wide_zeroed));
+static_assert(!stdex::is_all_bits_zero(wide_default_nonzero {}));
+static_assert(stdex::is_all_bits_zero(wide_no_default_zeroed));
 static_assert(stdex::highest_one_bit_index(stdex::uint128_t {}) == 0);
 static_assert(stdex::highest_one_bit_index(stdex::uint128_t { 0, 1 }) == 64);
 static_assert(stdex::highest_one_bit_index(stdex::uint128_t { 0, 0x8000'0000'0000'0000ULL }) == 127);
@@ -332,6 +377,9 @@ static_assert(stdex::bit_reverse<std::uint32_t>(0x0000'0001) == 0x8000'0000);
 static_assert(stdex::bit_reverse<std::uint64_t>(0x0000'0000'0000'0001ULL) == 0x8000'0000'0000'0000ULL);
 static_assert(stdex::bit_reverse(stdex::uint128_t { 1, 0 }) == (stdex::uint128_t { 0, 0x8000'0000'0000'0000ULL }));
 static_assert(stdex::bit_reverse(stdex::uint128_t { 0, 1 }) == (stdex::uint128_t { 0x8000'0000'0000'0000ULL, 0 }));
+// 128-bit bit_reverse/byteswap must swap the two words, not transform them in place.
+static_assert(stdex::bit_reverse(stdex::uint128_t::from_words(1, 0)) ==
+              stdex::uint128_t::from_words(0, std::uint64_t { 1 } << 63U));
 static_assert(stdex::bit_reverse(stdex::int128_t { 1, 0 }) ==
               (stdex::int128_t { 0, 0x8000'0000'0000'0000ULL }));
 static_assert(stdex::bit_reverse(stdex::int128_t::from_i64(-1)) == stdex::int128_t::from_i64(-1));
@@ -340,6 +388,8 @@ static_assert(stdex::byteswap(std::uint16_t { 0x1234 }) == 0x3412);
 static_assert(stdex::byteswap(std::uint32_t { 0x1234'5678 }) == 0x7856'3412);
 static_assert(stdex::byteswap(std::uint64_t { 0x0123'4567'89AB'CDEFULL }) == 0xEFCD'AB89'6745'2301ULL);
 static_assert(stdex::byteswap(std::int32_t { 0x1234'5678 }) == std::int32_t { 0x7856'3412 });
+static_assert(stdex::byteswap(stdex::uint128_t::from_words(0x0102'0304'0506'0708ULL, 0)) ==
+              stdex::uint128_t::from_words(0, 0x0807'0605'0403'0201ULL));
 static_assert(stdex::byteswap(stdex::uint128_t { 0x0123'4567'89AB'CDEFULL, 0xFEDC'BA98'7654'3210ULL }) ==
               (stdex::uint128_t { 0x1032'5476'98BA'DCFEULL, 0xEFCD'AB89'6745'2301ULL }));
 static_assert(stdex::byteswap(stdex::int128_t { 0x0123'4567'89AB'CDEFULL, 0xFEDC'BA98'7654'3210ULL }) ==
@@ -357,6 +407,29 @@ static_assert(stdex::bit_floor(std::uint8_t { 0xFF }) == 0x80);
 static_assert(stdex::bit_ceil(std::uint8_t {}) == 1);
 static_assert(stdex::bit_ceil(std::uint8_t { 0x80 }) == 0x80);
 static_assert(stdex::bit_ceil(std::uint8_t { 0x81 }) == 0);
+static_assert(stdex::bit_ceil(0u) == 1u);
+static_assert(stdex::bit_ceil(1u) == 1u);
+static_assert(stdex::bit_ceil(2u) == 2u);
+static_assert(stdex::bit_ceil(3u) == 4u);
+static_assert(stdex::bit_ceil(4u) == 4u);
+static_assert(stdex::bit_ceil(5u) == 8u);
+static_assert(stdex::bit_ceil(63u) == 64u);
+static_assert(stdex::bit_ceil(64u) == 64u);
+static_assert(stdex::bit_ceil(65u) == 128u);
+static_assert(stdex::bit_ceil(127u) == 128u);
+static_assert(stdex::bit_ceil(128u) == 128u);
+static_assert(stdex::bit_ceil(129u) == 256u);
+static_assert(stdex::bit_ceil(255u) == 256u);
+static_assert(stdex::bit_ceil(256u) == 256u);
+static_assert(stdex::bit_ceil(0x4000'0000u) == 0x4000'0000u);
+static_assert(stdex::bit_ceil(0x4000'0001u) == 0x8000'0000u);
+static_assert(stdex::bit_ceil(0x8000'0000u) == 0x8000'0000u);
+static_assert(stdex::bit_ceil(0x8000'0001u) == 0u);
+static_assert(stdex::bit_ceil(std::uint64_t { 1 } << 63U) == (std::uint64_t { 1 } << 63U));
+static_assert(stdex::bit_ceil((std::uint64_t { 1 } << 63U) + 1U) == 0);
+static_assert(stdex::bit_ceil(std::int8_t { 64 }) == std::int8_t { 64 });
+static_assert(stdex::bit_ceil(std::int8_t { -128 }) == std::int8_t { -128 });
+static_assert(stdex::bit_ceil(std::int8_t { -127 }) == std::int8_t { 0 });
 static_assert(stdex::bit_width(std::uint8_t {}) == 0);
 static_assert(stdex::bit_width(std::uint8_t { 0xFF }) == 8);
 static_assert(stdex::countl_zero(std::uint8_t { 1 }) == 7);
@@ -390,6 +463,10 @@ static_assert(stdex::has_single_bit(high_bit_128));
 static_assert(stdex::bit_floor(high_bit_128) == high_bit_128);
 static_assert(stdex::bit_ceil(high_bit_128) == high_bit_128);
 static_assert(stdex::bit_ceil(stdex::uint128_t { 1 }) == stdex::uint128_t { 1 });
+static_assert(stdex::bit_ceil(stdex::uint128_t::from_words(~0ULL, 0)) == stdex::uint128_t::from_words(0, 1));
+static_assert(stdex::bit_ceil(stdex::uint128_t::from_words(0, 1)) == stdex::uint128_t::from_words(0, 1));
+static_assert(stdex::bit_ceil(stdex::uint128_t::from_words(1, 1)) == stdex::uint128_t::from_words(0, 2));
+static_assert(stdex::bit_ceil(stdex::uint128_t::from_words(1, 0x8000'0000'0000'0000ULL)) == stdex::uint128_t {});
 static_assert(stdex::bit_width(high_bit_128) == 128);
 static_assert(stdex::countl_zero(stdex::uint128_t {}) == 128);
 static_assert(stdex::countl_one(~stdex::uint128_t {}) == 128);
@@ -416,6 +493,7 @@ static_assert(stdex::countr_one(negative_one_128) == 128);
 static_assert(stdex::popcount(negative_one_128) == 128);
 static_assert(stdex::bit_width(negative_one_128) == 128);
 static_assert(stdex::bit_floor(stdex::int128_t::from_i64(-8)) == stdex::int128_t::from_words(0, 0x8000'0000'0000'0000ULL));
+static_assert(stdex::bit_ceil(stdex::int128_t::from_i64(64)) == stdex::int128_t::from_i64(64));
 static_assert(stdex::bit_ceil(stdex::int128_t::from_i64(-8)) == stdex::int128_t {});
 static_assert(stdex::shl(negative_one_128, 127) == stdex::int128_t::from_words(0, 0x8000'0000'0000'0000ULL));
 static_assert(stdex::shr(negative_one_128, 127) == negative_one_128);
