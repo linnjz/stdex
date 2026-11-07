@@ -20,6 +20,7 @@
 #include <iterator>    // std::random_access_iterator_tag, std::contiguous_iterator_tag
 #include <memory>      // std::pointer_traits
 #include <type_traits> // std::is_const_v, std::is_same_v, ...
+#include <utility>     // std::declval
 
 namespace stdex
 {
@@ -27,6 +28,9 @@ template <class ValueType, class Pointer, class Container>
 struct pointer_iterator
 {
   static_assert(!std::is_const_v<ValueType>, "ValueType must be non-const; constness comes from Pointer");
+  static_assert(std::contiguous_iterator<Pointer>, "pointer_iterator requires a contiguous pointer/iterator");
+  static_assert(std::same_as<std::remove_cv_t<typename std::pointer_traits<Pointer>::element_type>, ValueType>,
+                "ValueType must match the pointer element type");
 
   using difference_type   = typename std::pointer_traits<Pointer>::difference_type;
   using value_type        = ValueType;
@@ -42,6 +46,16 @@ struct pointer_iterator
   {
   }
 
+  template <class U>
+  requires std::same_as<std::remove_cv_t<U>, value_type> &&
+           (!std::same_as<U *, pointer>) &&
+           (std::constructible_from<pointer, U *> ||
+            requires (U *p) { std::pointer_traits<pointer>::pointer_to(*p); })
+  explicit constexpr pointer_iterator(U *ptr)
+      : base_ { make_pointer_(ptr) }
+  {
+  }
+
   template <class OtherPointer>
   requires (!std::is_same_v<OtherPointer, pointer> && std::convertible_to<OtherPointer const &, pointer>)
   constexpr pointer_iterator(pointer_iterator<value_type, OtherPointer, Container> const &other) noexcept(
@@ -52,7 +66,11 @@ struct pointer_iterator
 
   [[nodiscard]] constexpr pointer base() const noexcept { return base_; }
   [[nodiscard]] constexpr reference operator* () const noexcept { return *base_; }
-  [[nodiscard]] constexpr pointer operator->() const noexcept { return base_; }
+  [[nodiscard]] constexpr auto operator->() const noexcept
+      -> decltype(std::to_address(std::declval<pointer const &>()))
+  {
+    return std::to_address(base_);
+  }
   [[nodiscard]] constexpr reference operator[] (difference_type index) const noexcept { return *(base_ + index); }
 
   constexpr pointer_iterator &operator++ () noexcept
@@ -108,7 +126,9 @@ struct pointer_iterator
   }
 
   template <class OtherPointer>
-  [[nodiscard]] constexpr difference_type operator- (pointer_iterator<value_type, OtherPointer, Container> const &other) const noexcept
+  requires requires (pointer const &a, OtherPointer const &b) { a - b; }
+  [[nodiscard]] constexpr difference_type operator- (pointer_iterator<value_type, OtherPointer, Container> const &other) const
+      noexcept(noexcept(std::declval<pointer const &>() - std::declval<OtherPointer const &>()))
   {
     return base_ - other.base();
   }
@@ -124,6 +144,16 @@ struct pointer_iterator
   }
 
 private:
+  template <class U>
+  static constexpr pointer make_pointer_(U *ptr)
+  {
+    if constexpr (std::constructible_from<pointer, U *>) {
+      return pointer(ptr);
+    } else {
+      return ptr ? std::pointer_traits<pointer>::pointer_to(*ptr) : pointer {};
+    }
+  }
+
   pointer base_ {};
 };
 
@@ -166,21 +196,21 @@ requires requires (P1 const &a, P2 const &b) { a < b; }
 }
 
 template <class V, class P1, class P2, class C>
-requires requires (P1 const &a, P2 const &b) { a < b; }
+requires requires (P1 const &a, P2 const &b) { b < a; }
 [[nodiscard]] constexpr bool operator> (
     pointer_iterator<V, P1, C> const &a,
     pointer_iterator<V, P2, C> const &b) noexcept(noexcept(
-    std::declval<P1 const &>() < std::declval<P2 const &>()))
+    std::declval<P2 const &>() < std::declval<P1 const &>()))
 {
   return b < a;
 }
 
 template <class V, class P1, class P2, class C>
-requires requires (P1 const &a, P2 const &b) { a < b; }
+requires requires (P1 const &a, P2 const &b) { b < a; }
 [[nodiscard]] constexpr bool operator<= (
     pointer_iterator<V, P1, C> const &a,
     pointer_iterator<V, P2, C> const &b) noexcept(noexcept(
-    std::declval<P1 const &>() < std::declval<P2 const &>()))
+    std::declval<P2 const &>() < std::declval<P1 const &>()))
 {
   return !(b < a);
 }
