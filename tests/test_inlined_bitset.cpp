@@ -1493,6 +1493,29 @@ void test_block_mutators()
     b.erase(stdex::from_blocks, 0, 2);
     CHECK(b.empty());
   }
+  {
+    // Removing the partial tail block must trim bit_size_ to the remaining
+    // full blocks, not subtract a whole block's worth of bits.
+    BS64_2 b(130, true);
+    b.erase(stdex::from_blocks, 2, 3);
+    CHECK_EQ(b.size(), 128u);
+    CHECK_EQ(b.block_count(), 2u);
+    CHECK(b.all());
+  }
+  {
+    BS64_2 b(130, true);
+    b.erase(stdex::from_blocks, 0, 3);
+    CHECK(b.empty());
+    CHECK_EQ(b.block_count(), 0u);
+  }
+  {
+    BS64_0 empty;
+    CHECK(empty.block_begin() == empty.block_end());
+    CHECK(empty.insert(stdex::from_blocks, 0, std::size_t { 0 }, std::uint64_t { 0 }) == empty.block_begin());
+    CHECK(empty.erase(stdex::from_blocks, 0, 0) == empty.block_begin());
+    empty.reset();
+    empty.assign(stdex::from_blocks, std::size_t { 0 }, std::uint64_t { 0 });
+  }
 }
 
 // ==================================================================
@@ -1776,6 +1799,15 @@ void test_streams()
     std::istringstream is("101");
     is >> b;
     CHECK_EQ(b.size(), 3u);
+  }
+  {
+    // extraction must preserve the destination's stateful allocator
+    counting_state st;
+    CBitset<std::uint64_t, 2> b(counting_alloc<std::uint64_t> { &st, 7 });
+    std::istringstream is("101");
+    is >> b;
+    CHECK(!is.fail());
+    CHECK_EQ(b.get_allocator().id_, 7);
   }
 }
 

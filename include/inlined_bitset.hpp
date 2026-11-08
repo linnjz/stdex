@@ -459,6 +459,12 @@ private:
   using base::move_assignment_from_;
   using base::move_construct_from_;
 
+  [[nodiscard]] constexpr block_iterator make_block_iterator_(size_type const block_pos) noexcept
+  {
+    block_type *const blocks = data();
+    return block_iterator(blocks == nullptr ? nullptr : blocks + block_pos);
+  }
+
   static constexpr size_type blocks_for_bits_(size_type bit_count) noexcept
   {
     return bit_count / bits_per_block + (bit_count % bits_per_block != 0);
@@ -1859,7 +1865,7 @@ public:
   constexpr block_iterator insert(from_blocks_t, size_type block_pos, size_type count, block_type value)
   {
     assert(block_pos <= this->block_count() && "insert position out of range");
-    if (count == 0) [[unlikely]] return block_iterator(data() + block_pos);
+    if (count == 0) [[unlikely]] return make_block_iterator_(block_pos);
     size_type const old_count = this->block_count();
     if (count > max_size() / bits_per_block - old_count) [[unlikely]] throw_overflow_error_();
     // Append-then-rotate (the insert_uncounted_range_ shape): resize fills the
@@ -1867,7 +1873,7 @@ public:
     base::resize(old_count + count, value);
     std::rotate(data() + block_pos, data() + old_count, data() + old_count + count);
     bit_size_ += count * bits_per_block;
-    return block_iterator(data() + block_pos);
+    return make_block_iterator_(block_pos);
   }
 
   template <std::input_iterator InIt, std::sentinel_for<InIt> InSent>
@@ -1888,7 +1894,7 @@ public:
     }
     // Post-op delta: no upfront distance needed, single-pass sources stay valid.
     bit_size_ += (new_count - old_count) * bits_per_block;
-    return block_iterator(data() + block_pos);
+    return make_block_iterator_(block_pos);
   }
 
   template <std::unsigned_integral T>
@@ -1967,12 +1973,15 @@ public:
       block_type *const blocks  = data();
       size_type const old_count = block_count();
       size_type const removed   = last - first;
+      // The final block may be partial: erasing through it leaves only the
+      // block-aligned prefix, not a full block of removed bits.
+      size_type const new_bits = last == old_count ? first * bits_per_block : bit_size_ - removed * bits_per_block;
       std::move(blocks + last, blocks + old_count, blocks + first);
       destroy_elements_unchecked_(blocks + old_count - removed, removed);
       set_size_(old_count - removed, get_flag_());
-      bit_size_ -= removed * bits_per_block;
+      bit_size_ = new_bits;
     }
-    return block_iterator(data() + first);
+    return make_block_iterator_(first);
   }
 
 public:
@@ -2505,7 +2514,7 @@ std::basic_istream<CharT, Traits> &operator>> (std::basic_istream<CharT, Traits>
       state |= istream_type::failbit;
       bitset.clear();
     } else {
-      bitset = inlined_bitset<Block, N, Allocator> { str, 0, str.size(), zero, one };
+      bitset = inlined_bitset<Block, N, Allocator> { str, 0, str.size(), zero, one, bitset.get_allocator() };
     }
   } catch (...) {
     state |= istream_type::badbit;
