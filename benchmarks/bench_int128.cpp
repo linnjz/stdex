@@ -37,7 +37,7 @@
 #  include <intrin.h>
 #endif
 
-#include "bit_traits.hpp"
+#include "bit.hpp"
 #include "int128.hpp"
 
 #if defined(__has_include)

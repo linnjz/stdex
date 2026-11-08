@@ -61,18 +61,15 @@ stdex_add_test(test_hash_table test_hash_table.cpp
     INCLUDES "${CMAKE_SOURCE_DIR}/include/unordered_flat_detail"
 )
 
-# Extracted detail headers (bit_traits, byte_utils, int128) plus the fastmod
-# port standing on them; include/ alone suffices, no extra include dirs.
-stdex_add_test(test_bit_traits test_bit_traits.cpp)
+stdex_add_test(test_bit test_bit.cpp)
 stdex_add_test(test_fastmod test_fastmod.cpp)
-
 stdex_add_test(test_int128 test_int128.cpp)
+stdex_add_test(test_fancy_pointer_iterator test_fancy_pointer_iterator.cpp)
 
 stdex_add_test(test_uninitialized_algorithms test_uninitialized_algorithms.cpp)
 stdex_add_test(test_uninitialized_buffer test_uninitialized_buffer.cpp)
 
 stdex_add_test(test_inline_storage test_inline_storage.cpp)
-
 stdex_add_test(test_inlined_bitset test_inlined_bitset.cpp)
 
 # LinnSingleton lives outside include/ and its cross-TU / short-macro checks

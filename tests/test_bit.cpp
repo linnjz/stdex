@@ -16,7 +16,7 @@
 
 // test_bit_traits.cpp
 //
-// Verifies include/bit_traits.hpp: signed/unsigned reinterpretation, highest
+// Verifies include/bit.hpp: signed/unsigned reinterpretation, highest
 // set bit, all-zero detection, bit reversal, and byte swapping across scalar
 // and 128-bit paths.
 #include <array>
@@ -27,7 +27,7 @@
 #include <cstdint>
 #include <cstdio>
 
-#include "bit_traits.hpp"
+#include "bit.hpp"
 #include "int128.hpp"
 
 namespace

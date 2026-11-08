@@ -28,7 +28,7 @@
 #include <string_view>
 #include <type_traits> // std::remove_cvref_t, std::remove_cv_t, std::is_trivially_copyable_v
 
-#include "bit_traits.hpp" // stdex::unsigned_equivalent_t, stdex::to_unsigned
+#include "bit.hpp" // stdex::unsigned_equivalent_t, stdex::to_unsigned
 #include "int128.hpp"     // stdex::umul128, stdex::umul128_xor_fold
 
 namespace stdex

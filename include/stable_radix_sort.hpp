@@ -41,7 +41,7 @@
 #  include <omp.h> // omp_get_max_threads、omp_get_thread_num、omp_in_parallel
 #endif
 
-#include "bit_traits.hpp" // unsigned_of_bits_t, highest_one_bit_index
+#include "bit.hpp" // unsigned_of_bits_t, highest_one_bit_index
 #include "hybrid_alloc.hpp" // HYBRID_ALIGNED_ALLOC_THRESHOLD、hybrid_free
 
 #pragma push_macro("RADIX_SORT_RESTRICT")

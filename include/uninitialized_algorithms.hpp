@@ -28,7 +28,7 @@
 #include <type_traits> // std::is_same_v, std::remove_const_t, ...
 #include <utility>     // std::forward, std::move, std::pair
 
-#include "bit_traits.hpp"
+#include "bit.hpp"
 
 #if defined(__clang__)
 #  pragma clang diagnostic push
