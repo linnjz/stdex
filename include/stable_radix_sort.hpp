@@ -19,14 +19,19 @@
 #include <algorithm>   // std::fill_n
 #include <bit>         // std::bit_cast、std::bit_width
 #include <cassert>     // assert
+#include <climits>     // CHAR_BIT
 #include <cmath>       // std::isnan
 #include <concepts>    // std::same_as、std::copy_constructible、std::regular_invocable、
                        // std::unsigned_integral、std::signed_integral、std::floating_point
+#include <cstdint>     // std::uint32_t、std::uint64_t
+#include <cstring>     // std::memset
+#include <functional>  // std::greater_equal、std::less_equal
 #include <iterator>    // std::reverse_iterator、std::random_access_iterator、
                        // std::bidirectional_iterator、std::indirect_strict_weak_order、
-                       // std::iter_value_t、std::next、std::prev
+                       // std::iter_value_t、std::next、std::prev、std::contiguous_iterator
 #include <limits>      // std::numeric_limits
-#include <memory>      // std::allocator、std::allocator_traits、std::destroy_at
+#include <memory>      // std::allocator、std::allocator_traits、std::destroy_at、std::to_address
+#include <new>         // std::bad_alloc、std::hardware_constructive_interference_size
 #include <type_traits> // std::conditional_t、std::false_type、std::true_type、
                        // std::is_trivially_default_constructible_v、
                        // std::is_trivially_destructible_v、std::is_object_v、
@@ -301,19 +306,56 @@ struct is_reverse_iterator<std::reverse_iterator<Iter>> : std::true_type
 template <typename T>
 inline constexpr bool is_reverse_iterator_v = is_reverse_iterator<T>::value;
 
-// Allocator concepts and RAII
-template <typename Alloc>
-concept standard_allocator = requires (Alloc a, typename std::allocator_traits<Alloc>::size_type n) {
-  typename std::allocator_traits<Alloc>::value_type;
-  requires std::copy_constructible<Alloc>;
-  requires std::same_as<typename std::allocator_traits<Alloc>::pointer, typename std::allocator_traits<Alloc>::value_type *>;
-  {
-    a.allocate(n)
-  } -> std::same_as<typename std::allocator_traits<Alloc>::pointer>;
-  {
-    a.deallocate(std::declval<typename std::allocator_traits<Alloc>::pointer>(), n)
-  } -> std::same_as<void>;
+template <typename T>
+struct reverse_iterator_base
+{
+  using type = void;
 };
+
+template <typename Iter>
+struct reverse_iterator_base<std::reverse_iterator<Iter>>
+{
+  using type = Iter;
+};
+
+template <typename T>
+using reverse_iterator_base_t = typename reverse_iterator_base<T>::type;
+
+template <typename Iter>
+concept radix_sort_writable = std::input_iterator<Iter> && requires (Iter it, std::iter_value_t<Iter> value) {
+  *it = std::move(value);
+};
+
+template <typename Iter>
+concept radix_sort_iterator =
+    (std::contiguous_iterator<Iter> && radix_sort_writable<Iter>) ||
+    (is_reverse_iterator_v<Iter> && std::contiguous_iterator<reverse_iterator_base_t<Iter>> && radix_sort_writable<reverse_iterator_base_t<Iter>>) ||
+    (std::random_access_iterator<Iter> && std::same_as<std::iter_value_t<Iter>, bool> && radix_sort_writable<Iter>);
+
+// Fancy pointers must be nullable, default-constructible, and support
+// std::to_address; `pointer{}` is the empty value tested by allocator_holder.
+template <typename Alloc>
+concept standard_allocator =
+    requires { typename Alloc::value_type; } &&
+    requires (Alloc a, typename std::allocator_traits<Alloc>::size_type n, typename std::allocator_traits<Alloc>::pointer p) {
+      requires std::copy_constructible<Alloc>;
+      requires std::default_initializable<typename std::allocator_traits<Alloc>::pointer>;
+      {
+        p == typename std::allocator_traits<Alloc>::pointer {}
+      } -> std::convertible_to<bool>;
+      {
+        std::to_address(p)
+      } -> std::same_as<typename std::allocator_traits<Alloc>::value_type *>;
+      {
+        a.allocate(n)
+      } -> std::same_as<typename std::allocator_traits<Alloc>::pointer>;
+      {
+        a.deallocate(std::declval<typename std::allocator_traits<Alloc>::pointer>(), n)
+      } -> std::same_as<void>;
+    };
+
+template <typename Alloc, typename T>
+concept standard_allocator_for = standard_allocator<Alloc> && std::same_as<typename Alloc::value_type, T>;
 
 template <standard_allocator Alloc>
 class allocator_holder
@@ -325,10 +367,14 @@ public:
   using pointer    = typename allocator_traits::pointer;
   using size_type  = typename allocator_traits::size_type;
 
+  static_assert(std::default_initializable<value_type>,
+                "stable_radix_sort requires a default-constructible value type for its temporary buffer");
+
   constexpr explicit allocator_holder(size_type size, Alloc const &alloc)
       : alloc_(alloc)
       , size_(size)
-      , buffer_(size == 0 ? nullptr : allocator_traits::allocate(alloc_, size))
+      , fancy_buffer_(size == 0 ? pointer {} : allocator_traits::allocate(alloc_, size))
+      , raw_buffer_(fancy_buffer_ == pointer {} ? nullptr : std::to_address(fancy_buffer_))
   {
     construct();
   }
@@ -338,7 +384,7 @@ public:
 
   constexpr ~allocator_holder() { destroy(); }
 
-  constexpr pointer data() noexcept { return buffer_; }
+  constexpr value_type *data() noexcept { return raw_buffer_; }
 
 private:
   constexpr void construct()
@@ -347,13 +393,13 @@ private:
       size_type i = 0;
       try {
         for (; i < size_; ++i) {
-          allocator_traits::construct(alloc_, buffer_ + i);
+          allocator_traits::construct(alloc_, raw_buffer_ + i);
         }
       } catch (...) {
         for (size_type j = 0; j < i; ++j) {
-          allocator_traits::destroy(alloc_, buffer_ + j);
+          allocator_traits::destroy(alloc_, raw_buffer_ + j);
         }
-        allocator_traits::deallocate(alloc_, buffer_, size_);
+        allocator_traits::deallocate(alloc_, fancy_buffer_, size_);
         throw;
       }
     }
@@ -361,19 +407,20 @@ private:
 
   constexpr void destroy() noexcept
   {
-    if (buffer_ == nullptr) return;
+    if (fancy_buffer_ == pointer {}) return;
 
     if constexpr (!std::is_trivially_destructible_v<value_type>) {
       for (size_type i = 0; i < size_; ++i) {
-        allocator_traits::destroy(alloc_, buffer_ + i);
+        allocator_traits::destroy(alloc_, raw_buffer_ + i);
       }
     }
-    allocator_traits::deallocate(alloc_, buffer_, size_);
+    allocator_traits::deallocate(alloc_, fancy_buffer_, size_);
   }
 
   [[no_unique_address]] Alloc alloc_;
   size_type size_ { 0 };
-  pointer buffer_ { nullptr };
+  pointer fancy_buffer_ {};
+  value_type *raw_buffer_ { nullptr };
 };
 
 struct hybrid_alloc_tag
@@ -706,9 +753,11 @@ struct thread_chunk_info
 template <typename T>
 struct thread_chunk_stats
 {
-  bool is_sorted; ///< Whether the chunk is locally sorted (ascending).
-  T min_val;      ///< Minimum value in the chunk.
-  T max_val;      ///< Maximum value in the chunk.
+  bool has_any;   ///< Whether the chunk contains any elements.
+  bool is_sorted; ///< Whether the chunk is locally sorted in radix-key order.
+  T min_x;        ///< Minimum final radix key in the chunk.
+  T max_x;        ///< Maximum final radix key in the chunk.
+  T combined;     ///< Pass-count estimate derived from min_x/max_x.
 };
 
 /// Returns the half-open [beg, end) range assigned to thread `tid`.
@@ -741,9 +790,9 @@ constexpr void sort_bool(RandIter first, RandIter last)
 {
   std::size_t cnt = 0;
   for (auto curr = first; curr < last; ++curr) {
-    auto const v   = *curr;
-    *curr          = !Descending;
-    *(first + cnt) = v;
+    bool const v    = static_cast<bool>(*curr);
+    *curr           = !Descending;
+    *(first + cnt)  = v;
     cnt += static_cast<std::size_t>(Descending ? v : !v);
   }
 }
@@ -757,10 +806,11 @@ constexpr void insertion_sort(BiIter first, BiIter last, Compare comp = {})
   if (first == last) [[unlikely]]
     return;
 
+  using value_type = std::iter_value_t<BiIter>;
   for (auto current = std::next(first); current != last; ++current) {
-    auto value = std::move(*current);
-    auto hole  = current;
-    auto prev  = hole;
+    value_type value = std::move(*current);
+    auto hole        = current;
+    auto prev        = hole;
     while (prev != first && comp(value, *std::prev(prev))) {
       --prev;
       *hole = std::move(*prev);
@@ -816,7 +866,7 @@ constexpr void integer_radix_sort(
 template <
     typename RadixTraits,
     std::random_access_iterator RandIter,
-    standard_allocator Allocator,
+    standard_allocator_for<std::iter_value_t<RandIter>> Allocator,
     unsigned_integral_projection<std::iter_value_t<RandIter>> Projection>
 struct radix_sort_impl_dispatcher;
 
@@ -824,7 +874,7 @@ struct radix_sort_impl_dispatcher;
 template <
     typename RadixTraits,
     std::random_access_iterator RandIter,
-    standard_allocator Allocator,
+    standard_allocator_for<std::iter_value_t<RandIter>> Allocator,
     unsigned_integral_projection<std::iter_value_t<RandIter>> Projection>
 requires (
     RadixTraits::sort_strategy == radix_sort_strategy::lsd &&
@@ -843,6 +893,7 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
   using typename base::aligned_hist2d_t;
   using typename base::hist_t;
   using typename base::key_t;
+  using typename base::uint_t;
   using typename base::value_t;
   using hist2d_t = hist_t (*)[num_buckets];
 
@@ -851,26 +902,38 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
   static constexpr auto build_histogram(value_t const *data, std::size_t const n, hist2d_t hist2d, Projection proj)
       -> bool
   {
-    // Choose the comparison that indicates "not out of order":
-    // for ascending, we expect prev <= key; for descending, prev >= key.
-    auto comp = std::conditional_t<sort_order == radix_sort_order::ascending, std::greater_equal<>, std::less_equal<>> {};
+    // Compare the unsigned radix key (bit pattern), NOT the raw floating value.
+    // This correctly handles ±0.0: they compare equal as floats but have
+    // distinct bit patterns, and radix sort orders them by pattern.
+    //
+    // For ascending we expect prev <= x  (i.e. x >= prev).
+    // For descending we expect prev >= x  (i.e. x <= prev).
+    auto comp = std::conditional_t<
+        sort_order == radix_sort_order::ascending,
+        std::greater_equal<uint_t>,
+        std::less_equal<uint_t>> {};
+
+    // Sentinels chosen so that the very first comparison is always true:
+    //   ascending : prev = 0        -> x >= 0        always true
+    //   descending: prev = UINT_MAX -> x <= UINT_MAX always true
     auto prev = sort_order == radix_sort_order::ascending
-                  ? std::numeric_limits<key_t>::lowest()
-                  : std::numeric_limits<key_t>::max();
+                  ? std::numeric_limits<uint_t>::lowest()
+                  : std::numeric_limits<uint_t>::max();
 
     auto const &key_map = proj.get_key_map();
     bool is_sorted      = true;
 
     for (std::size_t i = 0; i < n; ++i) {
-      auto const key = key_map(data[i]);
-      is_sorted      = is_sorted && comp(key, prev);
-      prev           = key;
+      auto const x = Projection::transform(key_map(data[i]));
+
+      is_sorted = is_sorted && comp(x, prev);
+      prev      = x;
 
       // Build histograms for all passes in a single scan (fold over
       // pass_indices at compile time). Scanning once instead of num_passes
       // times keeps the loop in L1 cache.
       [&]<std::size_t... Is>(std::index_sequence<Is...>) {
-        ((++hist2d[Is][nth_radix<RadixTraits>(Projection::transform(key), Is)]), ...);
+        ((++hist2d[Is][nth_radix<RadixTraits>(x, Is)]), ...);
       }(pass_indices);
     }
     return is_sorted;
@@ -937,15 +1000,16 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
   {
     auto *const original = data;
 
-    // Allocate temporary element buffer.
-    allocator_holder<Allocator> holder(n, allocator);
-    auto *RADIX_SORT_RESTRICT buffer = holder.data();
-
     auto run_sort = [&](auto &hist2d) constexpr {
       // Step 1: build histograms and check sortedness.
       if (build_histogram(data, n, hist2d, proj)) {
         return; // Already sorted; nothing to do.
       }
+
+      // Allocate the temporary element buffer only after the sortedness check:
+      // already-sorted input should not pay for n default constructions.
+      allocator_holder<Allocator> holder(n, allocator);
+      auto *RADIX_SORT_RESTRICT buffer = holder.data();
 
       // Step 2: convert counts to offsets and get non-empty bucket counts.
       std::size_t non_empty_counts[num_passes];
@@ -977,7 +1041,7 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
 template <
     typename RadixTraits,
     std::random_access_iterator RandIter,
-    standard_allocator Allocator,
+    standard_allocator_for<std::iter_value_t<RandIter>> Allocator,
     unsigned_integral_projection<std::iter_value_t<RandIter>> Projection>
 requires (
     RadixTraits::sort_strategy == radix_sort_strategy::msd &&
@@ -1009,22 +1073,38 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
       -> std::pair<std::size_t, bool>
   {
     auto prev = sort_order == radix_sort_order::ascending
-                  ? std::numeric_limits<key_t>::lowest()
-                  : std::numeric_limits<key_t>::max();
-    auto comp = std::conditional_t<sort_order == radix_sort_order::ascending, std::greater_equal<>, std::less_equal<>> {};
+                  ? std::numeric_limits<uint_t>::lowest()
+                  : std::numeric_limits<uint_t>::max();
+
+    auto comp = std::conditional_t<
+        sort_order == radix_sort_order::ascending,
+        std::greater_equal<uint_t>,
+        std::less_equal<uint_t>> {};
 
     auto const &key_map = proj.get_key_map();
     uint_t combined {};
     bool sorted = true;
     for (std::size_t i = 0; i < n; ++i) {
       auto const key = key_map(data[i]);
-      sorted         = sorted && comp(key, prev);
-      prev           = key;
+      auto const x   = Projection::transform(key);
+
+      sorted = sorted && comp(x, prev);
+      prev   = x;
+
       // OR all keys' bit patterns to find the overall msb.
       // This determines the actual pass count in the sort step,
       // skipping passes for leading-zero bytes at no extra scan cost.
-      combined |= std::bit_cast<uint_t>(key);
-      auto const x = Projection::transform(key);
+      //
+      // `bit_cast(key)` is the cheaper pass-count estimate and is sufficient
+      // for every key type except float at_first: that transform adds 1 and
+      // can carry into a higher byte. In that one case use the transformed
+      // key so the pass count cannot underestimate the scatter key.
+      if constexpr (std::is_floating_point_v<key_t> &&
+                    RadixTraits::nans_pos_handling == radix_nans_pos_handling::at_first) {
+        combined |= x;
+      } else {
+        combined |= std::bit_cast<uint_t>(key);
+      }
       ++hist2d[first_pass][nth_radix<RadixTraits>(x, first_pass)];
     }
 
@@ -1152,9 +1232,6 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
       Allocator const &allocator,
       Projection proj)
   {
-    allocator_holder<Allocator> holder(n, allocator);
-    auto *RADIX_SORT_RESTRICT buffer = holder.data();
-
     auto run_sort = [&](auto &hist2d) constexpr {
       // Only the first pass histogram needs to be cleared; other passes will be
       // cleared individually in `do_msd_recursion`.
@@ -1163,6 +1240,10 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
       // First pass scan: builds MSB histogram, checks sortedness, computes msb.
       auto const [msb, sorted] = first_pass_scan(data, n, hist2d, proj);
       if (sorted) return;
+
+      // Allocate the temporary element buffer only after the sortedness check.
+      allocator_holder<Allocator> holder(n, allocator);
+      auto *RADIX_SORT_RESTRICT buffer = holder.data();
 
       // Compute the actual number of passes needed based on the highest set bit.
       // Example: for 32-bit with 8-bit chunks, msb=24 -> passes=(24+8)/8=4.
@@ -1203,7 +1284,6 @@ struct radix_sort_par_helpers : RadixTraits
   using base = RadixTraits;
   using base::first_pass;
   using base::histogram_stack_threshold_bytes;
-  using base::is_sign_handling_on_first_pass;
   using base::nans_assumption;
   using base::num_buckets;
   using base::sort_order;
@@ -1222,16 +1302,17 @@ struct radix_sort_par_helpers : RadixTraits
   {
     auto comp = std::conditional_t<
         sort_order == radix_sort_order::ascending,
-        std::greater_equal<>,
-        std::less_equal<>> {};
+        std::greater_equal<uint_t>,
+        std::less_equal<uint_t>> {};
 
-    auto const &key_map              = proj.get_key_map();
-    std::size_t const threads             = info.threads;
-    std::size_t const remain              = info.remain;
-    std::size_t const step                = info.step;
-    using thread_chunk_stats_wrapped = thread_chunk_stats<key_t>;
-    auto const thread_bytes          = threads * sizeof(thread_chunk_stats_wrapped);
-    histogram_heap_holder<thread_chunk_stats_wrapped> stats_array {
+    auto const &key_map       = proj.get_key_map();
+    std::size_t const threads = info.threads;
+    std::size_t const remain  = info.remain;
+    std::size_t const step    = info.step;
+
+    using chunk_stats_t     = thread_chunk_stats<uint_t>;
+    auto const thread_bytes = threads * sizeof(chunk_stats_t);
+    histogram_heap_holder<chunk_stats_t> stats_array {
       hybrid_alloc_tag {},
       HYBRID_ALIGNED_ALLOC_THRESHOLD(
           thread_bytes,
@@ -1246,47 +1327,67 @@ struct radix_sort_par_helpers : RadixTraits
       int const tid         = omp_get_thread_num();
       auto const [beg, end] = compute_thread_chunk_range(static_cast<std::size_t>(tid), step, remain);
 
-      bool sorted  = true;
-      auto min_val = std::numeric_limits<key_t>::max();
-      auto max_val = std::numeric_limits<key_t>::lowest();
-      auto prev    = sort_order == radix_sort_order::ascending
-                       ? std::numeric_limits<key_t>::lowest()
-                       : std::numeric_limits<key_t>::max();
+      bool const has_any = (beg < end);
+      bool sorted        = true;
+      auto min_x         = std::numeric_limits<uint_t>::max();
+      auto max_x         = std::numeric_limits<uint_t>::lowest();
+      auto prev          = sort_order == radix_sort_order::ascending
+                             ? std::numeric_limits<uint_t>::lowest()
+                             : std::numeric_limits<uint_t>::max();
 
       for (std::size_t i = beg; i < end; ++i) {
         auto const key = key_map(data[i]);
-        sorted         = sorted && comp(key, prev);
-        prev           = key;
+        auto const x = Projection::transform(key);
+        if (x < min_x) min_x = x;
+        if (x > max_x) max_x = x;
 
-        auto x { Projection::template transform<is_sign_handling_on_first_pass>(key) };
+        sorted = sorted && comp(x, prev);
+        prev   = x;
+
         ++hist2d[tid][nth_radix<RadixTraits>(x, first_pass)];
-
-        // Skip NaN when computing min/max if NaNs are allowed (they break
-        // ordering).
-        if constexpr (std::is_floating_point_v<key_t> && nans_assumption == radix_nans_assumption::existence) {
-          if (std::isnan(key)) continue;
-        }
-        if (key < min_val) min_val = key;
-        if (key > max_val) max_val = key;
       }
-      stats_array[static_cast<std::size_t>(tid)] = thread_chunk_stats { sorted, min_val, max_val };
+
+      // Recover the pass-count estimate from the already-computed transformed
+      // min/max: unsigned keys can use them directly; signed/float values need
+      // the sign-bit normalization that maps their range back to raw bits.
+      // For all non-negative signed/float values `min_x` has the sign bit set
+      // (the transform adds it as a constant prefix), so clearing it recovers
+      // the raw span. Any negative value clears `min_x`'s sign bit and forces
+      // the full pass count.
+      uint_t combined_local = min_x | max_x;
+      if constexpr (is_signed_integer<key_t> || std::is_floating_point_v<key_t>) {
+        if ((min_x & RadixTraits::sign_bit_mask) != 0) {
+          combined_local &= ~RadixTraits::sign_bit_mask;
+        } else {
+          combined_local = RadixTraits::sign_bit_mask;
+        }
+      }
+      stats_array[static_cast<std::size_t>(tid)] = chunk_stats_t { has_any, sorted, min_x, max_x, combined_local };
     }
 
     // Merge per-thread statistics.
-    auto &[sorted_1, min_val_1, max_val_1] = stats_array[0];
-    uint_t combined {};
-    combined |= std::bit_cast<uint_t>(min_val_1) | std::bit_cast<uint_t>(max_val_1);
-    for (std::size_t i = 1; i < threads; ++i) {
-      auto const [sorted, min_val, max_val] = stats_array[i];
-      combined |= std::bit_cast<uint_t>(min_val) | std::bit_cast<uint_t>(max_val);
-      sorted_1 = sorted_1 && sorted;
+    bool sorted_all     = true;
+    uint_t combined     = 0;
+    uint_t prev_extreme = sort_order == radix_sort_order::ascending
+                            ? std::numeric_limits<uint_t>::lowest() // 0
+                            : std::numeric_limits<uint_t>::max();
+
+    for (std::size_t i = 0; i < threads; ++i) {
+      auto const &s = stats_array[i];
+      if (!s.has_any) continue;
+
+      combined |= s.combined;
+
       if constexpr (sort_order == radix_sort_order::ascending) {
-        sorted_1 = sorted_1 && (min_val >= stats_array[i - 1].max_val);
+        sorted_all   = sorted_all && (s.min_x >= prev_extreme);
+        prev_extreme = s.max_x;
       } else {
-        sorted_1 = sorted_1 && (max_val <= stats_array[i - 1].min_val);
+        sorted_all   = sorted_all && (s.max_x <= prev_extreme);
+        prev_extreme = s.min_x;
       }
+      sorted_all = sorted_all && s.is_sorted;
     }
-    return { highest_one_bit_index(combined), sorted_1 };
+    return { highest_one_bit_index(combined), sorted_all };
   }
 
   /// Per-thread histogram builder (like the seq version but parallelized).
@@ -1368,7 +1469,7 @@ struct radix_sort_par_helpers : RadixTraits
 template <
     typename RadixTraits,
     std::random_access_iterator RandIter,
-    standard_allocator Allocator,
+    standard_allocator_for<std::iter_value_t<RandIter>> Allocator,
     unsigned_integral_projection<std::iter_value_t<RandIter>> Projection>
 requires (
     RadixTraits::sort_strategy == radix_sort_strategy::lsd &&
@@ -1400,8 +1501,6 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
       Projection proj)
   {
     auto *const original = data;
-    allocator_holder<Allocator> holder(n, allocator);
-    auto *RADIX_SORT_RESTRICT buffer = holder.data();
 
     std::size_t const threads = static_cast<std::size_t>(::omp_get_max_threads());
     // Per-thread histogram: hist2d[tid][bucket] avoids atomic contention.
@@ -1424,6 +1523,9 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
     // layout requires iterative histogram-scatter per pass.
     auto [msb, sorted] = first_pass_scan(data, chunk_info, hist2d, proj);
     if (sorted) return;
+
+    allocator_holder<Allocator> holder(n, allocator);
+    auto *RADIX_SORT_RESTRICT buffer = holder.data();
 
     if (std::size_t num_empty_count = prefix_sum(hist2d, threads); num_empty_count > 1) {
       base::template do_scatter<is_sign_handling_on_first_pass>(data, chunk_info, buffer, first_pass, hist2d, proj);
@@ -1464,7 +1566,7 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
 template <
     typename RadixTraits,
     std::random_access_iterator RandIter,
-    standard_allocator Allocator,
+    standard_allocator_for<std::iter_value_t<RandIter>> Allocator,
     unsigned_integral_projection<std::iter_value_t<RandIter>> Projection>
 requires (
     RadixTraits::sort_strategy == radix_sort_strategy::msd &&
@@ -1579,9 +1681,6 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
       Allocator const &allocator,
       Projection proj)
   {
-    allocator_holder<Allocator> holder(n, allocator);
-    auto *RADIX_SORT_RESTRICT buffer = holder.data();
-
     std::size_t const threads    = static_cast<std::size_t>(::omp_get_max_threads());
     std::size_t const hist_size  = threads * num_buckets;
     std::size_t const hist_bytes = hist_size * sizeof(hist_t);
@@ -1601,6 +1700,9 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
     auto [msb, sorted] = first_pass_scan(data, chunk_info, hist2d, proj);
     if (sorted) return;
 
+    allocator_holder<Allocator> holder(n, allocator);
+    auto *RADIX_SORT_RESTRICT buffer = holder.data();
+
     auto const passes = (msb + bits_per_pass) / bits_per_pass;
     if (passes == num_passes && prefix_sum(hist2d, threads) > 1) {
       base::template do_scatter<true>(data, chunk_info, buffer, first_pass, hist2d, proj);
@@ -1615,8 +1717,8 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
 // Selects and invokes the correct radix_sort_impl_dispatcher.
 template <
     typename RadixTraits,
-    std::random_access_iterator RandIter,
-    stable_radix_sort_detail::standard_allocator Allocator,
+    stable_radix_sort_detail::radix_sort_iterator RandIter,
+    stable_radix_sort_detail::standard_allocator_for<std::iter_value_t<RandIter>> Allocator,
     unsigned_integral_projection<std::iter_value_t<RandIter>> Projection>
 constexpr void stable_radix_sort_impl(
     RandIter first,
@@ -1671,7 +1773,7 @@ constexpr void stable_radix_sort_impl(
 
     // 3. Regular path: Dispatch to the selected strategy
     //    (LSD/seq or LSD/par or MSD/seq or MSD/par).
-    radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>::sort(&*first, size, allocator, proj);
+    radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>::sort(std::to_address(first), size, allocator, proj);
   }
 }
 
@@ -1693,12 +1795,19 @@ constexpr void stable_radix_sort_impl(
  * implementation.
  *
  * @tparam RadixOptions  Compile‑time sorting options (see `radix_sort_options`).
- * @tparam RandIter      Random‑access iterator type.
- * @tparam Allocator     Allocator type (must satisfy `standard_allocator`).
+ * @tparam RandIter      Contiguous random-access iterator type. Reverse
+ *                      iterators of contiguous iterators and bool proxy ranges
+ *                      (e.g. `std::vector<bool>` / `std::deque<bool>`) are also
+ *                      supported.
+ * @tparam Allocator     Allocator type (must satisfy `standard_allocator`;
+ *                      its `pointer` may be a fancy pointer). Fancy pointers
+ *                      must be default-constructible, comparable to `{}`, and
+ *                      support `std::to_address`.
  * @tparam KeyMap        A callable `value_t -> arithmetic` (default: identity).
  * @param first          Inclusive start of the range.
  * @param last           Exclusive end of the range.
- * @param allocator      Allocator instance for temporary buffer.
+ * @param allocator      Allocator instance for the temporary element buffer.
+ *                      Histogram scratch storage uses the hybrid allocator.
  * @param key_map         Key extraction functor.
  *
  * @example
@@ -1708,15 +1817,15 @@ constexpr void stable_radix_sort_impl(
  *   constexpr radix_sort_options opts{
  *       .sort_strategy = radix_sort_strategy::msd,
  *       .sort_order = radix_sort_order::descending};
- *   std::stable_radix_sort<opts>(items.begin(), items.end(),
+ *   stdex::stable_radix_sort<opts>(items.begin(), items.end(),
  *                           std::allocator<Item>{},
  *                           [](const Item& x) { return x.score; });
  * @endcode
  */
 template <
     radix_sort_options RadixOptions,
-    std::random_access_iterator RandIter,
-    stable_radix_sort_detail::standard_allocator Allocator,
+    stable_radix_sort_detail::radix_sort_iterator RandIter,
+    stable_radix_sort_detail::standard_allocator_for<std::iter_value_t<RandIter>> Allocator,
     stable_radix_sort_detail::arithmetic_key_map<std::iter_value_t<RandIter>> KeyMap =
         stable_radix_sort_detail::radix_key_map_fn>
 constexpr void stable_radix_sort(
@@ -1757,7 +1866,8 @@ constexpr void stable_radix_sort(
  * All other parameters are the same as the four‑argument overload.
  *
  * @tparam RadixOptions  Compile‑time sorting options.
- * @tparam RandIter      Random‑access iterator type.
+ * @tparam RandIter      Contiguous random-access iterator type (see the general
+ *                      overload for the supported special cases).
  * @tparam KeyMap        A callable `value_t -> arithmetic` (default: identity).
  * @param first          Inclusive start of the range.
  * @param last           Exclusive end of the range.
@@ -1765,7 +1875,7 @@ constexpr void stable_radix_sort(
  */
 template <
     radix_sort_options RadixOptions,
-    std::random_access_iterator RandIter,
+    stable_radix_sort_detail::radix_sort_iterator RandIter,
     stable_radix_sort_detail::arithmetic_key_map<std::iter_value_t<RandIter>> KeyMap =
         stable_radix_sort_detail::radix_key_map_fn>
 constexpr void stable_radix_sort(RandIter first, RandIter last, KeyMap key_map = {})
@@ -1783,14 +1893,15 @@ constexpr void stable_radix_sort(RandIter first, RandIter last, KeyMap key_map =
  * using LSD radix sort with 8‑bit chunks and all other options at their
  * defaults. This overload is ideal for quick, generic use.
  *
- * @tparam RandIter  Random‑access iterator type.
+ * @tparam RandIter  Contiguous random-access iterator type (see the general
+ *                   overload for the supported special cases).
  * @tparam KeyMap    A callable `value_t -> arithmetic` (default: identity).
  * @param first      Inclusive start of the range.
  * @param last       Exclusive end of the range.
  * @param key_map    Key extraction functor.
  */
 template <
-    std::random_access_iterator RandIter,
+    stable_radix_sort_detail::radix_sort_iterator RandIter,
     stable_radix_sort_detail::arithmetic_key_map<std::iter_value_t<RandIter>> KeyMap =
         stable_radix_sort_detail::radix_key_map_fn>
 constexpr void stable_radix_sort(RandIter first, RandIter last, KeyMap key_map = {})

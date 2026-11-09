@@ -17,14 +17,21 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <concepts>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
+#include <iterator>
 #include <limits>
+#include <memory>
 #include <numeric>
 #include <random>
+#include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "int128.hpp"
@@ -101,6 +108,57 @@ constexpr stdex::radix_sort_options kDescOpts = [] {
   return opts;
 }();
 
+constexpr stdex::radix_sort_options kLsdSeqAsc = stdex::radix_sort_options {};
+
+constexpr stdex::radix_sort_options kLsdSeqDesc = [] {
+  auto opts       = stdex::radix_sort_options {};
+  opts.sort_order = stdex::radix_sort_order::descending;
+  return opts;
+}();
+
+constexpr stdex::radix_sort_options kMsdSeqAsc = [] {
+  auto opts            = stdex::radix_sort_options {};
+  opts.sort_strategy   = stdex::radix_sort_strategy::msd;
+  return opts;
+}();
+
+constexpr stdex::radix_sort_options kMsdSeqDesc = [] {
+  auto opts            = stdex::radix_sort_options {};
+  opts.sort_strategy   = stdex::radix_sort_strategy::msd;
+  opts.sort_order      = stdex::radix_sort_order::descending;
+  return opts;
+}();
+
+#ifdef _OPENMP
+constexpr stdex::radix_sort_options kLsdParAsc = [] {
+  auto opts             = stdex::radix_sort_options {};
+  opts.execution_policy = stdex::radix_execution_policy::par;
+  return opts;
+}();
+
+constexpr stdex::radix_sort_options kLsdParDesc = [] {
+  auto opts             = stdex::radix_sort_options {};
+  opts.execution_policy = stdex::radix_execution_policy::par;
+  opts.sort_order       = stdex::radix_sort_order::descending;
+  return opts;
+}();
+
+constexpr stdex::radix_sort_options kMsdParAsc = [] {
+  auto opts             = stdex::radix_sort_options {};
+  opts.sort_strategy    = stdex::radix_sort_strategy::msd;
+  opts.execution_policy = stdex::radix_execution_policy::par;
+  return opts;
+}();
+
+constexpr stdex::radix_sort_options kMsdParDesc = [] {
+  auto opts             = stdex::radix_sort_options {};
+  opts.sort_strategy    = stdex::radix_sort_strategy::msd;
+  opts.execution_policy = stdex::radix_execution_policy::par;
+  opts.sort_order       = stdex::radix_sort_order::descending;
+  return opts;
+}();
+#endif
+
 template <typename T>
 bool validateDescending(std::vector<T> v)
 {
@@ -142,12 +200,310 @@ std::vector<T> generateRandom(size_t n)
   return v;
 }
 
+enum class test_nan_position
+{
+  none,
+  first,
+  last
+};
+
+// Matches the documented ordering by radix key: -0.0 precedes +0.0, and NaN
+// can be placed at either end without relying on float comparisons.
+template <typename T>
+bool test_total_less(T a, T b, test_nan_position pos)
+{
+  if constexpr (std::is_floating_point_v<T>) {
+    bool const a_nan = std::isnan(a);
+    bool const b_nan = std::isnan(b);
+    if (pos == test_nan_position::first && a_nan != b_nan) return a_nan;
+    if (pos == test_nan_position::last && a_nan != b_nan) return b_nan;
+    if (a_nan || b_nan) return false;
+    if (a < b) return true;
+    if (b < a) return false;
+    return std::signbit(a) > std::signbit(b);
+  } else {
+    return a < b;
+  }
+}
+
+template <typename T>
+bool test_same_value(T a, T b)
+{
+  if constexpr (std::is_floating_point_v<T>) {
+    using uint_type = std::conditional_t<sizeof(T) == 4, std::uint32_t, std::uint64_t>;
+    return std::bit_cast<uint_type>(a) == std::bit_cast<uint_type>(b);
+  } else {
+    return a == b;
+  }
+}
+
+template <stdex::radix_sort_options Opts, typename T>
+bool test_matches_expected(std::vector<T> const &input)
+{
+  constexpr test_nan_position nan_pos = [] {
+    if constexpr (Opts.nans_pos_handling == stdex::radix_nans_pos_handling::at_first) {
+      return test_nan_position::first;
+    } else if constexpr (Opts.nans_pos_handling == stdex::radix_nans_pos_handling::at_last) {
+      return test_nan_position::last;
+    } else {
+      return test_nan_position::none;
+    }
+  }();
+  constexpr bool descending = Opts.sort_order == stdex::radix_sort_order::descending;
+
+  auto actual   = input;
+  auto expected = input;
+  std::stable_sort(expected.begin(), expected.end(), [](T const &a, T const &b) {
+    return descending ? test_total_less(b, a, nan_pos) : test_total_less(a, b, nan_pos);
+  });
+  stdex::stable_radix_sort<Opts>(actual.begin(), actual.end());
+  if (actual.size() != expected.size()) {
+    std::fprintf(stderr, "FAIL: size mismatch\n");
+    return false;
+  }
+  for (std::size_t i = 0; i < actual.size(); ++i) {
+    if (!test_same_value(actual[i], expected[i])) {
+      std::fprintf(stderr, "FAIL: mismatch at index %zu\n", i);
+      return false;
+    }
+  }
+  return true;
+}
+
 struct Item
 {
   double score;
   int originalIndex;
   bool operator== (Item const &) const = default;
 };
+
+template <class T>
+class test_fancy_ptr
+{
+public:
+  using element_type    = T;
+  using difference_type = std::ptrdiff_t;
+  template <class U>
+  using rebind = test_fancy_ptr<U>;
+
+  constexpr test_fancy_ptr() noexcept = default;
+  constexpr explicit test_fancy_ptr(T *p) noexcept
+      : p_(p)
+  {
+  }
+
+  constexpr T *operator->() const noexcept { return p_; }
+  constexpr T &operator*() const noexcept { return *p_; }
+  constexpr T *get() const noexcept { return p_; }
+
+  friend constexpr bool operator== (test_fancy_ptr a, test_fancy_ptr b) noexcept { return a.p_ == b.p_; }
+
+private:
+  T *p_ {};
+};
+
+struct test_allocation_stats
+{
+  std::size_t allocations   = 0;
+  std::size_t deallocations = 0;
+};
+
+template <class T>
+struct test_fancy_alloc
+{
+  using value_type = T;
+  using pointer    = test_fancy_ptr<T>;
+  using size_type  = std::size_t;
+
+  test_allocation_stats *stats = nullptr;
+
+  constexpr test_fancy_alloc() noexcept = default;
+  constexpr explicit test_fancy_alloc(test_allocation_stats &s) noexcept
+      : stats(&s)
+  {
+  }
+
+  pointer allocate(size_type n)
+  {
+    if (stats != nullptr) ++stats->allocations;
+    return pointer { static_cast<T *>(::operator new(n * sizeof(T))) };
+  }
+
+  void deallocate(pointer p, size_type) noexcept
+  {
+    if (stats != nullptr) ++stats->deallocations;
+    ::operator delete(p.get());
+  }
+};
+
+struct test_counting_state
+{
+  std::size_t allocations   = 0;
+  std::size_t deallocations = 0;
+};
+
+template <class T>
+struct test_counting_alloc
+{
+  using value_type = T;
+  using size_type  = std::size_t;
+
+  test_counting_state *state = nullptr;
+
+  constexpr test_counting_alloc() noexcept = default;
+  constexpr explicit test_counting_alloc(test_counting_state &s) noexcept
+      : state(&s)
+  {
+  }
+
+  T *allocate(size_type n)
+  {
+    ++state->allocations;
+    return std::allocator<T> {}.allocate(n);
+  }
+
+  void deallocate(T *p, size_type n) noexcept
+  {
+    ++state->deallocations;
+    std::allocator<T> {}.deallocate(p, n);
+  }
+};
+
+template <stdex::radix_sort_options Opts, typename T>
+bool test_sorted_skips_element_scratch(std::vector<T> const &input)
+{
+  test_counting_state state;
+  auto v = input;
+  stdex::stable_radix_sort<Opts>(v.begin(), v.end(), test_counting_alloc<T> { state });
+  return state.allocations == 0 && state.deallocations == 0 && v == input;
+}
+
+template <stdex::radix_sort_options Opts, typename T>
+bool test_unsorted_allocates_element_scratch(std::vector<T> const &input)
+{
+  test_counting_state state;
+  auto v = input;
+  stdex::stable_radix_sort<Opts>(v.begin(), v.end(), test_counting_alloc<T> { state });
+  return state.allocations == 1 && state.deallocations == 1;
+}
+
+#ifdef _OPENMP
+template <stdex::radix_sort_options Opts, typename T>
+std::size_t test_parallel_first_pass_msb(std::vector<T> const &v)
+{
+  using traits = stdex::stable_radix_sort_detail::radix_sort_traits<
+      Opts, T, stdex::stable_radix_sort_detail::radix_key_map_fn>;
+  auto projection = stdex::stable_radix_sort_detail::radix_uint_projection
+                        .template operator()<Opts.nans_pos_handling>(
+                            std::in_place_type<T>, stdex::stable_radix_sort_detail::radix_key_map);
+  using projection_t = decltype(projection);
+  using helper       = stdex::stable_radix_sort_detail::radix_sort_par_helpers<traits, std::allocator<T>, projection_t>;
+
+  std::size_t const threads   = static_cast<std::size_t>(::omp_get_max_threads());
+  std::size_t const hist_size = threads * traits::num_buckets;
+  std::vector<typename traits::hist_t> hist(hist_size);
+  using hist2d_t = typename traits::hist_t (*)[traits::num_buckets];
+  auto *hist2d   = reinterpret_cast<hist2d_t>(hist.data());
+
+  stdex::stable_radix_sort_detail::thread_chunk_info const info(threads, v.size() % threads, v.size() / threads);
+  auto const [msb, sorted] = helper::first_pass_scan(v.data(), info, hist2d, projection);
+  (void) sorted;
+  return msb;
+}
+
+template <stdex::radix_sort_options Opts, typename T>
+std::size_t test_raw_first_pass_msb(std::vector<T> const &v)
+{
+  using traits = stdex::stable_radix_sort_detail::radix_sort_traits<
+      Opts, T, stdex::stable_radix_sort_detail::radix_key_map_fn>;
+  typename traits::uint_t combined {};
+  for (auto const &x : v) combined |= std::bit_cast<typename traits::uint_t>(x);
+  return stdex::highest_one_bit_index(combined);
+}
+#endif
+
+struct test_tracked_value
+{
+  std::uint32_t key {};
+
+  static inline std::size_t default_constructions = 0;
+  static inline std::size_t destructions          = 0;
+
+  test_tracked_value() { ++default_constructions; }
+  explicit test_tracked_value(std::uint32_t k)
+      : key(k)
+  {
+  }
+
+  test_tracked_value(test_tracked_value const &)                = default;
+  test_tracked_value(test_tracked_value &&) noexcept            = default;
+  test_tracked_value &operator= (test_tracked_value const &)    = default;
+  test_tracked_value &operator= (test_tracked_value &&) noexcept = default;
+  ~test_tracked_value() { ++destructions; }
+
+  bool operator== (test_tracked_value const &) const = default;
+};
+
+struct test_throwing_value
+{
+  std::uint32_t key {};
+
+  static inline int live                 = 0;
+  static inline int default_calls        = 0;
+  static inline int throw_at_default_call = -1;
+
+  test_throwing_value()
+  {
+    int const call = default_calls++;
+    if (call == throw_at_default_call) throw std::runtime_error("test_throwing_value");
+    ++live;
+  }
+
+  explicit test_throwing_value(std::uint32_t k)
+      : key(k)
+  {
+    ++live;
+  }
+
+  test_throwing_value(test_throwing_value const &other)
+      : key(other.key)
+  {
+    ++live;
+  }
+
+  test_throwing_value(test_throwing_value &&other) noexcept
+      : key(other.key)
+  {
+    ++live;
+  }
+
+  test_throwing_value &operator= (test_throwing_value const &) = default;
+  test_throwing_value &operator= (test_throwing_value &&) noexcept = default;
+  ~test_throwing_value() { --live; }
+};
+
+static_assert(std::same_as<test_fancy_alloc<uint32_t>::pointer, test_fancy_ptr<uint32_t>>);
+static_assert(stdex::stable_radix_sort_detail::standard_allocator<test_fancy_alloc<uint32_t>>);
+static_assert(stdex::stable_radix_sort_detail::standard_allocator<test_counting_alloc<uint32_t>>);
+
+template <class It>
+concept accepts_default_radix_sort = requires (It first, It last) {
+  stdex::stable_radix_sort(first, last);
+};
+
+static_assert(accepts_default_radix_sort<std::vector<uint32_t>::iterator>);
+static_assert(!accepts_default_radix_sort<std::deque<uint32_t>::iterator>);
+static_assert(accepts_default_radix_sort<std::vector<bool>::iterator>);
+static_assert(accepts_default_radix_sort<std::deque<bool>::iterator>);
+static_assert(accepts_default_radix_sort<std::reverse_iterator<std::vector<bool>::iterator>>);
+static_assert(!accepts_default_radix_sort<std::vector<bool>::const_iterator>);
+static_assert(!accepts_default_radix_sort<const uint32_t *>);
+static_assert(!accepts_default_radix_sort<std::reverse_iterator<const uint32_t *>>);
+
+static_assert(stdex::stable_radix_sort_detail::radix_sort_iterator<std::vector<bool>::iterator>);
+static_assert(stdex::stable_radix_sort_detail::radix_sort_iterator<std::deque<bool>::iterator>);
+static_assert(!stdex::stable_radix_sort_detail::radix_sort_iterator<std::vector<bool>::const_iterator>);
+static_assert(!stdex::stable_radix_sort_detail::radix_sort_iterator<const uint32_t *>);
 
 int g_tests_run    = 0;
 int g_tests_passed = 0;
@@ -296,6 +652,173 @@ static void test_float_special_values()
   validate(std::vector<double> { -0.5, -0.1, -0.9, -0.3, -0.7 });
   PASS();
 }
+
+static void test_float_nan_positions()
+{
+  TEST_RADIX(FloatNanPositions);
+
+  // Mix real NaNs with the subnormal patterns whose at_first +1 transform
+  // carries across a byte boundary (0x0000FFFF -> 0x00010000). A pass count
+  // derived from raw bit_cast() would skip the byte containing that carry.
+  constexpr std::uint32_t patterns[] = {
+    0x00000000U, // +0.0
+    0x0000FFFFU, // subnormal
+    0x00000001U, // denorm_min
+    0x7F7FFFFFU, // +FLT_MAX
+    0xFF800000U, // -inf
+    0x7FC00001U, // quiet NaN
+    0xFFC00000U, // negative quiet NaN
+    0x7F800001U, // signalling NaN pattern
+  };
+  std::vector<float> v;
+  for (int i = 0; i < 1000; ++i) v.push_back(std::bit_cast<float>(patterns[i % std::size(patterns)]));
+
+  constexpr auto with_nans = [](stdex::radix_sort_options base, stdex::radix_nans_pos_handling pos) {
+    base.nans_assumption   = stdex::radix_nans_assumption::existence;
+    base.nans_pos_handling = pos;
+    return base;
+  };
+
+  constexpr auto kLsdSeqAtFirst = with_nans(kLsdSeqAsc, stdex::radix_nans_pos_handling::at_first);
+  constexpr auto kLsdSeqAtLast  = with_nans(kLsdSeqAsc, stdex::radix_nans_pos_handling::at_last);
+  constexpr auto kMsdSeqAtFirst = with_nans(kMsdSeqAsc, stdex::radix_nans_pos_handling::at_first);
+  constexpr auto kMsdSeqAtLast  = with_nans(kMsdSeqAsc, stdex::radix_nans_pos_handling::at_last);
+  constexpr auto kMsdSeqDescAtFirst =
+      with_nans(kMsdSeqDesc, stdex::radix_nans_pos_handling::at_first);
+  constexpr auto kMsdBits16AtFirst = with_nans(
+      [] {
+        auto opts         = stdex::radix_sort_options {};
+        opts.sort_strategy = stdex::radix_sort_strategy::msd;
+        opts.bits_per_pass = stdex::radix_bits_per_pass::bits16;
+        return opts;
+      }(),
+      stdex::radix_nans_pos_handling::at_first);
+
+  bool ok = true;
+  ok = test_matches_expected<kLsdSeqAtFirst>(v) && ok;
+  ok = test_matches_expected<kLsdSeqAtLast>(v) && ok;
+  ok = test_matches_expected<kMsdSeqAtFirst>(v) && ok;
+  ok = test_matches_expected<kMsdSeqAtLast>(v) && ok;
+  ok = test_matches_expected<kMsdSeqDescAtFirst>(v) && ok;
+  ok = test_matches_expected<kMsdBits16AtFirst>(v) && ok;
+#ifdef _OPENMP
+  constexpr auto kLsdParAtFirst = with_nans(kLsdParAsc, stdex::radix_nans_pos_handling::at_first);
+  constexpr auto kLsdParAtLast  = with_nans(kLsdParAsc, stdex::radix_nans_pos_handling::at_last);
+  constexpr auto kMsdParAtFirst = with_nans(kMsdParAsc, stdex::radix_nans_pos_handling::at_first);
+  constexpr auto kMsdParAtLast  = with_nans(kMsdParAsc, stdex::radix_nans_pos_handling::at_last);
+  ok = test_matches_expected<kLsdParAtFirst>(v) && ok;
+  ok = test_matches_expected<kLsdParAtLast>(v) && ok;
+  ok = test_matches_expected<kMsdParAtFirst>(v) && ok;
+  ok = test_matches_expected<kMsdParAtLast>(v) && ok;
+#endif
+  if (!ok) {
+    FAIL_MSG("float NaN position mismatch");
+    return;
+  }
+  PASS();
+}
+
+static void test_negative_values_all_paths()
+{
+  TEST_RADIX(NegativeValuesAllPaths);
+  bool ok = true;
+
+  // The {0, -1} split is the smallest shape that exposes a first-pass scan
+  // using a digit-only transform for LSD: raw signed/float keys put -1 after 0.
+  std::vector<std::int32_t> ints;
+  for (int i = 0; i < 100; ++i) ints.push_back(0);
+  for (int i = 0; i < 100; ++i) ints.push_back(-1);
+  ints.push_back(std::numeric_limits<std::int32_t>::min());
+  ints.push_back(std::numeric_limits<std::int32_t>::max());
+  ints.push_back(1);
+  ints.push_back(-2);
+
+  ok = test_matches_expected<kLsdSeqAsc>(ints) && ok;
+  ok = test_matches_expected<kLsdSeqDesc>(ints) && ok;
+  ok = test_matches_expected<kMsdSeqAsc>(ints) && ok;
+  ok = test_matches_expected<kMsdSeqDesc>(ints) && ok;
+#ifdef _OPENMP
+  ok = test_matches_expected<kLsdParAsc>(ints) && ok;
+  ok = test_matches_expected<kLsdParDesc>(ints) && ok;
+  ok = test_matches_expected<kMsdParAsc>(ints) && ok;
+  ok = test_matches_expected<kMsdParDesc>(ints) && ok;
+#endif
+  if (!ok) {
+    FAIL_MSG("int32 negative ordering mismatch");
+    return;
+  }
+
+  std::vector<float> floats;
+  for (int i = 0; i < 100; ++i) floats.push_back(0.0f);
+  for (int i = 0; i < 100; ++i) floats.push_back(-1.0f);
+  floats.push_back(-std::numeric_limits<float>::max());
+  floats.push_back(std::numeric_limits<float>::denorm_min());
+  floats.push_back(-std::numeric_limits<float>::denorm_min());
+  floats.push_back(std::numeric_limits<float>::infinity());
+  floats.push_back(-std::numeric_limits<float>::infinity());
+
+  ok = test_matches_expected<kLsdSeqAsc>(floats) && ok;
+  ok = test_matches_expected<kLsdSeqDesc>(floats) && ok;
+  ok = test_matches_expected<kMsdSeqAsc>(floats) && ok;
+  ok = test_matches_expected<kMsdSeqDesc>(floats) && ok;
+#ifdef _OPENMP
+  ok = test_matches_expected<kLsdParAsc>(floats) && ok;
+  ok = test_matches_expected<kLsdParDesc>(floats) && ok;
+  ok = test_matches_expected<kMsdParAsc>(floats) && ok;
+  ok = test_matches_expected<kMsdParDesc>(floats) && ok;
+#endif
+  if (!ok) {
+    FAIL_MSG("float negative ordering mismatch");
+    return;
+  }
+
+  std::vector<double> doubles;
+  for (int i = 0; i < 100; ++i) doubles.push_back(0.0);
+  for (int i = 0; i < 100; ++i) doubles.push_back(-1.0);
+  doubles.push_back(-std::numeric_limits<double>::max());
+  doubles.push_back(std::numeric_limits<double>::denorm_min());
+  ok = test_matches_expected<kLsdSeqAsc>(doubles) && ok;
+  ok = test_matches_expected<kMsdSeqAsc>(doubles) && ok;
+#ifdef _OPENMP
+  ok = test_matches_expected<kLsdParAsc>(doubles) && ok;
+  ok = test_matches_expected<kMsdParAsc>(doubles) && ok;
+#endif
+  if (!ok) {
+    FAIL_MSG("double negative ordering mismatch");
+    return;
+  }
+  PASS();
+}
+
+#ifdef _OPENMP
+static void test_parallel_pass_count()
+{
+  TEST_RADIX(ParallelPassCount);
+  std::vector<std::int64_t> i64;
+  for (int i = 0; i < 10000; ++i) i64.push_back(static_cast<std::int64_t>(i % 256));
+
+  std::vector<std::int32_t> i32;
+  for (int i = 0; i < 10000; ++i) i32.push_back(static_cast<std::int32_t>(i % 256));
+
+  std::vector<float> tiny(10000, 1e-38f);
+  std::vector<float> one(10000, 1.0f);
+  std::vector<float> zeros;
+  for (int i = 0; i < 10000; ++i) zeros.push_back((i % 2 == 0) ? 0.0f : -0.0f);
+
+  bool ok = true;
+  ok = (test_parallel_first_pass_msb<kLsdParAsc>(i64) == test_raw_first_pass_msb<kLsdParAsc>(i64)) && ok;
+  ok = (test_parallel_first_pass_msb<kLsdParAsc>(i32) == test_raw_first_pass_msb<kLsdParAsc>(i32)) && ok;
+  ok = (test_parallel_first_pass_msb<kMsdParAsc>(i64) == test_raw_first_pass_msb<kMsdParAsc>(i64)) && ok;
+  ok = (test_parallel_first_pass_msb<kLsdParAsc>(tiny) == test_raw_first_pass_msb<kLsdParAsc>(tiny)) && ok;
+  ok = (test_parallel_first_pass_msb<kLsdParAsc>(one) == test_raw_first_pass_msb<kLsdParAsc>(one)) && ok;
+  ok = (test_parallel_first_pass_msb<kLsdParAsc>(zeros) == test_raw_first_pass_msb<kLsdParAsc>(zeros)) && ok;
+  if (!ok) {
+    FAIL_MSG("parallel first-pass pass-count estimate regressed");
+    return;
+  }
+  PASS();
+}
+#endif
 
 // ============================================================================
 // Descending order
@@ -505,15 +1028,37 @@ static void test_all_same_bucket()
 static void test_early_exit_sorted()
 {
   TEST_RADIX(EarlyExitSorted);
-  {
-    std::vector<uint64_t> v(10000);
-    std::iota(v.begin(), v.end(), uint64_t(0));
-    validate(v);
+  std::vector<std::int64_t> sorted(10000);
+  std::iota(sorted.begin(), sorted.end(), int64_t(-5000));
+  std::vector<std::int64_t> reverse_sorted(sorted.rbegin(), sorted.rend());
+
+  bool ok = true;
+  ok = test_sorted_skips_element_scratch<kLsdSeqAsc>(sorted) && ok;
+  ok = test_sorted_skips_element_scratch<kMsdSeqAsc>(sorted) && ok;
+  ok = test_sorted_skips_element_scratch<kLsdSeqDesc>(reverse_sorted) && ok;
+  ok = test_sorted_skips_element_scratch<kMsdSeqDesc>(reverse_sorted) && ok;
+#ifdef _OPENMP
+  ok = test_sorted_skips_element_scratch<kLsdParAsc>(sorted) && ok;
+  ok = test_sorted_skips_element_scratch<kMsdParAsc>(sorted) && ok;
+  ok = test_sorted_skips_element_scratch<kLsdParDesc>(reverse_sorted) && ok;
+  ok = test_sorted_skips_element_scratch<kMsdParDesc>(reverse_sorted) && ok;
+#endif
+  if (!ok) {
+    FAIL_MSG("sorted input allocated element scratch");
+    return;
   }
-  {
-    std::vector<int64_t> v(10000);
-    std::iota(v.begin(), v.end(), int64_t(-5000));
-    validate(v);
+
+  auto shuffled = sorted;
+  std::shuffle(shuffled.begin(), shuffled.end(), rng);
+  ok = test_unsorted_allocates_element_scratch<kLsdSeqAsc>(shuffled) && ok;
+  ok = test_unsorted_allocates_element_scratch<kMsdSeqAsc>(shuffled) && ok;
+#ifdef _OPENMP
+  ok = test_unsorted_allocates_element_scratch<kLsdParAsc>(shuffled) && ok;
+  ok = test_unsorted_allocates_element_scratch<kMsdParAsc>(shuffled) && ok;
+#endif
+  if (!ok) {
+    FAIL_MSG("unsorted input did not use element scratch exactly once");
+    return;
   }
   PASS();
 }
@@ -532,6 +1077,20 @@ static void test_custom_projection()
     stdex::stable_radix_sort(v.begin(), v.end(), [](int32_t x) { return x % 10; });
     if (v != expected) {
       FAIL_MSG("modulo projection mismatch");
+      return;
+    }
+  }
+  {
+    // Regression: the 3-argument options overload must not lose overload
+    // resolution to the allocator overload when KeyMap is not an allocator.
+    std::vector<int32_t> v(200);
+    for (auto &x : v) x = static_cast<int32_t>(rng() % 1000);
+    auto expected = v;
+    std::stable_sort(expected.begin(), expected.end(), [](int32_t a, int32_t b) { return (a % 10) < (b % 10); });
+    auto key_map = [](int32_t x) { return x % 10; };
+    stdex::stable_radix_sort<kMsdSeqAsc>(v.begin(), v.end(), key_map);
+    if (v != expected) {
+      FAIL_MSG("options + key map overload mismatch");
       return;
     }
   }
@@ -780,6 +1339,172 @@ static void test_bool_type()
   PASS();
 }
 
+static void test_vector_bool()
+{
+  TEST_RADIX(VectorBool);
+  {
+    std::vector<bool> v;
+    for (int i = 0; i < 1000; ++i) v.push_back((i * 37) % 5 < 2);
+    auto expected = v;
+    std::stable_sort(expected.begin(), expected.end());
+    stdex::stable_radix_sort(v.begin(), v.end());
+    if (v != expected) {
+      FAIL_MSG("vector<bool> large mismatch");
+      return;
+    }
+  }
+  {
+    std::vector<bool> v { true, false, true, false, false, true, false, true };
+    auto expected = v;
+    std::stable_sort(expected.begin(), expected.end());
+    stdex::stable_radix_sort(v.begin(), v.end());
+    if (v != expected) {
+      FAIL_MSG("vector<bool> small mismatch");
+      return;
+    }
+  }
+  {
+    std::deque<bool> v;
+    for (int i = 0; i < 1000; ++i) v.push_back((i * 37) % 5 < 2);
+    auto expected = v;
+    std::stable_sort(expected.begin(), expected.end());
+    stdex::stable_radix_sort(v.begin(), v.end());
+    if (v != expected) {
+      FAIL_MSG("deque<bool> mismatch");
+      return;
+    }
+  }
+  {
+    std::vector<bool> v;
+    for (int i = 0; i < 1000; ++i) v.push_back((i * 37) % 5 < 2);
+    auto expected = v;
+    std::stable_sort(expected.begin(), expected.end(), std::greater<> {});
+    stdex::stable_radix_sort(v.rbegin(), v.rend());
+    if (v != expected) {
+      FAIL_MSG("reverse vector<bool> descending mismatch");
+      return;
+    }
+  }
+  PASS();
+}
+
+static void test_signed_zero()
+{
+  TEST_RADIX(SignedZero);
+  bool ok = true;
+
+  std::vector<float> alternating;
+  for (int i = 0; i < 1000; ++i) alternating.push_back((i % 2 == 0) ? 0.0f : -0.0f);
+  ok = test_matches_expected<kLsdSeqAsc>(alternating) && ok;
+  ok = test_matches_expected<kLsdSeqDesc>(alternating) && ok;
+  ok = test_matches_expected<kMsdSeqAsc>(alternating) && ok;
+  ok = test_matches_expected<kMsdSeqDesc>(alternating) && ok;
+#ifdef _OPENMP
+  ok = test_matches_expected<kLsdParAsc>(alternating) && ok;
+  ok = test_matches_expected<kLsdParDesc>(alternating) && ok;
+  ok = test_matches_expected<kMsdParAsc>(alternating) && ok;
+  ok = test_matches_expected<kMsdParDesc>(alternating) && ok;
+#endif
+
+  std::vector<double> mixed;
+  for (int i = 0; i < 1000; ++i) {
+    switch (i % 5) {
+    case 0: mixed.push_back(0.0); break;
+    case 1: mixed.push_back(-0.0); break;
+    case 2: mixed.push_back(-3.5); break;
+    case 3: mixed.push_back(2.25); break;
+    default: mixed.push_back(-1.0); break;
+    }
+  }
+  ok = test_matches_expected<kLsdSeqAsc>(mixed) && ok;
+  ok = test_matches_expected<kMsdSeqAsc>(mixed) && ok;
+  ok = test_matches_expected<kLsdSeqDesc>(mixed) && ok;
+#ifdef _OPENMP
+  ok = test_matches_expected<kLsdParAsc>(mixed) && ok;
+  ok = test_matches_expected<kMsdParAsc>(mixed) && ok;
+#endif
+
+  if (!ok) {
+    FAIL_MSG("signed zero ordering mismatch");
+    return;
+  }
+  PASS();
+}
+
+static void test_fancy_pointer_allocator()
+{
+  TEST_RADIX(FancyPointerAllocator);
+  {
+    auto v        = generateRandom<uint32_t>(1000);
+    auto expected = v;
+    std::stable_sort(expected.begin(), expected.end());
+    test_allocation_stats stats;
+    stdex::stable_radix_sort<kLsdSeqAsc>(v.begin(), v.end(), test_fancy_alloc<uint32_t> { stats });
+    if (v != expected || stats.allocations != 1 || stats.deallocations != 1) {
+      FAIL_MSG("fancy pointer allocator mismatch");
+      return;
+    }
+  }
+  {
+    // Non-trivial value type exercises allocator_traits::construct/destroy.
+    std::vector<test_tracked_value> v;
+    std::vector<std::uint32_t> expected;
+    v.reserve(1000);
+    expected.reserve(1000);
+    for (int i = 0; i < 1000; ++i) {
+      auto const key = static_cast<std::uint32_t>((i * 37) % 1000);
+      v.emplace_back(key);
+      expected.push_back(key);
+    }
+    std::stable_sort(expected.begin(), expected.end());
+
+    auto const dc_before = test_tracked_value::default_constructions;
+    auto const d_before  = test_tracked_value::destructions;
+    test_allocation_stats stats;
+    stdex::stable_radix_sort<kMsdSeqAsc>(
+        v.begin(), v.end(), test_fancy_alloc<test_tracked_value> { stats },
+        [](test_tracked_value const &x) { return x.key; });
+
+    bool sorted = true;
+    for (std::size_t i = 0; i < v.size(); ++i) sorted = sorted && (v[i].key == expected[i]);
+    auto const default_constructed = test_tracked_value::default_constructions - dc_before;
+    auto const destroyed           = test_tracked_value::destructions - d_before;
+    if (!sorted || stats.allocations != 1 || stats.deallocations != 1 || default_constructed == 0 ||
+        destroyed != default_constructed) {
+      FAIL_MSG("non-trivial fancy pointer allocator mismatch");
+      return;
+    }
+  }
+  {
+    // A throwing default constructor must destroy constructed elements and
+    // deallocate the raw buffer before propagating.
+    std::vector<test_throwing_value> v;
+    v.reserve(1000);
+    for (int i = 0; i < 1000; ++i) v.emplace_back(static_cast<std::uint32_t>((i * 37) % 1000));
+
+    int const live_before  = test_throwing_value::live;
+    int const calls_before = test_throwing_value::default_calls;
+    test_throwing_value::throw_at_default_call = calls_before + 3;
+    test_allocation_stats stats;
+    bool threw = false;
+    try {
+      stdex::stable_radix_sort<kLsdSeqAsc>(
+          v.begin(), v.end(), test_fancy_alloc<test_throwing_value> { stats },
+          [](test_throwing_value const &x) { return x.key; });
+    } catch (std::runtime_error const &) {
+      threw = true;
+    }
+    test_throwing_value::throw_at_default_call = -1;
+
+    if (!threw || test_throwing_value::live != live_before || stats.allocations != 1 ||
+        stats.deallocations != 1) {
+      FAIL_MSG("fancy pointer exception cleanup mismatch");
+      return;
+    }
+  }
+  PASS();
+}
+
 // ============================================================================
 // 128-bit custom keys (stdex::uint128_t / stdex::int128_t)
 // ============================================================================
@@ -953,6 +1678,11 @@ int main()
   test_signed_extremes();
   test_float_random();
   test_float_special_values();
+  test_float_nan_positions();
+  test_negative_values_all_paths();
+#ifdef _OPENMP
+  test_parallel_pass_count();
+#endif
   test_descending();
   test_key_extractor();
   test_stability();
@@ -973,6 +1703,9 @@ int main()
   test_descending_chunk16();
   test_msd_bits16();
   test_bool_type();
+  test_vector_bool();
+  test_signed_zero();
+  test_fancy_pointer_allocator();
 
   test_uint128_keys();
   test_int128_keys();
