@@ -69,6 +69,7 @@ struct inline_storage : public Traits
   using lazy_iterator  = hash_table_lazy_iterator<iterator>;
 
   static constexpr bool uses_fancy_pointers_v = !std::is_same_v<pointer, value_type *>;
+  static constexpr bool has_custom_destroy_v  = requires (allocator_type &a, value_type *p) { a.destroy(p); };
 
   template <class FancyPtr, class RawPtr>
   static constexpr FancyPtr to_pointer_or_null_(RawPtr raw) noexcept
@@ -154,10 +155,10 @@ struct inline_storage : public Traits
 
   constexpr void destroy_element_unchecked_(value_type *element_ptr) noexcept
   {
-    if constexpr (!std::is_trivially_destructible_v<value_type>) {
+    if constexpr (!std::is_trivially_destructible_v<value_type> || has_custom_destroy_v) {
       if (is_heap()) {
         allocator_traits::destroy(alloc_, element_ptr);
-      } else {
+      } else if constexpr (!std::is_trivially_destructible_v<value_type>) {
         std::destroy_at(element_ptr);
       }
     }
@@ -165,13 +166,26 @@ struct inline_storage : public Traits
     // of repeatedly calling the decrement instruction in destroy_elements_unchecked_.
   }
 
+  constexpr void reset_load_threshold_() noexcept
+  {
+    if constexpr (inline_capacity != 0) {
+      if (is_stack()) {
+        max_load_ = inline_capacity;
+        return;
+      }
+    }
+    // A fresh heap table owns no allocation; its logical capacity is zero even
+    // though group_count_mask_ already holds the minimum layout.
+    max_load_ = heap_.elements_ptr_ == pointer {} ? size_type { 0 } : initial_max_load_(capacity_unchecked_());
+  }
+
   constexpr void destroy_elements_unchecked_() noexcept
   {
     group_type *groups_ptr = groups_address_();
     group_type *const sentinel_group = groups_ptr + group_count_() - 1;
 
-    if constexpr (std::is_trivially_destructible_v<value_type>) {
-      std::fill_n(groups_address_(), group_count_(), group_type {});
+    if constexpr (std::is_trivially_destructible_v<value_type> && !has_custom_destroy_v) {
+      std::fill_n(groups_ptr, group_count_(), group_type {});
     } else {
       value_type *elements_ptr = elements_address_();
       group_type const *const groups_end = std::next(sentinel_group);
@@ -187,7 +201,7 @@ struct inline_storage : public Traits
       }
     }
     sentinel_group->set_sentinel_mark();
-    size_     = 0;
+    size_ = 0;
     //< max_load_ = initial_max_load_(capacity());
   }
 
@@ -256,7 +270,13 @@ struct inline_storage : public Traits
 
   [[nodiscard]] constexpr value_type *elements_address_() const noexcept
   {
-    if (is_heap()) return std::to_address(heap_.elements_ptr_);
+    if (is_heap()) {
+      if constexpr (std::is_same_v<pointer, value_type *>) {
+        return heap_.elements_ptr_;
+      } else {
+        return heap_.elements_ptr_ == pointer {} ? nullptr : std::to_address(heap_.elements_ptr_);
+      }
+    }
     if constexpr (inline_capacity != 0) {
       return const_cast<value_type *>(static_cast<value_type const *>(stack_.elements_));
     } else {
@@ -266,7 +286,13 @@ struct inline_storage : public Traits
 
   [[nodiscard]] constexpr group_type *groups_address_() const noexcept
   {
-    if (is_heap()) return std::to_address(heap_.groups_ptr_);
+    if (is_heap()) {
+      if constexpr (std::is_same_v<pointer, value_type *>) {
+        return heap_.groups_ptr_;
+      } else {
+        return heap_.groups_ptr_ == group_pointer {} ? nullptr : std::to_address(heap_.groups_ptr_);
+      }
+    }
     if constexpr (inline_capacity != 0) {
       return const_cast<group_type *>(static_cast<group_type const *>(stack_.groups_));
     } else {
@@ -332,16 +358,14 @@ struct inline_storage : public Traits
     return size_type(1) << (sizeof(size_type) * CHAR_BIT - index_shift);
   }
 
-  static constexpr size_type align_up_(size_type value, size_type alignment) noexcept
-  {
-    return (value + alignment - 1) & ~(alignment - 1);
-  }
-
+  // The allocator only guarantees alignof(value_type). The group array is
+  // aligned relative to the returned address, so reserve the worst-case
+  // additional padding instead of assuming the base is group-aligned.
   static constexpr size_type calculate_storage_size_(size_type group_count) noexcept
   {
-    size_type capacity      = group_count * group_size_() - 1;
-    size_type groups_offset = align_up_(capacity * sizeof(value_type), alignof(group_type));
-    size_type total_bytes   = groups_offset + group_count * sizeof(group_type);
+    size_type capacity    = group_count * group_size_() - 1;
+    size_type elem_bytes  = capacity * sizeof(value_type);
+    size_type total_bytes = elem_bytes + (alignof(group_type) - 1) + group_count * sizeof(group_type);
     return (total_bytes + sizeof(value_type) - 1) / sizeof(value_type);
   }
 
@@ -393,7 +417,7 @@ struct inline_storage : public Traits
 
   constexpr void dispose_() noexcept
   {
-    if constexpr (!std::is_trivially_destructible_v<value_type>) {
+    if constexpr (!std::is_trivially_destructible_v<value_type> || has_custom_destroy_v) {
       if (!empty()) destroy_elements_unchecked_();
     }
     if (is_heap() && elements_address_()) deallocate_unchecked_();
@@ -460,13 +484,12 @@ struct inline_storage : public Traits
 #  pragma warning(disable : 5030)
 #endif
 
-  template <class Fn>
-  requires std::is_invocable_v<Fn &, value_type *, group_type *, unsigned>
-#if !defined(DEBUG) && !defined(_DEBUG)
-  [[msvc::forceinline, gnu::always_inline]]
-#endif
-  constexpr void for_each_occupied_slot_unchecked_(Fn &&fn) const
-      noexcept(std::is_nothrow_invocable_v<Fn &, value_type *, group_type *, unsigned>)
+template <bool EarlyExit, class Fn>
+  requires std::is_invocable_v<Fn &, value_type *, group_type *, unsigned> &&
+           (!EarlyExit || std::is_invocable_r_v<bool, Fn &, value_type *, group_type *, unsigned>)
+  constexpr bool for_each_occupied_slot_unchecked_impl_(Fn &&fn) const
+      noexcept(std::is_nothrow_invocable_v<Fn &, value_type *, group_type *, unsigned> &&
+          (!EarlyExit || std::is_nothrow_invocable_r_v<bool, Fn &, value_type *, group_type *, unsigned>) )
   {
     value_type *const elements_ptr = elements_address_();
     group_type *const groups_ptr   = groups_address_();
@@ -475,20 +498,47 @@ struct inline_storage : public Traits
     [[assume(groups_ptr != nullptr)]];
 #else
     assert(elements_ptr != nullptr && groups_ptr != nullptr &&
-          "elements_address_() and groups_address_() must return non-null pointers");
+           "elements_address_() and groups_address_() must return non-null pointers");
 #endif
 
     group_type *const sentinel_group = groups_ptr + group_count_() - 1;
 
     for (size_type group_index = 0; group_index < group_count_(); ++group_index) {
       group_type *const group_ptr = groups_ptr + group_index;
-      int occupied_mask = group_type::occupied_mask_excluding_sentinel(group_ptr, sentinel_group);
+      int occupied_mask           = group_type::occupied_mask_excluding_sentinel(group_ptr, sentinel_group);
       while (occupied_mask) {
-        unsigned const slot_index = static_cast<unsigned>(countr_zero_unchecked_(static_cast<unsigned>(occupied_mask)));
-        fn(elements_ptr + group_index * group_size_() + slot_index, group_ptr, slot_index);
+        unsigned const slot_index   = static_cast<unsigned>(countr_zero_unchecked_(static_cast<unsigned>(occupied_mask)));
+        value_type *const value_ptr = elements_ptr + group_index * group_size_() + slot_index;
+
+        if constexpr (EarlyExit) {
+          if (!fn(value_ptr, group_ptr, slot_index)) {
+            return false;
+          }
+        } else {
+          fn(value_ptr, group_ptr, slot_index);
+        }
         occupied_mask &= occupied_mask - 1;
       }
     }
+    return true;
+  }
+
+  template <class Fn>
+#if !defined(DEBUG) && !defined(_DEBUG)
+  [[msvc::flatten, gnu::flatten]]
+#endif
+  constexpr void for_each_occupied_slot_unchecked_(Fn&& fn) const
+  {
+    (void) for_each_occupied_slot_unchecked_impl_<false>(fn);
+  }
+
+  template <class Fn>
+#if !defined(DEBUG) && !defined(_DEBUG)
+  [[msvc::flatten, gnu::flatten]]
+#endif
+  constexpr bool try_for_each_occupied_slot_unchecked_(Fn &&fn) const
+  {
+    return for_each_occupied_slot_unchecked_impl_<true>(fn);
   }
 
   struct triangular_probing

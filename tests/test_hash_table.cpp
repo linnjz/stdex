@@ -19,6 +19,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio> // stderr
+#include <cstdlib>
+#include <cstring>
+#include <functional>
 #include <memory>
 #include <new>
 #include <print>
@@ -3004,6 +3007,457 @@ void test_fancy_pointers()
 }
 
 // ==================================================================
+// P1 regression helpers and tests
+// ==================================================================
+struct salted_hash
+{
+  int salt = 0;
+
+  explicit constexpr salted_hash(int value) noexcept : salt { value } {}
+
+  std::size_t operator() (int value) const noexcept
+  {
+    return std::hash<int> {}(value) + static_cast<std::size_t>(salt) * 0x9e3779b1u;
+  }
+};
+
+struct no_default_hash
+{
+  no_default_hash() = delete;
+  explicit constexpr no_default_hash(int) noexcept {}
+  std::size_t operator() (int value) const noexcept { return std::hash<int> {}(value); }
+};
+
+struct move_only_throwing
+{
+  static inline int live = 0;
+  static inline int moves = 0;
+  static inline int throw_at = 0;
+
+  explicit move_only_throwing(int value) : value { value } { ++live; }
+  move_only_throwing(move_only_throwing const &) = delete;
+  move_only_throwing &operator= (move_only_throwing const &) = delete;
+
+  move_only_throwing(move_only_throwing &&other) noexcept(false)
+      : value { other.value }
+  {
+    ++moves;
+    if (throw_at != 0 && moves == throw_at) throw 1;
+    ++live;
+  }
+
+  move_only_throwing &operator= (move_only_throwing &&) = default;
+  ~move_only_throwing() { --live; }
+
+  int value;
+};
+
+template <class T>
+struct strict_ptr
+{
+  T *p = nullptr;
+
+  constexpr strict_ptr() noexcept = default;
+  constexpr strict_ptr(std::nullptr_t) noexcept : p { nullptr } {}
+  constexpr explicit strict_ptr(T *value) noexcept : p { value } {}
+
+  [[nodiscard]] T *get() const noexcept { return p; }
+  [[nodiscard]] T *operator-> () const
+  {
+    if (p == nullptr) {
+      std::printf("null strict_ptr dereferenced\n");
+      std::abort();
+    }
+    return p;
+  }
+
+  [[nodiscard]] T &operator* () const noexcept { return *p; }
+  friend constexpr bool operator== (strict_ptr left, strict_ptr right) noexcept { return left.p == right.p; }
+  friend constexpr bool operator!= (strict_ptr left, strict_ptr right) noexcept { return left.p != right.p; }
+  friend constexpr bool operator== (strict_ptr left, std::nullptr_t) noexcept { return left.p == nullptr; }
+  friend constexpr bool operator!= (strict_ptr left, std::nullptr_t) noexcept { return left.p != nullptr; }
+};
+
+namespace std
+{
+template <class T>
+struct pointer_traits<strict_ptr<T>>
+{
+  using pointer         = strict_ptr<T>;
+  using element_type    = T;
+  using difference_type = std::ptrdiff_t;
+
+  template <class U>
+  using rebind = strict_ptr<U>;
+
+  static pointer pointer_to(element_type &value) noexcept { return pointer { std::addressof(value) }; }
+};
+} // namespace std
+
+template <class T>
+struct strict_alloc
+{
+  using value_type = T;
+  using size_type = std::size_t;
+  using difference_type = std::ptrdiff_t;
+  using pointer = strict_ptr<T>;
+  using const_pointer = strict_ptr<T const>;
+  using propagate_on_container_copy_assignment = std::false_type;
+  using propagate_on_container_move_assignment = std::false_type;
+  using propagate_on_container_swap = std::false_type;
+  using is_always_equal = std::true_type;
+
+  template <class U>
+  struct rebind { using other = strict_alloc<U>; };
+
+  strict_alloc() = default;
+  template <class U>
+  strict_alloc(strict_alloc<U> const &) noexcept {}
+
+  [[nodiscard]] pointer allocate(size_type count)
+  {
+    return pointer { static_cast<T *>(::operator new(count * sizeof(T))) };
+  }
+
+  void deallocate(pointer ptr, size_type) noexcept { ::operator delete(static_cast<void *>(ptr.get())); }
+
+  template <class U>
+  friend bool operator== (strict_alloc const &, strict_alloc<U> const &) noexcept { return true; }
+};
+
+struct zero_hash
+{
+  std::size_t operator() (int) const noexcept { return 0; }
+};
+
+struct throw_copy_value
+{
+  static inline int copies = 0;
+  static inline int throw_on_copy = 0;
+
+  int value = 0;
+  throw_copy_value() = default;
+  explicit throw_copy_value(int v) : value { v } {}
+  throw_copy_value(throw_copy_value const &other) : value { other.value }
+  {
+    ++copies;
+    if (throw_on_copy != 0 && copies == throw_on_copy) throw 1;
+  }
+  throw_copy_value(throw_copy_value &&other) noexcept(false) : value { other.value } {}
+  throw_copy_value &operator= (throw_copy_value const &) = default;
+  throw_copy_value &operator= (throw_copy_value &&) = default;
+};
+
+struct allocator_state
+{
+  int allocations = 0;
+  int deallocations = 0;
+  int invalid_deallocations = 0;
+};
+
+struct alignment_state
+{
+  bool guard_ok = true;
+};
+
+template <class T>
+struct misaligned_alloc
+{
+  using value_type = T;
+  using size_type = std::size_t;
+  using difference_type = std::ptrdiff_t;
+  using pointer = T *;
+  using const_pointer = T const *;
+  using propagate_on_container_copy_assignment = std::false_type;
+  using propagate_on_container_move_assignment = std::false_type;
+  using propagate_on_container_swap = std::false_type;
+  using is_always_equal = std::false_type;
+
+  template <class U>
+  struct rebind { using other = misaligned_alloc<U>; };
+
+  alignment_state *state = nullptr;
+  misaligned_alloc() = default;
+  explicit misaligned_alloc(alignment_state *s) noexcept : state { s } {}
+  template <class U>
+  misaligned_alloc(misaligned_alloc<U> const &other) noexcept : state { other.state } {}
+
+  [[nodiscard]] T *allocate(size_type count)
+  {
+    constexpr std::size_t alignment = alignof(T);
+    constexpr std::size_t offset = alignment == 16 ? 16 : 12;
+    static_assert(offset % alignment == 0);
+    auto *raw = static_cast<unsigned char *>(::operator new(count * sizeof(T) + offset + 32));
+    std::memset(raw + offset + count * sizeof(T), 0xA5, 32);
+    return reinterpret_cast<T *>(raw + offset);
+  }
+
+  void deallocate(T *ptr, size_type count) noexcept
+  {
+    auto *raw = reinterpret_cast<unsigned char *>(ptr) - (alignof(T) == 16 ? 16 : 12);
+    auto *guard = raw + (alignof(T) == 16 ? 16 : 12) + count * sizeof(T);
+    for (int i = 0; i < 32; ++i) {
+      if (guard[i] != 0xA5) state->guard_ok = false;
+    }
+    ::operator delete(raw);
+  }
+
+  template <class U>
+  friend bool operator== (misaligned_alloc const &left, misaligned_alloc<U> const &right) noexcept
+  {
+    return left.state == right.state;
+  }
+
+  template <class U>
+  friend bool operator!= (misaligned_alloc const &left, misaligned_alloc<U> const &right) noexcept
+  {
+    return !(left == right);
+  }
+
+  template <class>
+  friend struct misaligned_alloc;
+};
+
+template <class T>
+struct moving_alloc
+{
+  using value_type = T;
+  using size_type = std::size_t;
+  using difference_type = std::ptrdiff_t;
+  using pointer = T *;
+  using const_pointer = T const *;
+  using propagate_on_container_copy_assignment = std::false_type;
+  using propagate_on_container_move_assignment = std::false_type;
+  using propagate_on_container_swap = std::false_type;
+  using is_always_equal = std::false_type;
+
+  template <class U>
+  struct rebind { using other = moving_alloc<U>; };
+
+  allocator_state *state = nullptr;
+  moving_alloc() = default;
+  moving_alloc(allocator_state *s, int) noexcept : state { s } {}
+  template <class U>
+  moving_alloc(moving_alloc<U> const &other) noexcept : state { other.state } {}
+  moving_alloc(moving_alloc const &) = default;
+  moving_alloc &operator= (moving_alloc const &) = default;
+
+  moving_alloc(moving_alloc &&other) noexcept : state { std::exchange(other.state, nullptr) } {}
+  moving_alloc &operator= (moving_alloc &&other) noexcept
+  {
+    state = std::exchange(other.state, nullptr);
+    return *this;
+  }
+
+  T *allocate(size_type count)
+  {
+    ++state->allocations;
+    return static_cast<T *>(::operator new(count * sizeof(T)));
+  }
+
+  void deallocate(T *ptr, size_type) noexcept
+  {
+    if (state == nullptr) {
+      ++state->invalid_deallocations;
+      return;
+    }
+    ++state->deallocations;
+    ::operator delete(static_cast<void *>(ptr));
+  }
+
+  template <class U>
+  friend bool operator== (moving_alloc const &left, moving_alloc<U> const &right) noexcept
+  {
+    return left.state == right.state;
+  }
+};
+
+void test_stateful_hasher()
+{
+  SECTION("P1: stateful hasher");
+  using map_type = ufd::hash_table<ufd::ufmap_traits<int, int, 0>, salted_hash, std::equal_to<>,
+                                   std::allocator<std::pair<int, int>>>;
+  map_type map { salted_hash { 123 }, std::equal_to<> {}, std::allocator<std::pair<int, int>> {} };
+  for (int i = 0; i < 40; ++i) map.emplace(i, i * 10);
+  CHECK(map.size() == 40u);
+  for (int i = 0; i < 40; ++i) {
+    auto const it = map.find(i);
+    CHECK(it != map.end());
+    if (it != map.end()) CHECK(it->second == i * 10);
+  }
+}
+
+void test_non_default_hasher()
+{
+  SECTION("P1: non-default hasher");
+  static_assert(!std::is_default_constructible_v<no_default_hash>);
+  using map_type = ufd::hash_table<ufd::ufmap_traits<int, int, 0>, no_default_hash, std::equal_to<>,
+                                   std::allocator<std::pair<int, int>>>;
+  map_type map { no_default_hash { 7 }, std::equal_to<> {}, std::allocator<std::pair<int, int>> {} };
+  map.emplace(1, 1);
+  CHECK(map.contains(1));
+}
+
+void test_rehash_move_exception()
+{
+  SECTION("P1: rehash move exception");
+  using map_type = ufd::hash_table<ufd::ufmap_traits<int, move_only_throwing, 0>, std::hash<int>,
+                                   std::equal_to<>, std::allocator<std::pair<int, move_only_throwing>>>;
+  move_only_throwing::live = 0;
+  move_only_throwing::moves = 0;
+  {
+    map_type map { std::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, move_only_throwing>> {} };
+    for (int i = 0; i < 40; ++i) map.emplace(i, move_only_throwing { i });
+    move_only_throwing::moves = 0;
+    move_only_throwing::throw_at = 3;
+    bool threw = false;
+    try {
+      map.rehash(200);
+    } catch (int) {
+      threw = true;
+    }
+    move_only_throwing::throw_at = 0;
+    CHECK(threw);
+    CHECK(map.size() == 37u);
+    CHECK(move_only_throwing::live == 37);
+  }
+  CHECK(move_only_throwing::live == 0);
+}
+
+void test_growth_move_exception()
+{
+  SECTION("P1: growth move exception");
+  using map_type = ufd::hash_table<ufd::ufmap_traits<int, move_only_throwing, 29>, std::hash<int>,
+                                   std::equal_to<>, std::allocator<std::pair<int, move_only_throwing>>>;
+  move_only_throwing::live = 0;
+  move_only_throwing::moves = 0;
+  {
+    map_type map { std::hash<int> {}, std::equal_to<> {}, std::allocator<std::pair<int, move_only_throwing>> {} };
+    for (int i = 0; i < 29; ++i) map.emplace(i, move_only_throwing { i });
+    move_only_throwing::moves = 0;
+    move_only_throwing::throw_at = 3;
+    bool threw = false;
+    try {
+      map.emplace(29, move_only_throwing { 29 });
+    } catch (int) {
+      threw = true;
+    }
+    move_only_throwing::throw_at = 0;
+    CHECK(threw);
+    CHECK(map.size() == 27u);
+    CHECK(move_only_throwing::live == 27);
+  }
+  CHECK(move_only_throwing::live == 0);
+}
+
+void test_max_load_reset()
+{
+  SECTION("P1: max load reset");
+  using set_type = ufd::hash_table<ufd::ufset_traits<int, 59>, zero_hash, std::equal_to<>, std::allocator<int>>;
+  set_type table { zero_hash {}, std::equal_to<> {}, std::allocator<int> {} };
+  for (int i = 0; i < 59; ++i) table.emplace(i);
+  for (int i = 0; i < 59; ++i) table.erase(i);
+  CHECK(table.empty());
+  CHECK(table.is_stack());
+  table.emplace(100);
+  CHECK(table.is_stack());
+  CHECK(table.contains(100));
+
+  set_type full { zero_hash {}, std::equal_to<> {}, std::allocator<int> {} };
+  for (int i = 0; i < 59; ++i) full.emplace(i);
+  set_type assigned { zero_hash {}, std::equal_to<> {}, std::allocator<int> {} };
+  for (int i = 0; i < 59; ++i) assigned.emplace(i);
+  for (int i = 0; i < 59; ++i) assigned.erase(i);
+  assigned = full;
+  assigned.clear();
+  assigned.emplace(200);
+  CHECK(assigned.is_stack());
+  CHECK(assigned.contains(200));
+}
+
+void test_fancy_null()
+{
+  SECTION("P1: fancy null");
+  using map_type = ufd::hash_table<ufd::ufmap_traits<int, int, 0>, std::hash<int>, std::equal_to<>,
+                                   strict_alloc<std::pair<int, int>>>;
+  map_type map { std::hash<int> {}, std::equal_to<> {}, strict_alloc<std::pair<int, int>> {} };
+  CHECK(map.capacity() == 0);
+  CHECK(map.begin() == map.end());
+  map.clear();
+  map.reset();
+  CHECK(map.emplace(1, 2).second);
+  CHECK(map.contains(1));
+}
+
+void test_move_aware_allocator()
+{
+  SECTION("P1: move-aware allocator");
+  using map_type = ufd::hash_table<ufd::ufmap_traits<int, int, 0>, std::hash<int>, std::equal_to<>,
+                                   moving_alloc<std::pair<int, int>>>;
+  allocator_state state;
+  {
+    map_type source { std::hash<int> {}, std::equal_to<> {}, moving_alloc<std::pair<int, int>> { &state, 1 } };
+    for (int i = 0; i < 20; ++i) source.emplace(i, i);
+    map_type moved { std::move(source) };
+    CHECK(moved.size() == 20u);
+    CHECK(moved.contains(7));
+  }
+  CHECK(state.allocations == 1);
+  CHECK(state.deallocations == 1);
+  CHECK(state.invalid_deallocations == 0);
+}
+
+void test_unaligned_allocator()
+{
+  SECTION("P1: unaligned allocator");
+  using map_type = ufd::hash_table<ufd::ufmap_traits<int, int, 29>, std::hash<int>, std::equal_to<>,
+                                   misaligned_alloc<std::pair<int, int>>>;
+  alignment_state state;
+  {
+    map_type map { std::hash<int> {}, std::equal_to<> {}, misaligned_alloc<std::pair<int, int>> { &state } };
+    for (int i = 0; i < 100; ++i) map.emplace(i, i);
+    CHECK(map.size() == 100u);
+  }
+  CHECK(state.guard_ok);
+}
+
+void test_swap_exception()
+{
+  SECTION("P1: swap exception");
+  using map_type = ufd::hash_table<ufd::ufmap_traits<int, throw_copy_value, 29>, std::hash<int>,
+                                   std::equal_to<>, moving_alloc<std::pair<int, throw_copy_value>>>;
+  allocator_state state;
+  {
+    map_type heap { std::hash<int> {}, std::equal_to<> {},
+                    moving_alloc<std::pair<int, throw_copy_value>> { &state, 1 } };
+    map_type stack { std::hash<int> {}, std::equal_to<> {},
+                     moving_alloc<std::pair<int, throw_copy_value>> { &state, 1 } };
+    for (int i = 0; i < 30; ++i) heap.emplace(i, throw_copy_value { i });
+    stack.emplace(999, throw_copy_value { 999 });
+
+    throw_copy_value::copies = 0;
+    throw_copy_value::throw_on_copy = 1;
+    bool threw = false;
+    try {
+      heap.swap(stack);
+    } catch (int) {
+      threw = true;
+    }
+    throw_copy_value::throw_on_copy = 0;
+
+    CHECK(threw);
+    CHECK(heap.is_heap());
+    CHECK(heap.size() == 30u);
+    CHECK(stack.size() == 1u);
+    CHECK(heap.contains(0));
+    CHECK(stack.contains(999));
+  }
+  CHECK(state.allocations == 1);
+  CHECK(state.deallocations == 1);
+  CHECK(state.invalid_deallocations == 0);
+}
+
+// ==================================================================
 // main
 // ==================================================================
 int main()
@@ -3054,6 +3508,15 @@ int main()
   test_const_find_and_node();
   test_stdex_hash_integration();
   test_fancy_pointers();
+  test_stateful_hasher();
+  test_non_default_hasher();
+  test_rehash_move_exception();
+  test_growth_move_exception();
+  test_max_load_reset();
+  test_fancy_null();
+  test_move_aware_allocator();
+  test_unaligned_allocator();
+  test_swap_exception();
 
   std::println("\n===============================");
   std::println("PASS: {}   FAIL: {}", g_pass, g_fail);

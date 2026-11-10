@@ -121,6 +121,7 @@ private:
   using base::destroy_element_unchecked_;
   using base::destroy_elements_unchecked_;
   using base::for_each_occupied_slot_unchecked_;
+  using base::try_for_each_occupied_slot_unchecked_;
   using base::emplace_at_available_slot_unchecked_;
   using base::find_fingerprint_slot_unchecked_;
   using base::demote_to_stack_;
@@ -137,6 +138,7 @@ private:
   using base::required_capacity_;
   using base::required_capacity_for_growth_;
   using base::aligned_capacity_;
+  using base::reset_load_threshold_;
 
   using base::uses_fancy_pointers_v;
   static constexpr bool is_pocca_v = allocator_traits::propagate_on_container_copy_assignment::value;
@@ -151,12 +153,6 @@ private:
     } else {
       return left == right;
     }
-  }
-
-  constexpr hash_table(allocator_type const &alloc) noexcept(
-        std::is_nothrow_copy_constructible_v<allocator_type>)
-      : base { alloc }
-  {
   }
 
 public:
@@ -188,9 +184,9 @@ private:
   /// Groups are bulk-copied only after every element transferred, so a throwing
   /// transfer would leave dest.size_ > 0 with empty groups and leak the partial
   /// elements. The guard mirror-destroys exactly the constructed prefix on unwind.
-  struct destroy_dest_elements_on_exit
+  struct destroy_dest_elements_guard
   {
-    constexpr ~destroy_dest_elements_on_exit()
+    constexpr ~destroy_dest_elements_guard()
     {
       if (dismissed_ || dest_.size_ == 0) return;
       auto *dest_elements   = dest_.elements_address_();
@@ -218,7 +214,7 @@ private:
 
     [[maybe_unused]] destroy_source_elements_on_exit<Move> se { source };
 
-    destroy_dest_elements_on_exit de { source, dest };
+    destroy_dest_elements_guard dg { source, dest };
 
     auto transfer_elements = [&]() constexpr
     {
@@ -237,6 +233,7 @@ private:
     };
 
     if constexpr (std::is_trivially_copy_constructible_v<value_type> && std::is_trivially_destructible_v<value_type> &&
+                  !base::has_custom_destroy_v &&
                   (std::is_same_v<allocator_type, std::allocator<value_type>> || !requires (allocator_type &a, value_type *p, value_type const &v) { a.construct(p, v); })) {
       if (std::is_constant_evaluated()) {
         transfer_elements();
@@ -259,9 +256,10 @@ private:
     } else {
       transfer_elements();
     }
-    de.dismiss();
+    dg.dismiss();
 
     std::copy_n(source.groups_address_(), source.group_count_(), dest.groups_address_());
+    dest.reset_load_threshold_();
   }
 
   template <bool Move>
@@ -281,6 +279,7 @@ private:
       }
       ++dest.size_;
     });
+    dest.reset_load_threshold_();
   }
 
   template <bool Move>
@@ -342,7 +341,7 @@ public:
       size_type const needed_capacity = required_capacity_(other.size_);
       bool const is_need_reallocate   = is_propagator || needed_capacity > capacity_unchecked_();
 
-      bool is_nullobj = this->heap_.elements_ptr_ == nullptr;
+      bool is_nullobj = this->heap_.elements_ptr_ == pointer {};
       if (!is_nullobj && is_need_reallocate) deallocate_unchecked_();
       if (is_propagator) this->alloc_ = other.alloc_;
       if (other.empty()) return *this;
@@ -374,7 +373,7 @@ private:
     other.group_index_shift_ = static_cast<std::uint8_t>(group_index_shift_by_(0));
     other.group_count_mask_  = group_count_by_(static_cast<size_type>(other.group_index_shift_)) - 1;
     other.size_              = 0;
-    other.max_load_          = other.initial_max_load_(other.capacity_unchecked_());
+    other.reset_load_threshold_();
   }
 
 public:
@@ -409,80 +408,142 @@ public:
           std::is_nothrow_invocable_v<key_equal&, key_type const&, key_type const&>)))
       : base { std::move(other.hasher_), std::move(other.key_eq_), std::move(other.alloc_) }
   {
-    if (other.empty()) [[unlikely]]
+    if (other.is_heap()) {
+      if (other.heap_.elements_ptr_ == pointer {}) return;
+      if constexpr (inline_capacity != 0) promote_to_heap_();
+      steal_heap_from_(other);
       return;
-
-    if constexpr (inline_capacity != 0) {
-      if (transfer_to_stack_unchecked_<true>(other, *this)) return;
-      promote_to_heap_();
     }
-    steal_heap_from_(other);
+
+    transfer_same_layout_unchecked_<true>(other, *this);
   }
 
-  constexpr hash_table& operator= (hash_table&& other) noexcept(
-        std::is_nothrow_swappable_v<hasher> &&
-        std::is_nothrow_swappable_v<key_equal> &&
-        std::is_nothrow_move_assignable_v<allocator_type> &&
-        std::is_nothrow_move_constructible_v<value_type> &&
-        std::is_nothrow_destructible_v<value_type> &&
-        allocator_traits::is_always_equal::value &&
-        !uses_fancy_pointers_v &&
-        std::is_nothrow_invocable_v<hasher&, key_type const&> &&
-        std::is_nothrow_invocable_v<key_equal&, key_type const&, key_type const&>)
+  constexpr hash_table &operator= (hash_table &&other) noexcept(
+      inline_capacity == 0 &&
+      std::is_nothrow_move_assignable_v<hasher> &&
+      std::is_nothrow_move_assignable_v<key_equal> &&
+      std::is_nothrow_move_assignable_v<allocator_type> &&
+      std::is_nothrow_move_constructible_v<value_type> &&
+      std::is_nothrow_destructible_v<value_type> &&
+      allocator_traits::is_always_equal::value &&
+      !uses_fancy_pointers_v &&
+      std::is_nothrow_invocable_v<hasher &, key_type const &> &&
+      std::is_nothrow_invocable_v<key_equal &, key_type const &, key_type const &>)
   {
     if (this == std::addressof(other)) [[unlikely]]
       return *this;
 
     if (!empty()) destroy_elements_unchecked_();
 
-    std::ranges::swap(this->hasher_, other.hasher_);
-    std::ranges::swap(this->key_eq_, other.key_eq_);
+    this->hasher_ = std::move(other.hasher_);
+    this->key_eq_ = std::move(other.key_eq_);
 
     bool const is_this_stack = is_stack(), is_other_stack = other.is_stack();
     if (!is_this_stack && !is_other_stack) {
-      if (this->heap_.elements_ptr_ != nullptr) deallocate_unchecked_();
+      if (this->heap_.elements_ptr_ != pointer {}) deallocate_unchecked_();
       if (is_pocma_v || allocators_equal_(this->alloc_, other.alloc_)) {
         if constexpr (is_pocma_v) this->alloc_ = std::move(other.alloc_);
         steal_heap_from_(other);
-      } else {
+      } else if (!other.empty()) {
         allocate_unchecked_(required_capacity_(other.size_));
-        if (!other.empty()) transfer_with_rehash_unchecked_<true>(other, *this);
+        transfer_with_rehash_unchecked_<true>(other, *this);
       }
-    } else if (is_this_stack) {
-      if constexpr (is_pocma_v) this->alloc_ = std::move(other.alloc_);
-      if (other.empty() || transfer_to_stack_unchecked_<true>(other, *this)) return *this;
-      promote_to_heap_();
-      if (is_pocma_v || allocators_equal_(this->alloc_, other.alloc_)) {
-        steal_heap_from_(other);
-      } else {
-        allocate_unchecked_(required_capacity_(other.size_));
-        if (!other.empty()) transfer_with_rehash_unchecked_<true>(other, *this);
-      }
-    } else /*!is_this_stack && is_other_stack*/ {
-      bool const is_propagator = is_pocma_v && !allocators_equal_(this->alloc_, other.alloc_);
-      if (this->max_load_ >= other.size_ && !is_propagator) {
-        if (!other.empty()) transfer_with_rehash_unchecked_<true>(other, *this);
-      } else {
-        if (this->heap_.elements_ptr_ != nullptr) deallocate_unchecked_();
+    } else if constexpr (inline_capacity != 0) {
+      if (is_this_stack) {
+        if (other.size_ > inline_capacity) {
+          promote_to_heap_();
+          if (is_pocma_v || allocators_equal_(this->alloc_, other.alloc_)) {
+            steal_heap_from_(other);
+          } else {
+            allocate_unchecked_(required_capacity_(other.size_));
+            transfer_with_rehash_unchecked_<true>(other, *this);
+          }
+        } else {
+          if (!other.empty()) {
+            (void) transfer_to_stack_unchecked_<true>(other, *this);
+          }
+          if (!is_other_stack && other.heap_.elements_ptr_ != pointer {}) {
+            other.deallocate_unchecked_();
+          }
+        }
         if constexpr (is_pocma_v) this->alloc_ = std::move(other.alloc_);
-        allocate_unchecked_(required_capacity_(other.size_));
-        if (!other.empty()) transfer_with_rehash_unchecked_<true>(other, *this);
+      } else /*!is_this_stack && is_other_stack*/ {
+        bool const is_propagator = is_pocma_v && !allocators_equal_(this->alloc_, other.alloc_);
+        if (this->capacity() >= other.size_ && !is_propagator) {
+          if (!other.empty()) transfer_with_rehash_unchecked_<true>(other, *this);
+        } else {
+          if (this->heap_.elements_ptr_ != pointer {}) deallocate_unchecked_();
+          if constexpr (is_pocma_v) this->alloc_ = std::move(other.alloc_);
+          if (!other.empty()) {
+            allocate_unchecked_(required_capacity_(other.size_));
+            transfer_with_rehash_unchecked_<true>(other, *this);
+          }
+        }
       }
     }
     return *this;
   }
 
 private:
-  constexpr void swap_stack_elements_(hash_table &a, hash_table &b) noexcept(
+  template <class Fn>
+  static constexpr void for_each_stack_slot_(Fn &&fn) noexcept(
+      std::is_nothrow_invocable_v<std::remove_reference_t<Fn> &, size_type, size_type, size_type>)
+  {
+    for (size_type i = 0; i < inline_capacity; ++i) {
+      fn(i, static_cast<size_type>(i / group_size_()), static_cast<size_type>(i % group_size_()));
+    }
+  }
+
+  struct swap_stack_elements_guard
+  {
+    hash_table &a_;
+    hash_table &b_;
+    size_type constructed_to_a_ { 0 };
+    size_type constructed_to_b_ { 0 };
+    bool dismissed_ { false };
+
+    constexpr ~swap_stack_elements_guard() noexcept
+    {
+      if (dismissed_) return;
+
+      // Only one-sided slots have newly constructed destination objects; the
+      // source objects have not been destroyed yet. Walk the original group
+      // layout in the same order as the transfer loop and destroy exactly the
+      // constructed prefix in each direction.
+      for_each_stack_slot_([&](size_type i, size_type group_index, size_type slot_index) noexcept
+      {
+        bool const a_occupied = a_.stack_.groups_[group_index].is_occupied_by_slot(slot_index);
+        bool const b_occupied = b_.stack_.groups_[group_index].is_occupied_by_slot(slot_index);
+
+        if (a_occupied && !b_occupied && constructed_to_b_ != 0) {
+          std::destroy_at(std::addressof(b_.stack_.elements_[i]));
+          --constructed_to_b_;
+        } else if (!a_occupied && b_occupied && constructed_to_a_ != 0) {
+          std::destroy_at(std::addressof(a_.stack_.elements_[i]));
+          --constructed_to_a_;
+        }
+      });
+    }
+
+    constexpr void dismiss() noexcept { dismissed_ = true; }
+  };
+
+  static constexpr bool is_nothrow_swap_stack_elements_v =
       std::is_nothrow_swappable_v<value_type> &&
+      std::is_nothrow_swappable_v<group_type> &&
+      std::is_nothrow_destructible_v<value_type> &&
       (std::is_nothrow_move_constructible_v<value_type> ||
-       std::is_nothrow_copy_constructible_v<value_type>))
+       std::is_nothrow_copy_constructible_v<value_type>);
+
+  template <bool DeferSourceDestruction>
+  constexpr void swap_stack_elements_impl_(hash_table &a, hash_table &b) noexcept(is_nothrow_swap_stack_elements_v)
   {
     if constexpr (inline_capacity != 0) {
-      for (size_type i = 0; i < inline_capacity; ++i) {
-        size_type const group_index = i / group_size_();
-        size_type const slot_index  = i % group_size_();
+      swap_stack_elements_guard guard { a, b };
+      if constexpr (!DeferSourceDestruction) guard.dismiss();
 
+      for_each_stack_slot_([&](size_type i, size_type group_index, size_type slot_index) noexcept(is_nothrow_swap_stack_elements_v)
+      {
         bool const a_occupied = a.stack_.groups_[group_index].is_occupied_by_slot(slot_index);
         bool const b_occupied = b.stack_.groups_[group_index].is_occupied_by_slot(slot_index);
 
@@ -490,38 +551,131 @@ private:
           std::ranges::swap(a.stack_.elements_[i], b.stack_.elements_[i]);
         } else if (a_occupied) {
           std::construct_at(std::addressof(b.stack_.elements_[i]), std::move_if_noexcept(a.stack_.elements_[i]));
-          std::destroy_at(std::addressof(a.stack_.elements_[i]));
+          if constexpr (DeferSourceDestruction) {
+            ++guard.constructed_to_b_;
+          } else {
+            std::destroy_at(std::addressof(a.stack_.elements_[i]));
+          }
         } else if (b_occupied) {
           std::construct_at(std::addressof(a.stack_.elements_[i]), std::move_if_noexcept(b.stack_.elements_[i]));
-          std::destroy_at(std::addressof(b.stack_.elements_[i]));
+          if constexpr (DeferSourceDestruction) {
+            ++guard.constructed_to_a_;
+          } else {
+            std::destroy_at(std::addressof(b.stack_.elements_[i]));
+          }
         }
+      });
+
+      if constexpr (DeferSourceDestruction) {
+        for_each_stack_slot_([&](size_type i, size_type group_index, size_type slot_index) noexcept
+        {
+          bool const a_occupied = a.stack_.groups_[group_index].is_occupied_by_slot(slot_index);
+          bool const b_occupied = b.stack_.groups_[group_index].is_occupied_by_slot(slot_index);
+
+          if (a_occupied && !b_occupied) {
+            std::destroy_at(std::addressof(a.stack_.elements_[i]));
+          } else if (!a_occupied && b_occupied) {
+            std::destroy_at(std::addressof(b.stack_.elements_[i]));
+          }
+        });
       }
+
+      std::ranges::swap(a.stack_.groups_, b.stack_.groups_);
+      std::ranges::swap(a.size_, b.size_);
+      if constexpr (DeferSourceDestruction) guard.dismiss();
     }
   }
 
+  constexpr void swap_stack_elements_(hash_table &a, hash_table &b) noexcept(is_nothrow_swap_stack_elements_v)
+  {
+    if constexpr (is_nothrow_swap_stack_elements_v) {
+      swap_stack_elements_impl_<false>(a, b);
+    } else {
+      swap_stack_elements_impl_<true>(a, b);
+    }
+  }
+
+  struct swap_heap_to_stack_guard
+  {
+    typename base::heap_block this_heap_;
+    size_type this_mask_;
+    size_type this_size_;
+    size_type this_load_;
+    std::uint8_t this_shift_;
+    hash_table &this_;
+    bool dismissed_ { false };
+
+    constexpr ~swap_heap_to_stack_guard() noexcept
+    {
+      if (dismissed_) return;
+
+      // `this_` is stack-resident here. Groups were copied from `other` before
+      // construction, so the first size_ occupied slots are exactly the live
+      // elements constructed so far.
+      size_type remaining = this_.size_;
+      if (remaining != 0) {
+        (void) this_.try_for_each_occupied_slot_unchecked_([&](value_type *element_ptr, group_type *, unsigned) {
+          std::destroy_at(element_ptr);
+          return --remaining != 0;
+        });
+      }
+
+      this_.promote_to_heap_();
+      this_.heap_              = this_heap_;
+      this_.group_index_shift_ = this_shift_;
+      this_.group_count_mask_  = this_mask_;
+      this_.size_              = this_size_;
+      this_.max_load_          = this_load_;
+    }
+
+    constexpr void dismiss() noexcept { dismissed_ = true; }
+  };
+
   constexpr void swap_heap_to_stack_(hash_table &other) noexcept(
-      std::is_nothrow_swappable_v<value_type> &&
-      std::is_nothrow_swappable_v<group_type> &&
+      std::is_nothrow_copy_assignable_v<group_type> &&
+      std::is_nothrow_destructible_v<value_type> &&
       (std::is_nothrow_move_constructible_v<value_type> ||
        std::is_nothrow_copy_constructible_v<value_type>) )
   {
-    auto const this_heap  = this->heap_;
-    auto const this_shift = this->group_index_shift_;
-    auto const this_mask  = this->group_count_mask_;
-    auto const this_size  = this->size_;
-    auto const this_load  = this->max_load_;
+    if constexpr (inline_capacity != 0) {
+      swap_heap_to_stack_guard guard {
+        this->heap_,
+        this->group_count_mask_,
+        this->size_,
+        this->max_load_,
+        this->group_index_shift_,
+        *this
+      };
 
-    demote_to_stack_();
-    swap_stack_elements_(*this, other);
-    std::ranges::swap(this->stack_.groups_, other.stack_.groups_);
-    this->size_              = other.size_;
+      demote_to_stack_();
 
-    other.promote_to_heap_();
-    other.heap_              = this_heap;
-    other.group_index_shift_ = this_shift;
-    other.group_count_mask_  = this_mask;
-    other.size_              = this_size;
-    other.max_load_          = this_load;
+      // Copy the final group layout first. size_ then doubles as the count of
+      // successfully constructed elements, which lets the guard destroy exactly
+      // the live prefix if construction throws.
+      std::copy_n(other.stack_.groups_, group_count_(), this->stack_.groups_);
+
+      for_each_stack_slot_([&](size_type i, size_type group_index, size_type slot_index)
+      {
+        if (other.stack_.groups_[group_index].is_occupied_by_slot(slot_index)) {
+          std::construct_at(std::addressof(this->stack_.elements_[i]), std::move_if_noexcept(other.stack_.elements_[i]));
+          ++this->size_;
+        }
+      });
+      assert(this->size_ == other.size_ && "heap-to-stack transfer must construct every source element");
+
+      // Destroy the source only after every destination element has been built.
+      // If the copy path throws in the loop above, other is still untouched;
+      // this gives the strong guarantee for copyable value types.
+      other.destroy_elements_unchecked_();
+
+      other.promote_to_heap_();
+      other.heap_              = guard.this_heap_;
+      other.group_index_shift_ = guard.this_shift_;
+      other.group_count_mask_  = guard.this_mask_;
+      other.size_              = guard.this_size_;
+      other.max_load_          = guard.this_load_;
+      guard.dismiss();
+    }
   }
 
 public:
@@ -531,20 +685,20 @@ public:
       std::is_nothrow_swappable_v<allocator_type> &&
       std::is_nothrow_swappable_v<value_type> &&
       std::is_nothrow_swappable_v<group_type> &&
+      std::is_nothrow_copy_assignable_v<group_type> &&
+      std::is_nothrow_destructible_v<value_type> &&
+      (std::is_nothrow_move_constructible_v<value_type> ||
+       std::is_nothrow_copy_constructible_v<value_type>) &&
       (is_pocs_v || allocator_traits::is_always_equal::value))
   {
     if (this == std::addressof(other)) [[unlikely]]
       return;
 
-    if constexpr (is_pocs_v) {
-      std::ranges::swap(this->alloc_, other.alloc_);
-    } else {
+    if constexpr (!is_pocs_v) {
       assert(allocators_equal_(this->alloc_, other.alloc_) &&
              "[container.requirements.general]/8: if propagate_on_container_swap is false, swapping two containers with "
              "unequal allocators is undefined behavior.");
     }
-    std::ranges::swap(this->hasher_, other.hasher_);
-    std::ranges::swap(this->key_eq_, other.key_eq_);
 
     bool const is_this_heap = is_heap(), is_other_heap = other.is_heap();
     if (is_this_heap && is_other_heap) {
@@ -558,21 +712,26 @@ public:
     } else if (!is_this_heap && is_other_heap) {
       other.swap_heap_to_stack_(*this);
     } else {
-      // Both are stack: their layout metadata is identical, so only the inline
-      // storage and the element count have to move.
       swap_stack_elements_(*this, other);
-      std::ranges::swap(this->stack_.groups_, other.stack_.groups_);
-      std::ranges::swap(this->size_, other.size_);
     }
+
+    // Swap hasher/allocator state only after the storage has been moved, so an
+    // exception while constructing stack elements cannot leave a heap block
+    // owned by an allocator that has already been exchanged, nor leave a
+    // partially swapped element set paired with the other table's hasher.
+    std::ranges::swap(this->hasher_, other.hasher_);
+    std::ranges::swap(this->key_eq_, other.key_eq_);
+    if constexpr (is_pocs_v) std::ranges::swap(this->alloc_, other.alloc_);
   }
 
 public:
   [[nodiscard]] constexpr iterator begin() noexcept
   {
+    if (empty()) return end();
     auto elements_ptr = elements_address_();
     auto groups_ptr   = groups_address_();
     iterator it { elements_ptr, groups_ptr, 0 };
-    return elements_ptr && !(groups_ptr[0].occupied_mask() & 0x1) ? ++it : it;
+    return !(groups_ptr[0].occupied_mask() & 0x1) ? ++it : it;
   }
 
   [[nodiscard]] constexpr iterator end() noexcept { return {}; }
@@ -586,11 +745,17 @@ public:
   {
     if (empty()) return;
     destroy_elements_unchecked_();
+
+    // Anti-drift may have lowered max_load_ even though every element was
+    // erased; clear() must restore the storage's full threshold.
+    reset_load_threshold_();
   }
 
   constexpr void reset() noexcept
   {
     if (!empty()) destroy_elements_unchecked_();
+    reset_load_threshold_(); // Anti-drift
+
     if constexpr (inline_capacity != 0)
     {
       if (is_stack()) return;
@@ -602,6 +767,29 @@ public:
   }
 
 private:
+  struct source_recover_guard
+  {
+    hash_table &source_;
+    size_type num_destroyed_ { 0 };
+    bool dismissed_ { false };
+
+    constexpr ~source_recover_guard() noexcept
+    {
+      if (dismissed_ || num_destroyed_ == 0) return;
+      size_type remaining = num_destroyed_;
+      // The traversal order is the same as for_each_occupied_slot_unchecked_,
+      // so the first num_destroyed_ slots are exactly the destroyed prefix.
+      (void) source_.try_for_each_occupied_slot_unchecked_([&](value_type *, group_type *group_ptr, unsigned slot_index) {
+        source_.max_load_ -= group_ptr->is_overflow_by_slot(slot_index);
+        group_ptr->reset(slot_index);
+        --source_.size_;
+        return --remaining != 0;
+      });
+    }
+
+    constexpr void dismiss() noexcept { dismissed_ = true; }
+  };
+
   struct destroy_element_on_exit
   {
     constexpr ~destroy_element_on_exit() { holder_.destroy_element_unchecked_(element_ptr_); }
@@ -619,11 +807,12 @@ private:
 
     bool const is_source_stack = source.is_stack();
 
+    source_recover_guard guard { source };
     if (!source.empty()) {
-      source.for_each_occupied_slot_unchecked_([&](value_type *occupied_ptr, group_type *, unsigned)
-      {
+      source.for_each_occupied_slot_unchecked_([&](value_type *occupied_ptr, group_type *, unsigned) {
         auto hash = dest.hasher_(Traits::key_fn(*occupied_ptr));
         if constexpr (move_path) {
+          ++guard.num_destroyed_;
           [[maybe_unused]] destroy_element_on_exit e { source, occupied_ptr };
           dest.emplace_at_available_slot_unchecked_(hash, std::move(*occupied_ptr));
         } else {
@@ -632,6 +821,7 @@ private:
         ++dest.size_;
       });
     }
+    guard.dismiss();
 
     if constexpr (inline_capacity != 0) {
       // Copy path: source elements are still in stack_; promotion discards that storage,
@@ -640,8 +830,7 @@ private:
       if (is_source_stack) {
         if constexpr (!move_path && !std::is_trivially_destructible_v<value_type>) {
           if (!source.empty()) {
-            source.for_each_occupied_slot_unchecked_([](value_type *occupied_ptr, group_type *, unsigned)
-            {
+            source.for_each_occupied_slot_unchecked_([](value_type *occupied_ptr, group_type *, unsigned) {
               std::destroy_at(occupied_ptr);
             });
           }
@@ -674,7 +863,7 @@ public:
     if (actual_demand_capacity > count) count = actual_demand_capacity;
     if (count > 0) count = aligned_capacity_(count);
     if (count != capacity_unchecked_()) {
-      hash_table new_storage { this->alloc_ };
+      hash_table new_storage { this->hasher_, this->key_eq_, this->alloc_ };
       if constexpr (inline_capacity != 0) new_storage.promote_to_heap_();
       new_storage.allocate_unchecked_(count);
       force_rehash_(*this, new_storage);
@@ -698,11 +887,14 @@ private:
         it = emplace_at_available_slot_unchecked_(hash, std::forward<Args>(args)...);
       } else {
         // Max load reached: stack storage is promoted to heap, or the heap is expanded
-        hash_table new_storage { this->alloc_ };
+        hash_table new_storage { this->hasher_, this->key_eq_, this->alloc_ };
         if constexpr (inline_capacity != 0) new_storage.promote_to_heap_();
         new_storage.allocate_unchecked_(required_capacity_for_growth_(this->size_));
 
         it = new_storage.emplace_at_available_slot_unchecked_(hash, std::forward<Args>(args)...);
+        // Keep the pre-inserted element counted so an exception during
+        // force_rehash_ cannot leave it unconstructed but undestroyed.
+        new_storage.size_ = 1;
 
         // Note: force_rehash_ internally handles the case where source is promoted from stack to heap.
         // Do not promote *this early here, otherwise the elements pending migration in stack_ will be lost.
@@ -866,16 +1058,12 @@ public:
     --this->size_;
     return { position };
   }
-  constexpr lazy_iterator erase(const_iterator first, const_iterator last) noexcept
+  constexpr iterator erase(const_iterator first, const_iterator last) noexcept
   {
-    // A lazy converts by incrementing past its wrapped slot, so it must wrap
-    // the final erased slot (converting to `last`), not `last` itself.
-    const_iterator victim = first;
     while (first != last) {
-      victim = first;
-      first  = erase(first);
+      first = erase(first);
     }
-    return victim;
+    return iterator(const_iterator_cast_tag {}, last);
   }
   constexpr size_type erase(key_type const& key_val)
   {
@@ -891,9 +1079,9 @@ public:
 
 private:
   template <class H2, class KE2>
-  struct erase_on_exit
+  struct erase_guard
   {
-    constexpr ~erase_on_exit()
+    constexpr ~erase_guard()
     {
       if (!dismissed_) holder_.erase(element_iterator_);
     }
@@ -1046,7 +1234,7 @@ public:
     assert(position != end() && "extract: position must be dereferenceable (not end())");
     auto *element_ptr = position.element_address_();
     node_type node { std::move(*element_ptr) };
-    [[maybe_unused]] erase_on_exit e { *this, position };
+    [[maybe_unused]] erase_guard e { *this, position };
     return node;
   }
 
@@ -1073,8 +1261,8 @@ public:
 
     other.for_each_occupied_slot_unchecked_([&](value_type *occupied_ptr, group_type *group_ptr, unsigned slot_index)
     {
-      erase_on_exit<H2, KE2> g { other, const_iterator { occupied_ptr, group_ptr, slot_index } };
-      if (!emplace(std::move(*occupied_ptr)).second) g.dismiss();
+      erase_guard<H2, KE2> e { other, const_iterator { occupied_ptr, group_ptr, slot_index } };
+      if (!emplace(std::move(*occupied_ptr)).second) e.dismiss();
     });
   }
 
