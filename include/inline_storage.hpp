@@ -653,6 +653,17 @@ protected:
       allocator_traits::is_always_equal::value &&
       (inline_capacity == 0 || std::is_nothrow_move_constructible_v<value_type>) )
   {
+    if (other.is_heap()) {
+      if (other.heap_.elements_ptr_ == pointer {}) [[unlikely]]
+        return move_outcome::no_op;
+
+      if constexpr (inline_capacity != 0)
+        promote_to_heap_();
+
+      steal_heap_from_(other);
+      return move_outcome::heap_steal;
+    }
+
     if (other.empty()) [[unlikely]]
       return move_outcome::no_op;
 
@@ -660,10 +671,8 @@ protected:
       if (try_construct_stack_n_unchecked_(other.size(), std::make_move_iterator(other.data()))) {
         return move_outcome::move_elements;
       }
-      promote_to_heap_();
     }
-    steal_heap_from_(other);
-    return move_outcome::heap_steal;
+    return move_outcome::move_elements;
   }
 
   [[nodiscard]]
@@ -801,6 +810,37 @@ protected:
     assign_from_range_unchecked_(other_data, other_size);
   }
 
+  /// Releases `source`'s heap block with `owner`'s allocator.
+  ///
+  /// POCMA moves source's allocator into owner; when the payload stays on
+  /// owner's stack, source's heap block is not stolen and source is left with
+  /// a moved-from allocator that cannot deallocate it. The guard destroys the
+  /// elements through the propagated allocator and deallocates the block on
+  /// both normal and exceptional exit, leaving source an empty heap.
+  struct propagated_heap_release_guard
+  {
+    inline_storage &owner_;
+    inline_storage &source_;
+    bool active_;
+
+    propagated_heap_release_guard &operator= (propagated_heap_release_guard const &) = delete;
+    propagated_heap_release_guard &operator= (propagated_heap_release_guard &&)      = delete;
+
+    constexpr ~propagated_heap_release_guard() noexcept
+    {
+      if (!active_) return;
+
+      assert(source_.is_heap() && "propagated heap release requires a heap source");
+      if (source_.heap_.elements_ptr_ == pointer {}) return;
+
+      owner_.destroy_heap_elements_unchecked_(std::to_address(source_.heap_.elements_ptr_), source_.size());
+      allocator_traits::deallocate(owner_.alloc_, source_.heap_.elements_ptr_, source_.heap_.capacity_);
+
+      source_.heap_ = {};
+      source_.set_size_(size_type {}, heap_flag);
+    }
+  };
+
   [[nodiscard]]
   constexpr move_outcome move_assignment_from_(inline_storage &&other)
   {
@@ -822,7 +862,8 @@ protected:
       return move_outcome::heap_steal;
     }
 
-    bool is_already_dispose = false;
+    bool is_already_dispose   = false;
+    bool allocator_propagated = false;
     if constexpr (is_pocma_v && !is_always_equal_v) {
       if (!allocators_equal_(alloc_, other.alloc_)) {
         if (!is_this_stack) {
@@ -830,8 +871,14 @@ protected:
           is_already_dispose = true;
         }
         alloc_ = std::move(other.alloc_);
+        allocator_propagated = true;
       }
     }
+
+    // keep_stack moves a small heap payload element-wise while POCMA has
+    // already moved other's allocator here, so this object must release the
+    // block: other's allocator is moved-from from this point on.
+    propagated_heap_release_guard release_guard { *this, other, allocator_propagated && other.is_heap() };
 
     value_type *const other_data = other.data();
     if (other_size > capacity()) {

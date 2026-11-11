@@ -437,6 +437,56 @@ struct throwing_alloc {
   bool operator==(throwing_alloc const&) const noexcept { return true; }
 };
 
+// POCMA-capable allocator whose move operations empty the source. Deallocating
+// through a moved-from allocator is counted instead of performed, so the
+// "block stranded with a moved-from allocator" bug shows up as a leak plus a
+// moved_from_deallocs mismatch rather than depending on allocator internals.
+template <class T, bool Pocma = true>
+struct move_sensitive_alloc {
+  using value_type                             = T;
+  using size_type                              = std::size_t;
+  using difference_type                        = std::ptrdiff_t;
+  using propagate_on_container_move_assignment = std::bool_constant<Pocma>;
+  using is_always_equal                        = std::false_type;
+
+  template <class U>
+  struct rebind {
+    using other = move_sensitive_alloc<U, Pocma>;
+  };
+
+  static inline long deallocs            = 0;
+  static inline long moved_from_deallocs = 0;
+  static void reset() { deallocs = 0; moved_from_deallocs = 0; }
+
+  int id_ = 0;
+  constexpr move_sensitive_alloc(int id = 0) noexcept : id_(id) {}
+  template <class U>
+  constexpr move_sensitive_alloc(move_sensitive_alloc<U, Pocma> const& o) noexcept : id_(o.id_)
+  {
+  }
+  constexpr move_sensitive_alloc(move_sensitive_alloc const&)            = default;
+  constexpr move_sensitive_alloc& operator=(move_sensitive_alloc const&) = default;
+  constexpr move_sensitive_alloc(move_sensitive_alloc&& o) noexcept : id_(o.id_) { o.id_ = -1; }
+  constexpr move_sensitive_alloc& operator=(move_sensitive_alloc&& o) noexcept
+  {
+    id_   = o.id_;
+    o.id_ = -1;
+    return *this;
+  }
+
+  T* allocate(std::size_t n) { return static_cast<T*>(::operator new(n * sizeof(T))); }
+  void deallocate(T* p, std::size_t) noexcept
+  {
+    ++deallocs;
+    if (id_ == -1) {
+      ++moved_from_deallocs;
+      return;
+    }
+    ::operator delete(p);
+  }
+  bool operator==(move_sensitive_alloc const& o) const noexcept { return id_ == o.id_; }
+};
+
 // ------------------------------------------------------------------
 // fancy pointer harness (mirrors test_uninitialized_algorithms.cpp)
 // ------------------------------------------------------------------
@@ -1476,6 +1526,81 @@ static void test_copy_move_assign()
     fix<int, 4> a(2, 1);
     CHECK(a.move_assignment_from_(std::move(b)) == fix<int, 4>::move_outcome::move_elements);
     CHECK(a.size() == 2 && a.is_stack() && a.data()[0] == 7 && a.data()[1] == 8);
+  }
+  {
+    // keep_stack + POCMA + unequal allocators: the allocator moves into the
+    // stack target, so the source block must be destroyed and deallocated with
+    // that propagated allocator, not with the source's moved-from one.
+    using MA = move_sensitive_alloc<track>;
+    track::reset();
+    MA::reset();
+    {
+      fix<track, 4, MA> a(MA(2));
+      a.emplace_one_at_back_(1);
+      fix<track, 4, MA> b(MA(1));
+      b.reserve(8);
+      b.emplace_one_at_back_(7);
+      b.emplace_one_at_back_(8);
+      CHECK(b.is_heap() && b.size() == 2);
+      CHECK(a.move_assignment_from_(std::move(b)) == fix<track, 4, MA>::move_outcome::move_elements);
+      CHECK(a.is_stack() && a.size() == 2);
+      CHECK(a.data()[0].value == 7 && a.data()[1].value == 8);
+      CHECK(a.get_allocator().id_ == 1);
+      CHECK(b.empty() && b.data() == nullptr && b.capacity() == 0);
+      CHECK(b.get_allocator().id_ == -1); // moved-from, but never used
+      CHECK(MA::deallocs == 1 && MA::moved_from_deallocs == 0);
+      CHECK(track::live == 2);
+    }
+    CHECK(track::live == 0);
+    CHECK(MA::deallocs == 1 && MA::moved_from_deallocs == 0);
+  }
+  {
+    // Same shape with an empty payload: assign touches no heap elements, yet
+    // the block still has to be released by the propagated allocator.
+    using MA = move_sensitive_alloc<int>;
+    MA::reset();
+    {
+      fix<int, 4, MA> a(MA(2));
+      fix<int, 4, MA> b(MA(1));
+      b.reserve(8);
+      CHECK(b.is_heap() && b.empty() && b.capacity() >= 8);
+      CHECK(a.move_assignment_from_(std::move(b)) == fix<int, 4, MA>::move_outcome::move_elements);
+      CHECK(a.empty() && a.is_stack() && a.get_allocator().id_ == 1);
+      CHECK(b.empty() && b.data() == nullptr && b.capacity() == 0);
+    }
+    CHECK(MA::deallocs == 1 && MA::moved_from_deallocs == 0);
+  }
+  {
+    // Throwing element transfer after POCMA: the guard must still destroy the
+    // source elements and release its block through the propagated allocator.
+    using MA = move_sensitive_alloc<throw_move>;
+    throw_move::reset();
+    MA::reset();
+    {
+      fix<throw_move, 4, MA> a(MA(2));
+      a.emplace_one_at_back_(1);
+      fix<throw_move, 4, MA> b(MA(1));
+      b.reserve(8);
+      b.emplace_one_at_back_(7);
+      b.emplace_one_at_back_(8);
+      b.emplace_one_at_back_(9);
+      CHECK(b.is_heap() && b.size() == 3);
+      throw_move::count       = 0;
+      throw_move::throw_after = 0; // the first tail move-construction throws
+      bool threw = false;
+      try {
+        (void) a.move_assignment_from_(std::move(b));
+      } catch (std::runtime_error const&) { threw = true; }
+      throw_move::throw_after = 1000000;
+      CHECK(threw);
+      CHECK(a.is_stack() && a.size() == 1); // old payload's size is unchanged
+      CHECK(a.get_allocator().id_ == 1);
+      CHECK(b.empty() && b.data() == nullptr && b.capacity() == 0);
+      CHECK(MA::deallocs == 1 && MA::moved_from_deallocs == 0);
+      CHECK(throw_move::alive == 1); // only a's original element remains
+    }
+    CHECK(throw_move::alive == 0);
+    throw_move::reset();
   }
   {
     // move large heap into stack target: keep_stack only covers small
