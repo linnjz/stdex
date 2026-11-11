@@ -1588,10 +1588,15 @@ constexpr bool constexpr_hash_mul()
   auto const h_hi  = stdex::hash_value(stdex::uint128_t { 0, 1 });
   auto const h_neg = stdex::hash_value(stdex::int128_t::from_i64(-1));
   auto const h_max = stdex::hash_value(~stdex::uint128_t {});
+  auto const q_lo  = stdex::hash<stdex::uint128_t> {}(stdex::uint128_t { 1, 0 });
+  auto const q_hi  = stdex::hash<stdex::uint128_t> {}(stdex::uint128_t { 0, 1 });
+  auto const q_neg = stdex::hash<stdex::int128_t> {}(stdex::int128_t::from_i64(-1));
+  auto const q_max = stdex::hash<stdex::uint128_t> {}(~stdex::uint128_t {});
   return k1 != k2 && standard != micro && standard != nano && micro != nano &&
          product.lo() == 0x2236'D88F'E561'8CF0ULL && product.hi() == 0x0121'FA00'AD77'D742ULL &&
          h_lo != h_hi && h_neg == h_max &&
-         stdex::hash<stdex::uint128_t> {}(stdex::uint128_t { 0, 1 }) == static_cast<std::size_t>(h_hi);
+         q_lo != q_hi && q_neg == q_max &&
+         stdex::hash<stdex::uint128_t> {}(stdex::uint128_t { 0, 1 }, 1) != q_hi;
 }
 
 #if defined(__cpp_lib_start_lifetime) && __cpp_lib_start_lifetime >= 202603L
@@ -1603,6 +1608,19 @@ static_assert(constexpr_stack_iteration());
 static_assert(constexpr_heap_only());
 static_assert(constexpr_heap_iteration());
 static_assert(constexpr_hash_mul());
+
+constexpr bool constexpr_seeded_hash()
+{
+  using stdex::seeded_hash;
+  return seeded_hash<std::uint64_t> {42}(42) == stdex::hash<std::uint64_t> {}(42, 42) &&
+         seeded_hash<std::uint64_t> {42} == seeded_hash<std::uint64_t> {42} &&
+         seeded_hash<std::uint64_t> {42} != seeded_hash<std::uint64_t> {43} &&
+         seeded_hash<stdex::uint128_t> {7}(stdex::uint128_t { 1, 2 }) ==
+             stdex::hash<stdex::uint128_t> {}(stdex::uint128_t { 1, 2 }, 7) &&
+         seeded_hash<std::string_view> {7}("abc") == stdex::hash<std::string_view> {}(std::string_view { "abc" }, 7);
+}
+
+static_assert(constexpr_seeded_hash());
 
 constexpr bool scalar_hash_reaches_high_bits()
 {
@@ -1628,6 +1646,7 @@ void test_constexpr()
   CHECK(constexpr_erase_and_reset());
   CHECK(constexpr_heap_iteration());
   CHECK(constexpr_hash_mul());
+  CHECK(constexpr_seeded_hash());
 }
 
 // ==================================================================

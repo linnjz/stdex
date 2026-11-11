@@ -17,6 +17,7 @@
 #pragma once
 
 #include <array>    // std::array, std::to_array
+#include <bit>      // std::rotl
 #include <concepts> // std::same_as
 #include <cstddef>  // std::size_t
 #include <cstdint>  // std::uint64_t
@@ -33,9 +34,13 @@
 
 namespace stdex
 {
-
-inline constexpr std::uint64_t kPhiMixMultConstant = 0x9E'37'79'B9'7F'4A'7C'15ULL; // [2^64 / 1.618033988749894...(std::numbers::phi) ]
-inline constexpr std::uint64_t kPiMixMultConstant  = 0x51'7C'C1'B7'27'22'0A'95ULL; // [2^64 / 3.141592653589793...(std::numbers::pi) ]
+// The hash functor deliberately does not perform avalanche multiplication.
+// If the caller wants to improve avalanche resistance, they can selectively
+// multiply the hash value returned by the functor call by one of the following four numbers.
+inline constexpr std::uint64_t kPhiMixMultConstant   = 0x9E'37'79'B9'7F'4A'7C'15ULL; // [2^64 / 1.618033988749894...(std::numbers::phi) ]
+inline constexpr std::uint64_t kPiMixMultConstant    = 0x51'7C'C1'B7'27'22'0A'95ULL; // [2^64 / 3.141592653589793...(std::numbers::pi) ]
+inline constexpr std::uint32_t kPhiMixMultConstant32 = 0x9E'37'79'B9U;               // [2^32 / 1.618033988749894...(std::numbers::phi) ]
+inline constexpr std::uint32_t kPiMixMultConstant32  = 0x51'7C'C1'B7U;               // [2^32 / 3.141592653589793...(std::numbers::pi) ]
 
 static_assert(CHAR_BIT == 8, "hash requires 8-bit bytes");
 static_assert(sizeof(std::uint32_t) == 4, "hash requires 32-bit std::uint32_t");
@@ -110,7 +115,7 @@ concept scalar_hashable = std::integral<std::remove_cvref_t<T>> ||
                           std::is_enum_v<std::remove_cvref_t<T>> ||
                           std::floating_point<std::remove_cvref_t<T>>;
 
-// -0.0 == +0.0 but bit_cast differs; NaN != NaN so no normalization needed.
+/// -0.0 == +0.0 but bit_cast differs; NaN != NaN so no normalization needed.
 template <typename T>
 [[nodiscard]] constexpr unsigned_equivalent_t<T> to_hashable_unsigned(T const value) noexcept
 {
@@ -120,6 +125,44 @@ template <typename T>
     }
   }
   return to_unsigned(value);
+}
+
+/// /RTCc (SmallerTypeCheck) traps a narrowing cast when the value does not fit
+/// the destination type; mask before narrowing in that configuration. This is
+/// the same workaround Boost.Unordered uses in its mulx32.
+[[nodiscard]] constexpr std::uint32_t fold_to_u32(std::uint64_t const value) noexcept
+{
+#if defined(__MSVC_RUNTIME_CHECKS)
+  return static_cast<std::uint32_t>(value & 0xFFFF'FFFFU) ^ static_cast<std::uint32_t>(value >> 32U);
+#else
+  return static_cast<std::uint32_t>(value) ^ static_cast<std::uint32_t>(value >> 32U);
+#endif
+}
+
+[[nodiscard]] constexpr std::size_t to_size_t(std::uint64_t const value) noexcept
+{
+  if constexpr (sizeof(std::size_t) == 8) {
+    return static_cast<std::size_t>(value);
+  } else {
+    return static_cast<std::size_t>(fold_to_u32(value));
+  }
+}
+
+/// One 32x32 -> 64 multiplication folded back to 32 bits.
+[[nodiscard]] constexpr std::uint32_t mulx32(std::uint32_t const lhs, std::uint32_t const rhs) noexcept
+{
+  return fold_to_u32(static_cast<std::uint64_t>(lhs) * rhs);
+}
+
+/// One 64x64->128 multiply for a 128-bit key. XOR-ing both operands back in keeps
+/// structured keys (notably high == 0) from collapsing to zero when either
+/// multiplication operand is zero; rotating high makes the two words
+/// order-sensitive.
+[[nodiscard]] constexpr std::uint64_t mix_128_words(std::uint64_t const low, std::uint64_t const high, std::uint64_t const seed) noexcept
+{
+  std::uint64_t const low_seeded = low ^ seed;
+  std::uint64_t const high_mixed = high ^ kPhiMixMultConstant;
+  return umul128_xor_fold(low_seeded, high_mixed) ^ low_seeded ^ std::rotl(high_mixed, 32);
 }
 
 template <typename Range>
@@ -293,23 +336,59 @@ template <hash_mode Mode = hash_standard_t>
 template <class T>
 struct hash;
 
+template <>
+struct hash<uint128_t>
+{
+  using argument_type = uint128_t;
+  using result_type   = std::size_t;
+
+  [[nodiscard]] constexpr std::size_t operator() (argument_type const value, std::uint64_t const seed = 0) const noexcept
+  {
+    std::uint64_t const mixed = hash_detail::mix_128_words(value.lo(), value.hi(), seed);
+    if constexpr (sizeof(std::size_t) == 8) {
+      return static_cast<std::size_t>(mixed);
+    } else {
+      return static_cast<std::size_t>(hash_detail::fold_to_u32(mixed));
+    }
+  }
+};
+
+template <>
+struct hash<int128_t>
+{
+  using argument_type = int128_t;
+  using result_type   = std::size_t;
+
+  [[nodiscard]] constexpr std::size_t operator() (argument_type const value, std::uint64_t const seed = 0) const noexcept
+  {
+    std::uint64_t const mixed = hash_detail::mix_128_words(value.lo(), value.hi(), seed);
+    if constexpr (sizeof(std::size_t) == 8) {
+      return static_cast<std::size_t>(mixed);
+    } else {
+      return static_cast<std::size_t>(hash_detail::fold_to_u32(mixed));
+    }
+  }
+};
+
 template <hash_detail::scalar_hashable T>
 struct hash<T>
 {
   using argument_type = T;
   using result_type   = std::size_t;
 
-  [[nodiscard]] constexpr std::size_t operator() (argument_type value) const noexcept
+  [[nodiscard]] constexpr std::size_t operator() (argument_type const value, std::uint64_t const seed = 0) const noexcept
   {
-    if constexpr (sizeof(void *) == 8) {
-      return umul128_xor_fold(static_cast<std::uint64_t>(hash_detail::to_hashable_unsigned(value)), kPhiMixMultConstant);
+    std::uint64_t const bits = static_cast<std::uint64_t>(hash_detail::to_hashable_unsigned(value));
+    if constexpr (sizeof(std::size_t) == 8) {
+      return hash_detail::to_size_t(umul128_xor_fold(bits ^ seed, kPhiMixMultConstant));
     } else {
-      std::uint64_t product = static_cast<std::uint64_t>(hash_detail::to_hashable_unsigned(value)) * 0x00'00'00'00'E8'17'FB'2DULL;
-#if defined(__MSVC_RUNTIME_CHECKS)
-      return static_cast<std::uint32_t>(product & UINT32_MAX) ^ static_cast<std::uint32_t>(product >> 32);
-#else
-      return static_cast<std::uint32_t>(product) ^ static_cast<std::uint32_t>(product >> 32);
-#endif
+      // Keep both halves of 64-bit scalar keys in play; the optional final
+      // avalanche multiply is intentionally left to the caller.
+      std::uint32_t x = hash_detail::fold_to_u32(bits) ^ hash_detail::fold_to_u32(seed);
+      if constexpr (sizeof(T) > sizeof(std::uint32_t)) {
+        x ^= hash_detail::mulx32(static_cast<std::uint32_t>(bits >> 32U), kPhiMixMultConstant32);
+      }
+      return static_cast<std::size_t>(hash_detail::mulx32(x, kPhiMixMultConstant32));
     }
   }
 };
@@ -323,7 +402,7 @@ struct hash<std::basic_string<CharT, std::char_traits<CharT>, Allocator>>
   template <hash_mode Mode = hash_standard_t>
   [[nodiscard]] constexpr std::size_t operator() (argument_type const &str, std::uint64_t seed = 0) const noexcept
   {
-    return stdex::hash_range<argument_type, Mode>(str, seed);
+    return hash_detail::to_size_t(stdex::hash_range<argument_type, Mode>(str, seed));
   }
 };
 
@@ -336,7 +415,7 @@ struct hash<std::basic_string_view<CharT, std::char_traits<CharT>>>
   template <hash_mode Mode = hash_standard_t>
   [[nodiscard]] constexpr std::size_t operator() (argument_type sv, std::uint64_t seed = 0) const noexcept
   {
-    return stdex::hash_range<argument_type, Mode>(sv, seed);
+    return hash_detail::to_size_t(stdex::hash_range<argument_type, Mode>(sv, seed));
   }
 };
 
@@ -346,9 +425,9 @@ struct hash<std::nullptr_t>
   using argument_type = std::nullptr_t;
   using result_type   = std::size_t;
 
-  [[nodiscard]] constexpr std::size_t operator() (std::nullptr_t) const noexcept
+  [[nodiscard]] constexpr std::size_t operator() (std::nullptr_t, std::uint64_t seed = 0) const noexcept
   {
-    return hash<std::uintptr_t> {}(0);
+    return hash<std::uintptr_t> {}(0, seed);
   }
 };
 
@@ -361,10 +440,10 @@ struct hash<T *>
   using argument_type = T *;
   using result_type   = std::size_t;
 
-  [[nodiscard]] std::size_t operator() (T *const ptr) const noexcept
+  [[nodiscard]] std::size_t operator() (T *const ptr, std::uint64_t seed = 0) const noexcept
   {
     auto const address = reinterpret_cast<std::uintptr_t>(ptr);
-    return hash<std::uintptr_t> {}(address);
+    return hash<std::uintptr_t> {}(address, seed);
   }
 };
 
@@ -374,9 +453,9 @@ struct hash<std::shared_ptr<T>>
   using argument_type = std::shared_ptr<T>;
   using result_type   = std::size_t;
 
-  [[nodiscard]] std::size_t operator() (argument_type const &ptr) const noexcept
+  [[nodiscard]] std::size_t operator() (argument_type const &ptr, std::uint64_t seed = 0) const noexcept
   {
-    return hash<T *> {}(ptr.get());
+    return hash<T *> {}(ptr.get(), seed);
   }
 };
 
@@ -386,33 +465,159 @@ struct hash<std::unique_ptr<T, Deleter>>
   using argument_type = std::unique_ptr<T, Deleter>;
   using result_type   = std::size_t;
 
-  [[nodiscard]] std::size_t operator() (argument_type const &ptr) const noexcept
+  [[nodiscard]] std::size_t operator() (argument_type const &ptr, std::uint64_t seed = 0) const noexcept
   {
-    return hash<T *> {}(ptr.get());
+    return hash<T *> {}(ptr.get(), seed);
   }
 };
 
+template <class T>
+struct seeded_hash;
+
 template <>
-struct hash<uint128_t>
+struct seeded_hash<uint128_t>
 {
   using argument_type = uint128_t;
   using result_type   = std::size_t;
 
+  std::uint64_t seed {};
+
   [[nodiscard]] constexpr std::size_t operator() (argument_type const value) const noexcept
   {
-    return static_cast<std::size_t>(hash_value(value));
+    return hash<argument_type> {}(value, seed);
   }
+
+  friend constexpr bool operator== (seeded_hash const &, seeded_hash const &) noexcept = default;
 };
 
 template <>
-struct hash<int128_t>
+struct seeded_hash<int128_t>
 {
   using argument_type = int128_t;
   using result_type   = std::size_t;
 
+  std::uint64_t seed {};
+
   [[nodiscard]] constexpr std::size_t operator() (argument_type const value) const noexcept
   {
-    return static_cast<std::size_t>(hash_value(value));
+    return hash<argument_type> {}(value, seed);
   }
+
+  friend constexpr bool operator== (seeded_hash const &, seeded_hash const &) noexcept = default;
+};
+
+template <hash_detail::scalar_hashable T>
+struct seeded_hash<T>
+{
+  using argument_type = T;
+  using result_type   = std::size_t;
+
+  std::uint64_t seed {};
+
+  [[nodiscard]] constexpr std::size_t operator() (argument_type const value) const noexcept
+  {
+    return hash<T> {}(value, seed);
+  }
+
+  friend constexpr bool operator== (seeded_hash const &, seeded_hash const &) noexcept = default;
+};
+
+template <class CharT, class Allocator>
+struct seeded_hash<std::basic_string<CharT, std::char_traits<CharT>, Allocator>>
+{
+  using argument_type = std::basic_string<CharT, std::char_traits<CharT>, Allocator>;
+  using result_type   = std::size_t;
+
+  std::uint64_t seed {};
+
+  template <hash_mode Mode = hash_standard_t>
+  [[nodiscard]] constexpr std::size_t operator() (argument_type const &str) const noexcept
+  {
+    return hash<argument_type> {}.template operator()<Mode>(str, seed);
+  }
+
+  friend constexpr bool operator== (seeded_hash const &, seeded_hash const &) noexcept = default;
+};
+
+template <class CharT>
+struct seeded_hash<std::basic_string_view<CharT, std::char_traits<CharT>>>
+{
+  using argument_type = std::basic_string_view<CharT, std::char_traits<CharT>>;
+  using result_type   = std::size_t;
+
+  std::uint64_t seed {};
+
+  template <hash_mode Mode = hash_standard_t>
+  [[nodiscard]] constexpr std::size_t operator() (argument_type const sv) const noexcept
+  {
+    return hash<argument_type> {}.template operator()<Mode>(sv, seed);
+  }
+
+  friend constexpr bool operator== (seeded_hash const &, seeded_hash const &) noexcept = default;
+};
+
+template <>
+struct seeded_hash<std::nullptr_t>
+{
+  using argument_type = std::nullptr_t;
+  using result_type   = std::size_t;
+
+  std::uint64_t seed {};
+
+  [[nodiscard]] constexpr std::size_t operator() (std::nullptr_t) const noexcept
+  {
+    return hash<std::nullptr_t> {}(nullptr, seed);
+  }
+
+  friend constexpr bool operator== (seeded_hash const &, seeded_hash const &) noexcept = default;
+};
+
+template <class T>
+requires (!std::is_function_v<T>)
+struct seeded_hash<T *>
+{
+  using argument_type = T *;
+  using result_type   = std::size_t;
+
+  std::uint64_t seed {};
+
+  [[nodiscard]] std::size_t operator() (T *const ptr) const noexcept
+  {
+    return hash<T *> {}(ptr, seed);
+  }
+
+  friend constexpr bool operator== (seeded_hash const &, seeded_hash const &) noexcept = default;
+};
+
+template <class T>
+struct seeded_hash<std::shared_ptr<T>>
+{
+  using argument_type = std::shared_ptr<T>;
+  using result_type   = std::size_t;
+
+  std::uint64_t seed {};
+
+  [[nodiscard]] std::size_t operator() (argument_type const &ptr) const noexcept
+  {
+    return hash<T *> {}(ptr.get(), seed);
+  }
+
+  friend constexpr bool operator== (seeded_hash const &, seeded_hash const &) noexcept = default;
+};
+
+template <class T, class Deleter>
+struct seeded_hash<std::unique_ptr<T, Deleter>>
+{
+  using argument_type = std::unique_ptr<T, Deleter>;
+  using result_type   = std::size_t;
+
+  std::uint64_t seed {};
+
+  [[nodiscard]] std::size_t operator() (argument_type const &ptr) const noexcept
+  {
+    return hash<T *> {}(ptr.get(), seed);
+  }
+
+  friend constexpr bool operator== (seeded_hash const &, seeded_hash const &) noexcept = default;
 };
 } // namespace stdex

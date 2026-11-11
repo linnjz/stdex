@@ -94,6 +94,10 @@ if(TARGET Boost::unordered AND TARGET absl::flat_hash_map)
     )
 endif()
 
+stdex_add_bench(bench_hash bench_hash.cpp
+    OWN_MAIN
+)
+
 # int128 always compares against the MSVC-style two-word baseline; native
 # __int128 and absl::uint128 are added automatically when the target exists.
 set(_bench_int128_libs "")

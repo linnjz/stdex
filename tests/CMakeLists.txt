@@ -61,6 +61,8 @@ stdex_add_test(test_hash_table test_hash_table.cpp
     INCLUDES "${CMAKE_SOURCE_DIR}/include/unordered_flat_detail"
 )
 
+stdex_add_test(test_hash test_hash.cpp)
+
 stdex_add_test(test_bit test_bit.cpp)
 stdex_add_test(test_fastmod test_fastmod.cpp)
 stdex_add_test(test_int128 test_int128.cpp)
