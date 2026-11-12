@@ -29,6 +29,7 @@
 #include <memory>
 #include <numeric>
 #include <random>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -1660,6 +1661,45 @@ static void test_int128_projection()
   PASS();
 }
 
+static void test_external_sort_buffer()
+{
+  TEST_RADIX(ExternalSortBuffer);
+
+  std::vector<std::uint32_t> values(4096);
+  std::iota(values.begin(), values.end(), std::uint32_t { 0 });
+  std::reverse(values.begin(), values.end());
+
+  std::vector<std::uint32_t> scratch(values.size());
+  auto expected = values;
+  std::stable_sort(expected.begin(), expected.end());
+
+  stdex::stable_radix_sort<stdex::radix_sort_options {}>(
+      values.begin(), values.end(), std::span<std::uint32_t>(scratch));
+  if (values != expected) {
+    FAIL_MSG("external buffer ascending");
+    return;
+  }
+
+  std::reverse(values.begin(), values.end());
+  stdex::stable_radix_sort<stdex::radix_sort_options {}>(
+      values.begin(), values.end(), std::span<std::uint32_t>(scratch));
+  if (values != expected) {
+    FAIL_MSG("external buffer reuse");
+    return;
+  }
+
+  std::vector<std::uint32_t> empty;
+  std::vector<std::uint32_t> empty_scratch;
+  stdex::stable_radix_sort<stdex::radix_sort_options {}>(
+      empty.begin(), empty.end(), std::span<std::uint32_t>(empty_scratch));
+  if (!empty.empty()) {
+    FAIL_MSG("external buffer empty");
+    return;
+  }
+
+  PASS();
+}
+
 // ============================================================================
 // main
 // ============================================================================
@@ -1706,6 +1746,7 @@ int main()
   test_vector_bool();
   test_signed_zero();
   test_fancy_pointer_allocator();
+  test_external_sort_buffer();
 
   test_uint128_keys();
   test_int128_keys();

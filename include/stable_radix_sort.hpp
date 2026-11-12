@@ -32,6 +32,7 @@
 #include <limits>      // std::numeric_limits
 #include <memory>      // std::allocator、std::allocator_traits、std::destroy_at、std::to_address
 #include <new>         // std::bad_alloc、std::hardware_constructive_interference_size
+#include <span>        // std::span
 #include <type_traits> // std::conditional_t、std::false_type、std::true_type、
                        // std::is_trivially_default_constructible_v、
                        // std::is_trivially_destructible_v、std::is_object_v、
@@ -421,6 +422,45 @@ private:
   size_type size_ { 0 };
   pointer fancy_buffer_ {};
   value_type *raw_buffer_ { nullptr };
+};
+
+/// Allocator adapter that lets allocator_holder use caller-owned scratch
+/// storage. The storage is never released by this adapter.
+template <typename T>
+class fixed_buffer_allocator
+{
+public:
+  using value_type      = T;
+  using pointer         = T *;
+  using size_type       = std::size_t;
+  using difference_type = std::ptrdiff_t;
+
+  constexpr fixed_buffer_allocator() noexcept = default;
+
+  constexpr fixed_buffer_allocator(pointer const data, size_type const size) noexcept
+      : data_ { data }
+      , size_ { size }
+  {
+  }
+
+  [[nodiscard]] constexpr pointer allocate(size_type const count)
+  {
+    assert(count <= size_);
+    return data_;
+  }
+
+  constexpr void deallocate(pointer, size_type) noexcept
+  {
+  }
+
+  friend constexpr bool operator== (fixed_buffer_allocator const &lhs, fixed_buffer_allocator const &rhs) noexcept
+  {
+    return lhs.data_ == rhs.data_ && lhs.size_ == rhs.size_;
+  }
+
+private:
+  pointer data_ {};
+  size_type size_ {};
 };
 
 struct hybrid_alloc_tag
@@ -1856,6 +1896,47 @@ constexpr void stable_radix_sort(
   } else {
     stable_radix_sort_detail::stable_radix_sort_impl<radix_traits>(first, last, allocator, std::move(projection));
   }
+}
+
+/**
+ * @brief Radix sort using a caller-provided temporary buffer.
+ *
+ * @details
+ * The caller owns `sort_buffer`; the sort does not allocate its element
+ * scratch storage. The buffer is reused as the radix sort's alternate array,
+ * so it must contain exactly one element per input element. Histogram storage
+ * remains managed internally.
+ *
+ * @note When `value_t` is not trivially default constructible, `sort_buffer`
+ *       must refer to raw uninitialized storage; the sort constructs and
+ *       destroys the temporary elements through the allocator adapter.
+ *
+ * @tparam RadixOptions  Compile-time sorting options.
+ * @tparam RandIter      Contiguous random-access iterator type.
+ * @tparam KeyMap        A callable `value_t -> arithmetic` (default: identity).
+ * @param first          Inclusive start of the range.
+ * @param last           Exclusive end of the range.
+ * @param sort_buffer    Caller-provided temporary buffer; its size must equal
+ *                       `std::distance(first, last)`.
+ * @param key_map        Key extraction functor.
+ */
+template <
+    radix_sort_options RadixOptions,
+    stable_radix_sort_detail::radix_sort_iterator RandIter,
+    stable_radix_sort_detail::arithmetic_key_map<std::iter_value_t<RandIter>> KeyMap =
+        stable_radix_sort_detail::radix_key_map_fn>
+constexpr void stable_radix_sort(
+    RandIter first,
+    RandIter last,
+    std::span<std::iter_value_t<RandIter>> sort_buffer,
+    KeyMap key_map = {})
+{
+  using value_t = std::iter_value_t<RandIter>;
+  assert(sort_buffer.size() == static_cast<std::size_t>(std::distance(first, last)));
+  stable_radix_sort_detail::fixed_buffer_allocator<value_t> allocator {
+    sort_buffer.data(), sort_buffer.size()
+  };
+  stable_radix_sort<RadixOptions>(first, last, allocator, std::move(key_map));
 }
 
 /**
