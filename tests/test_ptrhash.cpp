@@ -16,8 +16,9 @@
 
 // test_ptrhash.cpp
 //
-// Functional checks for stdex::ptr_hash (include/ptrhash.hpp).
+// Functional checks for stdex::heap_ptr_hash and stdex::stack_ptr_hash (include/ptrhash.hpp).
 // Deterministic SplitMix64 key streams keep the test free of flakiness.
+#include <array>
 #include <cstdint>
 #include <cstdio>
 #include <memory>
@@ -117,6 +118,18 @@ struct options_tiny_load
   }();
 };
 
+constexpr bool fixed_constexpr_check()
+{
+  std::array<std::uint64_t, 8> const keys { 1, 2, 3, 4, 5, 6, 7, 8 };
+  stdex::stack_ptr_hash<std::uint64_t, 8> table(keys);
+  if (table.size() != keys.size()) return false;
+  for (std::uint64_t key : keys) {
+    if (table.index(key) >= table.capacity()) return false;
+  }
+  return true;
+}
+static_assert(fixed_constexpr_check(), "stack_ptr_hash must be usable during constant evaluation");
+
 struct pointer_key
 {
   int *value;
@@ -188,16 +201,16 @@ void test_basic_construction()
   std::printf("\n=== ptrhash: basic construction ===\n");
 
   {
-    stdex::ptr_hash<std::uint64_t> empty;
+    stdex::heap_ptr_hash<std::uint64_t> empty;
     CHECK(empty.empty());
     CHECK(empty.size() == 0);
     CHECK(empty.capacity() == 0);
-    CHECK(empty.index(12345) == stdex::ptr_hash<std::uint64_t>::npos);
+    CHECK(empty.index(12345) == stdex::heap_ptr_hash<std::uint64_t>::npos);
   }
 
-  using fast     = stdex::ptr_hash<std::uint64_t>;
-  using balanced = stdex::ptr_hash<std::uint64_t, stdex::hash<std::uint64_t>, stdex::ptr_hash_balanced>;
-  using compact  = stdex::ptr_hash<std::uint64_t, stdex::hash<std::uint64_t>, stdex::ptr_hash_compact>;
+  using fast     = stdex::heap_ptr_hash<std::uint64_t>;
+  using balanced = stdex::heap_ptr_hash<std::uint64_t, stdex::hash<std::uint64_t>, stdex::ptr_hash_option_balanced>;
+  using compact  = stdex::heap_ptr_hash<std::uint64_t, stdex::hash<std::uint64_t>, stdex::ptr_hash_option_compact>;
 
   for (std::size_t count = 0; count <= 200; ++count) {
     std::vector<std::uint64_t> const keys = make_random_keys(count, count * 7919u + 17u);
@@ -248,7 +261,7 @@ void test_key_types()
   {
     std::vector<std::uint32_t> keys;
     for (std::uint32_t i = 0; i < 5000; ++i) keys.push_back(i * 2'654'435'761U);
-    using table_type = stdex::ptr_hash<std::uint32_t, stdex::hash<std::uint32_t>, stdex::ptr_hash_balanced>;
+    using table_type = stdex::heap_ptr_hash<std::uint32_t, stdex::hash<std::uint32_t>, stdex::ptr_hash_option_balanced>;
     table_type table(keys);
     std::vector<unsigned char> taken(table.size(), 0);
     for (std::uint32_t key : keys) {
@@ -262,7 +275,7 @@ void test_key_types()
   {
     std::vector<std::int64_t> keys;
     for (std::int64_t i = -2500; i <= 2500; ++i) keys.push_back(i);
-    stdex::ptr_hash<std::int64_t, stdex::hash<std::int64_t>, stdex::ptr_hash_balanced> table(keys);
+    stdex::heap_ptr_hash<std::int64_t, stdex::hash<std::int64_t>, stdex::ptr_hash_option_balanced> table(keys);
     std::vector<unsigned char> taken(table.size(), 0);
     for (std::int64_t key : keys) {
       std::size_t const index = table.index(key);
@@ -275,7 +288,7 @@ void test_key_types()
   {
     std::vector<std::string> keys;
     for (int i = 0; i < 3000; ++i) keys.push_back("ptrhash-key-" + std::to_string(i) + "-payload");
-    using table_type = stdex::ptr_hash<std::string, stdex::hash<std::string>, stdex::ptr_hash_balanced>;
+    using table_type = stdex::heap_ptr_hash<std::string, stdex::hash<std::string>, stdex::ptr_hash_option_balanced>;
     table_type table(keys);
     std::vector<unsigned char> taken(table.size(), 0);
     for (std::string const &key : keys) {
@@ -292,7 +305,7 @@ void test_key_types()
     keys.emplace_back("beta");
     keys.emplace_back("gamma");
     keys.emplace_back("delta");
-    stdex::ptr_hash<std::string_view, stdex::hash<std::string_view>, stdex::ptr_hash_balanced> table(keys);
+    stdex::heap_ptr_hash<std::string_view, stdex::hash<std::string_view>, stdex::ptr_hash_option_balanced> table(keys);
     std::vector<unsigned char> taken(table.size(), 0);
     for (std::string_view key : keys) {
       std::size_t const index = table.index(key);
@@ -307,7 +320,7 @@ void test_key_types()
     int b = 0;
     int c = 0;
     std::vector<pointer_key> keys { { &a }, { &b }, { &c } };
-    stdex::ptr_hash<pointer_key, pointer_key_hasher, stdex::ptr_hash_balanced> table(keys);
+    stdex::heap_ptr_hash<pointer_key, pointer_key_hasher, stdex::ptr_hash_option_balanced> table(keys);
     std::vector<unsigned char> taken(table.size(), 0);
     for (pointer_key const &key : keys) {
       std::size_t const index = table.index(key);
@@ -324,13 +337,13 @@ void test_error_paths()
 
   {
     std::vector<std::uint64_t> keys { 1, 2, 3, 4, 4 };
-    stdex::ptr_hash<std::uint64_t> table;
+    stdex::heap_ptr_hash<std::uint64_t> table;
     CHECK(!table.try_build(keys));
   }
 
   {
     std::vector<std::uint64_t> keys { 1, 2, 3, 4, 5 };
-    stdex::ptr_hash<std::uint64_t, constant_hasher> table;
+    stdex::heap_ptr_hash<std::uint64_t, constant_hasher> table;
     CHECK(!table.try_build(keys));
   }
 
@@ -338,7 +351,7 @@ void test_error_paths()
     std::vector<std::uint64_t> keys { 10, 20, 30 };
     bool threw = false;
     try {
-      stdex::ptr_hash<std::uint64_t, constant_hasher> table(keys);
+      stdex::heap_ptr_hash<std::uint64_t, constant_hasher> table(keys);
       (void) table;
     } catch (std::runtime_error const &) {
       threw = true;
@@ -348,7 +361,7 @@ void test_error_paths()
 
   {
     std::vector<std::uint64_t> keys { 1, 2, 3 };
-    stdex::ptr_hash<std::uint64_t, constant_hasher> table;
+    stdex::heap_ptr_hash<std::uint64_t, constant_hasher> table;
     CHECK(!table.try_build(keys.begin(), keys.end()));
   }
 }
@@ -357,7 +370,7 @@ void test_copy_move_allocator()
 {
   std::printf("\n=== ptrhash: copy, move, allocator ===\n");
 
-  using table_type = stdex::ptr_hash<std::uint64_t, stdex::hash<std::uint64_t>, stdex::ptr_hash_balanced, counting_allocator<std::uint64_t>>;
+  using table_type = stdex::heap_ptr_hash<std::uint64_t, stdex::hash<std::uint64_t>, stdex::ptr_hash_option_balanced, counting_allocator<std::uint64_t>>;
 
   std::vector<std::uint64_t> const keys = make_random_keys(2000, 1234567);
   allocation_stats::allocations         = 0;
@@ -392,7 +405,7 @@ void test_initializer_list_and_ranges()
   std::printf("\n=== ptrhash: initializer_list and range ===\n");
 
   {
-    stdex::ptr_hash<std::uint64_t, stdex::hash<std::uint64_t>, stdex::ptr_hash_balanced> table { 10, 20, 30, 40, 50, 60, 70 };
+    stdex::heap_ptr_hash<std::uint64_t, stdex::hash<std::uint64_t>, stdex::ptr_hash_option_balanced> table { 10, 20, 30, 40, 50, 60, 70 };
     CHECK(table.size() == 7);
     std::vector<unsigned char> taken(table.size(), 0);
     for (std::uint64_t key : { 10, 20, 30, 40, 50, 60, 70 }) {
@@ -405,7 +418,7 @@ void test_initializer_list_and_ranges()
 
   {
     std::vector<std::uint64_t> const keys = make_random_keys(3000, 999);
-    stdex::ptr_hash<std::uint64_t, stdex::hash<std::uint64_t>, stdex::ptr_hash_balanced> table;
+    stdex::heap_ptr_hash<std::uint64_t, stdex::hash<std::uint64_t>, stdex::ptr_hash_option_balanced> table;
     CHECK(table.try_build(keys));
     CHECK(check_indices(table, keys, table.size()));
   }
@@ -419,11 +432,11 @@ void test_stress()
     std::vector<std::uint64_t> keys(count);
     for (std::size_t i = 0; i < count; ++i) keys[i] = i;
 
-    stdex::ptr_hash<std::uint64_t, identity_hasher> table;
+    stdex::heap_ptr_hash<std::uint64_t, identity_hasher> table;
     CHECK(table.try_build(keys));
     CHECK(check_indices(table, keys, table.capacity()));
 
-    using balanced_identity = stdex::ptr_hash<std::uint64_t, identity_hasher, stdex::ptr_hash_balanced>;
+    using balanced_identity = stdex::heap_ptr_hash<std::uint64_t, identity_hasher, stdex::ptr_hash_option_balanced>;
     balanced_identity minimal;
     CHECK(minimal.try_build(keys));
     CHECK(check_indices(minimal, keys, minimal.size()));
@@ -431,11 +444,11 @@ void test_stress()
 
   {
     std::vector<std::uint64_t> const keys = make_random_keys(50'000, 20261107);
-    stdex::ptr_hash<std::uint64_t> table(keys);
+    stdex::heap_ptr_hash<std::uint64_t> table(keys);
     CHECK(table.size() == keys.size());
     CHECK(check_indices(table, keys, table.capacity()));
 
-    stdex::ptr_hash<std::uint64_t, stdex::hash<std::uint64_t>, stdex::ptr_hash_balanced> minimal(keys);
+    stdex::heap_ptr_hash<std::uint64_t, stdex::hash<std::uint64_t>, stdex::ptr_hash_option_balanced> minimal(keys);
     CHECK(minimal.size() == keys.size());
     CHECK(check_indices(minimal, keys, minimal.size()));
   }
@@ -448,11 +461,11 @@ void test_stress()
       std::vector<std::uint64_t> keys(count);
       for (std::size_t i = 0; i < count; ++i) keys[i] = multiplier * i;
 
-      stdex::ptr_hash<std::uint64_t> fast_table;
+      stdex::heap_ptr_hash<std::uint64_t> fast_table;
       CHECK(fast_table.try_build(keys));
       CHECK(check_indices(fast_table, keys, fast_table.capacity()));
 
-      stdex::ptr_hash<std::uint64_t, stdex::hash<std::uint64_t>, stdex::ptr_hash_compact> compact_table;
+      stdex::heap_ptr_hash<std::uint64_t, stdex::hash<std::uint64_t>, stdex::ptr_hash_option_compact> compact_table;
       CHECK(compact_table.try_build(keys));
       CHECK(check_indices(compact_table, keys, compact_table.size()));
     }
@@ -461,9 +474,97 @@ void test_stress()
   {
     std::vector<std::uint64_t> keys(13'740);
     for (std::size_t i = 0; i < keys.size(); ++i) keys[i] = (i % 97U) * 7919U + i;
-    stdex::ptr_hash<std::uint64_t> fast_table;
+    stdex::heap_ptr_hash<std::uint64_t> fast_table;
     CHECK(fast_table.try_build(keys));
     CHECK(check_indices(fast_table, keys, fast_table.capacity()));
+  }
+}
+
+void test_fixed_capacity()
+{
+  std::printf("\n=== ptrhash: fixed capacity ===\n");
+
+  using fixed_fast = stdex::stack_ptr_hash<std::uint64_t, 512>;
+  using fixed_balanced = stdex::stack_ptr_hash<std::uint64_t, 512, stdex::hash<std::uint64_t>, stdex::ptr_hash_option_balanced>;
+
+  for (std::size_t count : { 0u, 1u, 2u, 3u, 4u, 8u, 16u, 32u, 64u, 128u, 256u, 512u }) {
+    std::vector<std::uint64_t> const keys = make_random_keys(count, count * 7919u + 17u);
+
+    fixed_fast fast_table;
+    CHECK(fast_table.try_build(keys));
+    CHECK(fast_table.size() == count);
+    CHECK(fast_table.capacity() >= count);
+    CHECK(check_indices(fast_table, keys, fast_table.capacity()));
+    if (count != 0) CHECK(check_absent_keys(fast_table, 8, fast_table.capacity(), count * 104729u + 3u));
+
+    fixed_balanced balanced_table;
+    CHECK(balanced_table.try_build(keys));
+    CHECK(balanced_table.size() == count);
+    CHECK(check_indices(balanced_table, keys, balanced_table.size()));
+    if (count != 0) CHECK(check_absent_keys(balanced_table, 8, balanced_table.size(), count * 104729u + 5u));
+  }
+
+  {
+    std::vector<std::uint64_t> const keys = make_random_keys(100, 987);
+    fixed_balanced table(keys);
+    CHECK(table.size() == keys.size());
+    CHECK(check_indices(table, keys, table.size()));
+  }
+
+  {
+    std::vector<std::uint64_t> keys(512);
+    for (std::size_t i = 0; i < keys.size(); ++i) keys[i] = i;
+    stdex::stack_ptr_hash<std::uint64_t, 512, identity_hasher> table;
+    CHECK(table.try_build(keys));
+    CHECK(check_indices(table, keys, table.capacity()));
+  }
+
+  {
+    std::vector<std::uint64_t> const keys = make_random_keys(128, 654);
+    stdex::stack_ptr_hash<std::uint64_t, 128, stdex::hash<std::uint64_t>, stdex::ptr_hash_option_compact> table;
+    CHECK(table.try_build(keys));
+    CHECK(check_indices(table, keys, table.size()));
+  }
+
+  {
+    std::vector<std::uint64_t> const keys = make_random_keys(16, 17);
+    stdex::stack_ptr_hash<std::uint64_t, 16> table;
+    CHECK(table.try_build(keys));
+    CHECK(check_indices(table, keys, table.capacity()));
+  }
+
+  {
+    std::vector<std::uint64_t> const keys = make_random_keys(256, 321);
+    using table_type = stdex::stack_ptr_hash<std::uint64_t, 256, stdex::hash<std::uint64_t>, stdex::ptr_hash_option_balanced>;
+    allocation_stats::allocations   = 0;
+    allocation_stats::deallocations = 0;
+    table_type table(keys);
+    CHECK(table.size() == keys.size());
+    CHECK(check_indices(table, keys, table.size()));
+    CHECK(allocation_stats::allocations == 0);
+    CHECK(allocation_stats::deallocations == 0);
+  }
+
+  {
+    std::vector<std::uint64_t> const keys = make_random_keys(9, 11);
+    stdex::stack_ptr_hash<std::uint64_t, 8> table;
+    bool threw = false;
+    try {
+      (void) table.try_build(keys);
+    } catch (std::length_error const &) {
+      threw = true;
+    }
+    CHECK(threw);
+    CHECK(table.empty());
+    CHECK(table.capacity() == 0);
+  }
+
+  {
+    std::vector<std::uint64_t> keys { 1, 2, 3, 4, 5 };
+    stdex::stack_ptr_hash<std::uint64_t, 8, constant_hasher> table;
+    CHECK(!table.try_build(keys));
+    CHECK(table.empty());
+    CHECK(table.capacity() == 0);
   }
 }
 
@@ -473,18 +574,18 @@ void test_regressions()
 
   {
     std::vector<std::uint64_t> keys { 1, 2, 3, 4, 4 };
-    stdex::ptr_hash<std::uint64_t> table;
+    stdex::heap_ptr_hash<std::uint64_t> table;
     CHECK(!table.try_build(keys));
     CHECK(table.empty());
     CHECK(table.size() == 0);
     CHECK(table.capacity() == 0);
     CHECK(table.bucket_count() == 0);
-    CHECK(table.index(1) == stdex::ptr_hash<std::uint64_t>::npos);
+    CHECK(table.index(1) == stdex::heap_ptr_hash<std::uint64_t>::npos);
   }
 
   {
     std::vector<std::uint64_t> const keys = make_random_keys(10, 11);
-    stdex::ptr_hash<std::uint64_t> table;
+    stdex::heap_ptr_hash<std::uint64_t> table;
     CHECK(table.try_build(keys));
     std::vector<std::uint64_t> const empty;
     CHECK(table.try_build(empty));
@@ -496,21 +597,21 @@ void test_regressions()
 
   {
     std::vector<std::uint64_t> keys { 1, 2, 3 };
-    stdex::ptr_hash<std::uint64_t, stdex::hash<std::uint64_t>, options_zero_evictions> table;
+    stdex::heap_ptr_hash<std::uint64_t, stdex::hash<std::uint64_t>, options_zero_evictions> table;
     CHECK(table.try_build(keys));
     CHECK(check_indices(table, keys, table.capacity()));
   }
 
   {
     std::vector<std::uint64_t> const keys = make_random_keys(99, 17);
-    stdex::ptr_hash<std::uint64_t> table;
+    stdex::heap_ptr_hash<std::uint64_t> table;
     CHECK(table.try_build(keys));
     CHECK(table.capacity() == 100);
   }
 
   {
     std::vector<std::uint64_t> keys { 1, 2, 3 };
-    stdex::ptr_hash<std::uint64_t, stdex::hash<std::uint64_t>, options_tiny_load> table;
+    stdex::heap_ptr_hash<std::uint64_t, stdex::hash<std::uint64_t>, options_tiny_load> table;
     bool threw = false;
     try {
       (void) table.try_build(keys);
@@ -531,6 +632,7 @@ int main()
   test_error_paths();
   test_copy_move_allocator();
   test_initializer_list_and_ranges();
+  test_fixed_capacity();
   test_stress();
   test_regressions();
 
