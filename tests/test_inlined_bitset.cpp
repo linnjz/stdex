@@ -1414,6 +1414,117 @@ void test_insert_erase_bitwise()
 }
 
 // ==================================================================
+// 17b. insert / erase block-level path (unaligned, >= one block)
+// ==================================================================
+template <class BS>
+void check_block_insert_erase_case(std::size_t const nbits, std::size_t const pos, std::size_t const count, bool const value)
+{
+  std::vector<char> initial;
+  initial.reserve(nbits);
+  for (std::size_t i = 0; i < nbits; ++i) initial.push_back(((i * 37u + 11u) % 5u) < 2u ? char(1) : char(0));
+
+  BS b = make_from_vec<BS>(initial);
+  std::vector<char> expected = initial;
+  expected.insert(expected.begin() + static_cast<std::ptrdiff_t>(pos), count, value ? char(1) : char(0));
+
+  auto const it = b.insert(pos, count, value);
+  CHECK_EQ(it - b.begin(), static_cast<std::ptrdiff_t>(pos));
+  CHECK_EQ(b.size(), expected.size());
+  CHECK(equals_vec(b, expected));
+  CHECK(tail_padding_zero(b));
+
+  auto const eit = b.erase(pos, pos + count);
+  CHECK_EQ(eit - b.begin(), static_cast<std::ptrdiff_t>(pos));
+  CHECK(equals_vec(b, initial));
+  CHECK(tail_padding_zero(b));
+
+  // A second erase with both ends inside blocks exercises the left-shift
+  // boundary blend independently of the inserted range.
+  if (nbits > 3) {
+    std::size_t const first = (pos + 3) % nbits;
+    std::size_t const len   = (std::min) (count, nbits - first);
+    std::vector<char> erased = initial;
+    erased.erase(erased.begin() + static_cast<std::ptrdiff_t>(first),
+                 erased.begin() + static_cast<std::ptrdiff_t>(first + len));
+    BS e = make_from_vec<BS>(initial);
+    e.erase(first, first + len);
+    CHECK(equals_vec(e, erased));
+    CHECK(tail_padding_zero(e));
+  }
+}
+
+void test_insert_erase_block_path()
+{
+  SECTION("insert / erase block path");
+  {
+    constexpr std::size_t sizes[] = {0u, 1u, 63u, 64u, 65u, 127u, 128u, 129u, 200u};
+    for (std::size_t const nbits : sizes) {
+      for (std::size_t pos : {std::size_t{0}, nbits / 3, nbits}) {
+        for (std::size_t count : {std::size_t{1}, std::size_t{64}, std::size_t{65}, std::size_t{129}}) {
+          check_block_insert_erase_case<BS64_0>(nbits, pos, count, true);
+          check_block_insert_erase_case<BS64_0>(nbits, pos, count, false);
+          check_block_insert_erase_case<BS64_2>(nbits, pos, count, true);
+          check_block_insert_erase_case<BS32_4>(nbits, pos, count, true);
+          check_block_insert_erase_case<BS8_8>(nbits, pos, count, false);
+        }
+      }
+    }
+  }
+  {
+    // Stack growth beyond inline capacity while shifting a non-zero tail.
+    std::vector<char> initial(100, char(1));
+    initial[0] = char(0);
+    initial[99] = char(0);
+    BS64_2 b = make_from_vec<BS64_2>(initial);
+    CHECK(b.is_stack());
+    b.insert(37, 200, true);
+    CHECK(b.is_heap());
+    std::vector<char> expected = initial;
+    expected.insert(expected.begin() + 37, 200, char(1));
+    CHECK(equals_vec(b, expected));
+    CHECK(tail_padding_zero(b));
+  }
+}
+
+void test_fuzz_insert_erase_blocks()
+{
+  SECTION("fuzz insert / erase block path");
+  std::mt19937 rng(0xB10C0FFEu);
+  auto run = [&rng]<class BS>(int const ops) {
+    BS bs;
+    std::vector<char> ref;
+    for (int i = 0; i < ops; ++i) {
+      bool const insert = (rng() & 1u) != 0;
+      if (insert) {
+        std::size_t const pos   = ref.empty() ? 0u : static_cast<std::size_t>(rng()) % (ref.size() + 1u);
+        std::size_t const count = static_cast<std::size_t>(rng()) % 260u;
+        bool const value        = (rng() & 1u) != 0;
+        bs.insert(pos, count, value);
+        ref.insert(ref.begin() + static_cast<std::ptrdiff_t>(pos), count, value ? char(1) : char(0));
+      } else if (!ref.empty()) {
+        std::size_t const first = static_cast<std::size_t>(rng()) % ref.size();
+        std::size_t const len   = static_cast<std::size_t>(rng()) % (ref.size() - first + 1u);
+        bs.erase(first, first + len);
+        ref.erase(ref.begin() + static_cast<std::ptrdiff_t>(first),
+                  ref.begin() + static_cast<std::ptrdiff_t>(first + len));
+      }
+      CHECK_EQ(bs.size(), ref.size());
+      if ((i % 23) == 0) {
+        CHECK(equals_vec(bs, ref));
+        CHECK(tail_padding_zero(bs));
+      }
+    }
+    CHECK(equals_vec(bs, ref));
+    CHECK(tail_padding_zero(bs));
+  };
+  run.template operator()<BS64_0>(1500);
+  run.template operator()<BS64_2>(1500);
+  run.template operator()<BS32_4>(1000);
+  run.template operator()<BS16_4>(1000);
+  run.template operator()<BS8_8>(1000);
+}
+
+// ==================================================================
 // 18. block mutators (from_blocks)
 // ==================================================================
 void test_block_mutators()
@@ -2184,6 +2295,26 @@ void test_exception_safety_alloc()
     CHECK_EQ(bs.size(), 128u);
   }
   {
+    // block-level insert growth must leave the bitset intact if allocation fails
+    counting_state st;
+    CBitset<std::uint64_t, 2> bs(counting_alloc<std::uint64_t>(&st, 1));
+    for (int i = 0; i < 200; ++i) bs.push_back(i % 3 == 0);
+    auto const old_size = bs.size();
+    auto const old_cap  = bs.block_capacity();
+    st.fail_on_attempt  = st.allocation_attempts + 1;
+    bool threw          = false;
+    try {
+      bs.insert(17, 500, true); // unaligned count >= one block, forces growth
+    } catch (std::bad_alloc const &) {
+      threw = true;
+    }
+    st.fail_on_attempt = 0;
+    CHECK(threw);
+    CHECK_EQ(bs.size(), old_size);
+    CHECK_EQ(bs.block_capacity(), old_cap);
+    for (std::size_t i = 0; i < old_size; ++i) CHECK_EQ(static_cast<bool>(bs[i]), (i % 3 == 0));
+  }
+  {
     // throwing forward iterator during heap construction: no leak, caller sees throw
     std::vector<int> v(200, 1);
     throwing_fwd_iter f0(&v, 0, 50), f1(&v, v.size(), 50);
@@ -2402,6 +2533,8 @@ int main()
   test_set_reset_flip();
   test_push_pop_emplace_clear_resize();
   test_insert_erase_bitwise();
+  test_insert_erase_block_path();
+  test_fuzz_insert_erase_blocks();
   test_block_mutators();
   test_assign_variants();
   test_conversions();

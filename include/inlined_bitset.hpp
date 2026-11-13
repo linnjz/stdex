@@ -339,7 +339,9 @@ public:
 
     [[nodiscard]] constexpr reference operator* () const noexcept
     {
-      return (blocks_[pos_ / bits_per_block] & bit_mask_(pos_)) != 0;
+      size_type const block_index = pos_ / bits_per_block;
+      size_type const bit_index   = pos_ % bits_per_block;
+      return static_cast<bool>((blocks_[block_index] >> bit_index) & block_type { 1 });
     }
 
     [[nodiscard]] constexpr reference operator[] (difference_type n) const noexcept { return *(*this + n); }
@@ -498,6 +500,87 @@ private:
   constexpr void clear_tail_bits_(size_type nbits) noexcept
   {
     clear_tail_bits_(nbits, blocks_for_bits_(nbits));
+  }
+
+  /// Shifts bits [pos, old_bits) right by `shift` bits inside storage that
+  /// already has room for `new_blocks`; blocks past `old_blocks` read as zero.
+  /// Iterating downward keeps each read ahead of its write, so source and
+  /// destination may overlap. The low `pos % bits_per_block` bits of the first
+  /// block belong to the untouched prefix and are restored after the shift.
+  static constexpr void shift_bits_right_(block_type *const blocks,
+                                          size_type const pos,
+                                          size_type const old_bits,
+                                          size_type const new_blocks,
+                                          size_type const shift) noexcept
+  {
+    size_type const first_block   = pos / bits_per_block;
+    size_type const first_offset  = pos % bits_per_block;
+    size_type const old_blocks    = blocks_for_bits_(old_bits);
+    size_type const block_shift   = shift / bits_per_block;
+    size_type const bit_shift     = shift % bits_per_block;
+    block_type const prefix_mask  = first_offset == 0 ? block_type { 0 } : low_bits_mask_(first_offset);
+    block_type const prefix       = static_cast<block_type>(blocks[first_block] & prefix_mask);
+
+    if (bit_shift == 0) {
+      if (block_shift != 0) {
+        std::move_backward(blocks + first_block, blocks + old_blocks, blocks + old_blocks + block_shift);
+      }
+      blocks[first_block] = static_cast<block_type>((blocks[first_block] & static_cast<block_type>(~prefix_mask)) | prefix);
+      return;
+    }
+
+    for (size_type dst = new_blocks; dst-- > first_block;) {
+      block_type value {};
+      if (dst >= block_shift) {
+        size_type const src = dst - block_shift;
+        if (src < old_blocks) {
+          value = blocks[src];
+        }
+        value = static_cast<block_type>(value << bit_shift);
+        if (src > 0 && src - 1 < old_blocks) {
+          value = static_cast<block_type>(value | (blocks[src - 1] >> (bits_per_block - bit_shift)));
+        }
+      }
+      blocks[dst] = value;
+    }
+    blocks[first_block] = static_cast<block_type>((blocks[first_block] & static_cast<block_type>(~prefix_mask)) | prefix);
+  }
+
+  /// Shifts bits [first, old_bits) left by `shift` bits inside the existing
+  /// storage (erase()). Iterating upward keeps each read ahead of its write;
+  /// the untouched prefix of the first block is restored afterwards.
+  static constexpr void shift_bits_left_(block_type *const blocks,
+                                         size_type const first,
+                                         size_type const old_bits,
+                                         size_type const new_blocks,
+                                         size_type const shift) noexcept
+  {
+    size_type const first_block  = first / bits_per_block;
+    size_type const first_offset = first % bits_per_block;
+    size_type const old_blocks   = blocks_for_bits_(old_bits);
+    size_type const block_shift  = shift / bits_per_block;
+    size_type const bit_shift    = shift % bits_per_block;
+    block_type const prefix_mask = first_offset == 0 ? block_type { 0 } : low_bits_mask_(first_offset);
+    block_type const prefix      = static_cast<block_type>(blocks[first_block] & prefix_mask);
+
+    if (bit_shift == 0) {
+      if (block_shift != 0) {
+        std::move(blocks + first_block + block_shift, blocks + old_blocks, blocks + first_block);
+      }
+      blocks[first_block] = static_cast<block_type>((blocks[first_block] & static_cast<block_type>(~prefix_mask)) | prefix);
+      return;
+    }
+
+    for (size_type dst = first_block; dst < new_blocks; ++dst) {
+      size_type const src = dst + block_shift;
+      block_type value    = src < old_blocks ? blocks[src] : block_type { 0 };
+      value               = static_cast<block_type>(value >> bit_shift);
+      if (src + 1 < old_blocks) {
+        value = static_cast<block_type>(value | (blocks[src + 1] << (bits_per_block - bit_shift)));
+      }
+      blocks[dst] = value;
+    }
+    blocks[first_block] = static_cast<block_type>((blocks[first_block] & static_cast<block_type>(~prefix_mask)) | prefix);
   }
 
 private:
@@ -1423,7 +1506,12 @@ public:
 
   [[nodiscard]] constexpr bool operator[] (size_type pos) const noexcept
   {
-    return (data()[pos / bits_per_block] & bit_mask_(pos)) != 0;
+    // Read via a shift: x86 masks the shift count implicitly, so tight loops
+    // avoid the separate mask materialization that `word & bit_mask_(pos)`
+    // forces (measured on MSVC x64).
+    size_type const block_index = pos / bits_per_block;
+    size_type const bit_index   = pos % bits_per_block;
+    return static_cast<bool>((data()[block_index] >> bit_index) & block_type { 1 });
   }
 
   [[nodiscard]] constexpr reference at(size_type pos)
@@ -1434,8 +1522,10 @@ public:
 
   [[nodiscard]] constexpr bool at(size_type pos) const
   {
-    if (pos >= bit_size_) throw_out_of_range_();
-    return (data()[pos / bits_per_block] & bit_mask_(pos)) != 0;
+    if (pos >= bit_size_) [[unlikely]] throw_out_of_range_();
+    size_type const block_index = pos / bits_per_block;
+    size_type const bit_index   = pos % bits_per_block;
+    return static_cast<bool>((data()[block_index] >> bit_index) & block_type { 1 });
   }
 
   [[nodiscard]] constexpr reference front() noexcept { return reference(data(), size_type { 0 }); }
@@ -1448,13 +1538,18 @@ public:
 
   [[nodiscard]] constexpr bool back() const noexcept
   {
-    return (data()[(bit_size_ - 1) / bits_per_block] & bit_mask_(bit_size_ - 1)) != 0;
+    size_type const pos         = bit_size_ - 1;
+    size_type const block_index = pos / bits_per_block;
+    size_type const bit_index   = pos % bits_per_block;
+    return static_cast<bool>((data()[block_index] >> bit_index) & block_type { 1 });
   }
 
   [[nodiscard]] constexpr bool test(size_type pos) const
   {
-    if (pos >= bit_size_) throw_out_of_range_();
-    return (data()[pos / bits_per_block] & bit_mask_(pos)) != 0;
+    if (pos >= bit_size_) [[unlikely]] throw_out_of_range_();
+    size_type const block_index = pos / bits_per_block;
+    size_type const bit_index   = pos % bits_per_block;
+    return static_cast<bool>((data()[block_index] >> bit_index) & block_type { 1 });
   }
 
   [[nodiscard]] constexpr bool test_set(size_type pos, bool value = true)
@@ -1698,16 +1793,23 @@ public:
                     value ? static_cast<block_type>(~block_type { 0 }) : block_type { 0 });
       return iterator(data(), pos);
     }
-    // Grow first (zeroed, tail masked); then shift the tail right and fill.
-    resize(old_bits + count, false);
-    for (size_type i = old_bits; i-- > pos;) {
-      (*this)[i + count] = static_cast<bool>((*this)[i]);
+
+    size_type const new_bits   = old_bits + count;
+    size_type const new_blocks = blocks_for_bits_(new_bits);
+    // Grow first (zero-filled): the shift can then read zeros past the old
+    // tail without a per-block branch. Only the block array moves here; the
+    // bit count is published after the shift so the fill range is valid.
+    base::resize(new_blocks, block_type { 0 });
+    if (pos < old_bits) {
+      shift_bits_right_(data(), pos, old_bits, new_blocks, count);
     }
+    bit_size_ = new_bits;
     if (value) {
       set(pos, count, true);
     } else {
       reset(pos, count);
     }
+    clear_tail_bits_(new_bits, new_blocks);
     return iterator(data(), pos);
   }
 
@@ -1806,16 +1908,16 @@ public:
       (void) erase(from_blocks, first / bits_per_block, last / bits_per_block);
       return iterator(data(), first);
     }
-    size_type const count = last - first;
-    // Left shift, strictly forward: every read stays ahead of its write.
-    for (size_type i = last; i < bit_size_; ++i) {
-      (*this)[i - count] = static_cast<bool>((*this)[i]);
-    }
+    size_type const count      = last - first;
+    size_type const old_bits   = bit_size_;
+    size_type const old_blocks = block_count();
+    size_type const new_bits   = old_bits - count;
+    size_type const new_blocks = blocks_for_bits_(new_bits);
+    // Block-level left shift; every read stays ahead of its write.
+    shift_bits_left_(data(), first, old_bits, new_blocks, count);
     // Trim the tail (pop_back shape, range-sized): destroy surplus blocks and
     // mask the new partial tail so padding stays zero.
-    size_type const new_bits   = bit_size_ - count;
-    size_type const new_blocks = blocks_for_bits_(new_bits);
-    destroy_elements_unchecked_(data() + new_blocks, block_count() - new_blocks);
+    destroy_elements_unchecked_(data() + new_blocks, old_blocks - new_blocks);
     set_size_(new_blocks, get_flag_());
     clear_tail_bits_(new_bits, new_blocks);
     bit_size_ = new_bits;

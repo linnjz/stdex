@@ -64,6 +64,7 @@ constexpr std::size_t kHeapBits = 32768;
 using StdexStack = stdex::inlined_bitset<std::uint64_t, 4>;
 using StdStack = std::bitset<kStackBits>;
 using StdexHeap = stdex::inlined_bitset<std::uint64_t, 0>;
+using VecBool = std::vector<bool>;
 #ifdef STDEX_BENCH_HAS_DYNAMIC_BITSET
 using DynHeap = sul::dynamic_bitset<unsigned long long>;
 #endif
@@ -134,6 +135,16 @@ StdexHeap const &heap_a()
 StdexHeap const &heap_b()
 {
   static StdexHeap const b = make_stdex_bits<StdexHeap>(kHeapBits, 43);
+  return b;
+}
+VecBool const &vecbool_a()
+{
+  static VecBool const b = [] {
+    std::mt19937 rng(42);
+    VecBool v(kHeapBits);
+    for (std::size_t i = 0; i < kHeapBits; ++i) v[i] = (rng() & 1u) != 0;
+    return v;
+  }();
   return b;
 }
 #ifdef STDEX_BENCH_HAS_DYNAMIC_BITSET
@@ -1112,6 +1123,134 @@ void BM_Heap_Stdex_InsertErase(benchmark::State &st)
     benchmark::DoNotOptimize(c);
   }
 }
+void BM_Heap_Stdex_InsertEraseAligned(benchmark::State &st)
+{
+  for (auto _ : st) {
+    st.PauseTiming();
+    auto c = heap_a();
+    st.ResumeTiming();
+    c.insert(1024, 64, true);
+    c.erase(1024, 1088);
+    benchmark::DoNotOptimize(c);
+  }
+}
+
+// --- Heap group: std::vector<bool> comparison ---------------------------------------
+// vector<bool> is a heap-backed packed bit vector (1 bit per element in the
+// standard libraries), so it pairs naturally with StdexHeap/DynHeap. Only
+// methods with a direct counterpart on the stdex side are benchmarked so
+// every VecBool_* entry has an apples-to-apples partner above.
+void BM_Heap_VecBool_CtorBool(benchmark::State &st)
+{
+  for (auto _ : st) {
+    VecBool b(kHeapBits, true);
+    benchmark::DoNotOptimize(b);
+  }
+  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * static_cast<std::int64_t>(kHeapBits)));
+}
+
+void BM_Heap_VecBool_SetAll(benchmark::State &st)
+{
+  auto const base = vecbool_a();
+  for (auto _ : st) {
+    st.PauseTiming();
+    auto c = base;
+    st.ResumeTiming();
+    c.assign(kHeapBits, true);
+    benchmark::DoNotOptimize(c);
+  }
+}
+
+void BM_Heap_VecBool_ResetAll(benchmark::State &st)
+{
+  auto const base = vecbool_a();
+  for (auto _ : st) {
+    st.PauseTiming();
+    auto c = base;
+    st.ResumeTiming();
+    c.assign(kHeapBits, false);
+    benchmark::DoNotOptimize(c);
+  }
+}
+
+void BM_Heap_VecBool_Test(benchmark::State &st)
+{
+  auto const &base = vecbool_a();
+  for (auto _ : st) {
+    std::size_t sum = 0;
+    for (std::size_t i = 0; i < kHeapBits; i += 7) sum += base.at(i) ? 1u : 0u;
+    benchmark::DoNotOptimize(sum);
+  }
+  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * static_cast<std::int64_t>(kHeapBits / 7)));
+}
+
+void BM_Heap_VecBool_IndexLoop(benchmark::State &st)
+{
+  auto const &base = vecbool_a();
+  for (auto _ : st) {
+    std::size_t sum = 0;
+    for (std::size_t i = 0; i < kHeapBits; ++i) sum += base[i] ? 1u : 0u;
+    benchmark::DoNotOptimize(sum);
+  }
+  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * static_cast<std::int64_t>(kHeapBits)));
+}
+
+void BM_Heap_VecBool_BitIterate(benchmark::State &st)
+{
+  auto const &a = vecbool_a();
+  for (auto _ : st) {
+    std::size_t sum = 0;
+    for (auto it = a.begin(); it != a.end(); ++it) sum += *it ? 1u : 0u;
+    benchmark::DoNotOptimize(sum);
+  }
+}
+
+void BM_Heap_VecBool_PushBack(benchmark::State &st)
+{
+  for (auto _ : st) {
+    st.PauseTiming();
+    VecBool c(kHeapBits, false);
+    st.ResumeTiming();
+    for (int i = 0; i < 256; ++i) c.push_back(i % 2 == 0);
+    benchmark::DoNotOptimize(c);
+  }
+  st.SetItemsProcessed(static_cast<std::int64_t>(st.iterations() * 256));
+}
+
+void BM_Heap_VecBool_Resize(benchmark::State &st)
+{
+  for (auto _ : st) {
+    st.PauseTiming();
+    VecBool c(kHeapBits, false);
+    st.ResumeTiming();
+    c.resize(kHeapBits + 1024, true);
+    benchmark::DoNotOptimize(c);
+  }
+}
+
+void BM_Heap_VecBool_InsertErase(benchmark::State &st)
+{
+  for (auto _ : st) {
+    st.PauseTiming();
+    auto c = vecbool_a();
+    st.ResumeTiming();
+    c.insert(c.begin() + 1000, 64, true);
+    c.erase(c.begin() + 1000, c.begin() + 1064);
+    benchmark::DoNotOptimize(c);
+  }
+}
+
+void BM_Heap_VecBool_InsertEraseAligned(benchmark::State &st)
+{
+  for (auto _ : st) {
+    st.PauseTiming();
+    auto c = vecbool_a();
+    st.ResumeTiming();
+    c.insert(c.begin() + 1024, 64, true);
+    c.erase(c.begin() + 1024, c.begin() + 1088);
+    benchmark::DoNotOptimize(c);
+  }
+}
 
 struct Registrar
 {
@@ -1286,6 +1425,18 @@ struct Registrar
     reg("Heap/Stdex_BlockIterate_stdexOnly", BM_Heap_Stdex_BlockIterate);
     reg("Heap/Stdex_BitIterate_stdexOnly", BM_Heap_Stdex_BitIterate);
     reg("Heap/Stdex_InsertErase_stdexOnly", BM_Heap_Stdex_InsertErase);
+    reg("Heap/Stdex_InsertEraseAligned_stdexOnly", BM_Heap_Stdex_InsertEraseAligned);
+
+    reg("Heap/VecBool_CtorBool", BM_Heap_VecBool_CtorBool);
+    reg("Heap/VecBool_SetAll", BM_Heap_VecBool_SetAll);
+    reg("Heap/VecBool_ResetAll", BM_Heap_VecBool_ResetAll);
+    reg("Heap/VecBool_Test", BM_Heap_VecBool_Test);
+    reg("Heap/VecBool_IndexLoop", BM_Heap_VecBool_IndexLoop);
+    reg("Heap/VecBool_BitIterate", BM_Heap_VecBool_BitIterate);
+    reg("Heap/VecBool_PushBack", BM_Heap_VecBool_PushBack);
+    reg("Heap/VecBool_Resize", BM_Heap_VecBool_Resize);
+    reg("Heap/VecBool_InsertErase", BM_Heap_VecBool_InsertErase);
+    reg("Heap/VecBool_InsertEraseAligned", BM_Heap_VecBool_InsertEraseAligned);
   }
 } g_registrar;
 } // namespace
