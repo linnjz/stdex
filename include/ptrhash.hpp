@@ -108,9 +108,9 @@ struct ptr_hash_compact  { static constexpr ptr_hash_options value = ptr_hash_op
 
 namespace ptr_hash_detail
 {
-template <typename Hasher, typename Key>
-concept key_hasher = std::regular_invocable<Hasher const &, Key const &> &&
-                     std::convertible_to<std::invoke_result_t<Hasher const &, Key const &>, std::uint64_t>;
+template <typename hasher, typename Key>
+concept key_hasher = std::regular_invocable<hasher const &, Key const &> &&
+                     std::convertible_to<std::invoke_result_t<hasher const &, Key const &>, std::uint64_t>;
 
 template <typename Alloc>
 concept standard_allocator =
@@ -131,25 +131,169 @@ concept standard_allocator =
         a.deallocate(std::declval<typename std::allocator_traits<Alloc>::pointer>(), n)
       } -> std::same_as<void>;
     };
+
+template <typename Storage>
+concept ptr_hash_storage = requires {
+  typename Storage::allocator_type;
+  typename Storage::size_type;
+  typename Storage::pilot_type;
+  typename Storage::pilot_table_type;
+  typename Storage::remap_table_type;
+  typename Storage::bucket_offsets_type;
+  typename Storage::bucket_length_prefix_type;
+  typename Storage::bucket_order_type;
+  typename Storage::slot_owner_buffer_type;
+  typename Storage::hash_buffer_type;
+  typename Storage::slot_scratch_type;
+  typename Storage::occupied_slots_type;
+  typename Storage::eviction_heap_type;
+  { Storage::is_fixed_capacity } -> std::convertible_to<bool>;
+};
+
+/// Heap-backed storage policy for `basic_ptr_hash`.
+///
+/// Every container used by the build is obtained through this policy. A
+/// fixed-capacity policy only has to provide the same aliases and factory
+/// functions; the build algorithm itself never names `std::vector` or
+/// `uninitialized_buffer`. Factory results must report their active element
+/// count through `size()`; spare inline capacity is not part of that count.
+template <typename Allocator>
+class heap_storage
+{
+public:
+  using allocator_type = Allocator;
+  using size_type      = std::size_t;
+  using pilot_type     = std::uint8_t;
+  using remap_type     = std::uint32_t;
+
+  static constexpr bool is_fixed_capacity = false;
+
+  template <typename T>
+  using rebind_alloc_t = typename std::allocator_traits<allocator_type>::template rebind_alloc<T>;
+  template <typename T>
+  using vector_type = std::vector<T, rebind_alloc_t<T>>;
+  template <typename T>
+  using buffer_type = ::stdex::uninitialized_buffer<T, rebind_alloc_t<T>>;
+
+  using pilot_table_type          = vector_type<pilot_type>;
+  using remap_table_type          = vector_type<remap_type>;
+  using bucket_offsets_type       = vector_type<std::uint32_t>;
+  using bucket_length_prefix_type = vector_type<std::uint32_t>;
+  using bucket_order_type         = buffer_type<std::uint32_t>;
+  using slot_owner_buffer_type    = buffer_type<std::uint32_t>;
+  using hash_buffer_type          = buffer_type<std::uint64_t>;
+  using slot_scratch_type         = buffer_type<size_type>;
+  using occupied_slots_type       = ::stdex::inlined_bitset<std::uint64_t, 0, rebind_alloc_t<std::uint64_t>>;
+  using eviction_heap_type        = vector_type<std::pair<std::uint32_t, std::uint32_t>>;
+
+  constexpr heap_storage() = default;
+  constexpr explicit heap_storage(allocator_type const &allocator)
+      : pilots_ { rebind_alloc_t<pilot_type> { allocator } }
+      , remap_ { rebind_alloc_t<remap_type> { allocator } }
+  {
+  }
+
+  constexpr void reset() noexcept
+  {
+    pilots_.clear();
+    remap_.clear();
+  }
+
+  constexpr void prepare_pilots(size_type const bucket_count) { pilots_.assign(bucket_count, pilot_type { 0 }); }
+  [[nodiscard]] constexpr pilot_type pilot(size_type const bucket) const noexcept { return pilots_[bucket]; }
+  constexpr void set_pilot(size_type const bucket, pilot_type const pilot) noexcept { pilots_[bucket] = pilot; }
+
+  constexpr void clear_remap()
+  {
+    remap_.clear();
+    remap_.shrink_to_fit();
+  }
+  constexpr void prepare_remap(size_type const count, remap_type const fallback) { remap_.assign(count, fallback); }
+  [[nodiscard]] constexpr remap_type remap(size_type const index) const noexcept { return remap_[index]; }
+  constexpr void set_remap(size_type const index, remap_type const value) noexcept { remap_[index] = value; }
+  constexpr void shrink_remap() { remap_.shrink_to_fit(); }
+
+  [[nodiscard]] constexpr bucket_offsets_type make_bucket_offsets(size_type const count, allocator_type const &allocator) const
+  {
+    return bucket_offsets_type(count, std::uint32_t { 0 }, rebind_alloc_t<std::uint32_t> { allocator });
+  }
+
+  [[nodiscard]] constexpr bucket_length_prefix_type make_bucket_length_prefix(size_type const count, allocator_type const &allocator) const
+  {
+    return bucket_length_prefix_type(count, std::uint32_t { 0 }, rebind_alloc_t<std::uint32_t> { allocator });
+  }
+
+  [[nodiscard]] constexpr bucket_order_type make_bucket_order(size_type const count, allocator_type const &allocator) const
+  {
+    return bucket_order_type(count, rebind_alloc_t<std::uint32_t> { allocator });
+  }
+
+  [[nodiscard]] constexpr slot_owner_buffer_type make_slot_owners(size_type const count, allocator_type const &allocator) const
+  {
+    return slot_owner_buffer_type(count, rebind_alloc_t<std::uint32_t> { allocator });
+  }
+
+  [[nodiscard]] constexpr hash_buffer_type make_hash_buffer(size_type const count, allocator_type const &allocator) const
+  {
+    return hash_buffer_type(count, rebind_alloc_t<std::uint64_t> { allocator });
+  }
+
+  [[nodiscard]] constexpr slot_scratch_type make_slot_scratch(size_type const count, allocator_type const &allocator) const
+  {
+    return slot_scratch_type(count, rebind_alloc_t<size_type> { allocator });
+  }
+
+  [[nodiscard]] constexpr occupied_slots_type make_occupied_slots(size_type const bit_count, allocator_type const &allocator) const
+  {
+    return occupied_slots_type(bit_count, rebind_alloc_t<std::uint64_t> { allocator });
+  }
+
+  [[nodiscard]] constexpr eviction_heap_type make_eviction_heap(allocator_type const &allocator) const
+  {
+    return eviction_heap_type(rebind_alloc_t<std::pair<std::uint32_t, std::uint32_t>> { allocator });
+  }
+
+private:
+  pilot_table_type pilots_;
+  remap_table_type remap_;
+};
+
+/// Stack-backed storage policy for `basic_ptr_hash`.
+template <std::size_t Capacity, class Options, class Allocator>
+struct stack_storage;
 } // namespace ptr_hash_detail
 
-template <class Key, class Hasher = hash<Key>, class Options = ptr_hash_fast, class Allocator = std::allocator<Key>>
-requires ptr_hash_detail::key_hasher<Hasher, Key> && ptr_hash_detail::standard_allocator<Allocator> && std::same_as<std::remove_cv_t<decltype(Options::value)>, ptr_hash_options>
-class ptr_hash
+/// Perfect / minimal-perfect hash table implemented against a storage policy.
+///
+/// `Storage` supplies both the persistent pilot/remap tables and the transient
+/// build containers, so a fixed-capacity (stack) policy can be added without
+/// duplicating the placement algorithm.
+template <class Storage, class Key, class Hasher = hash<Key>, class Options = ptr_hash_fast>
+requires ptr_hash_detail::ptr_hash_storage<Storage> && ptr_hash_detail::key_hasher<Hasher, Key> &&
+         ptr_hash_detail::standard_allocator<typename Storage::allocator_type> &&
+         std::same_as<std::remove_cv_t<decltype(Options::value)>, ptr_hash_options>
+class basic_ptr_hash
 {
 public:
   using key_type        = Key;
   using hasher          = Hasher;
-  using allocator_type  = Allocator;
-  using value_type      = Key;
+  using allocator_type  = typename Storage::allocator_type;
+  using value_type      = key_type;
   using size_type       = std::size_t;
   using difference_type = std::ptrdiff_t;
+  using storage_type    = Storage;
 
 private:
-  template <class T> using rebind_alloc_t = typename std::allocator_traits<Allocator>::template rebind_alloc<T>;
-  template <class T> using rebind_vector_t = std::vector<T, rebind_alloc_t<T>>;
-  template <class T> using rebind_uninitialized_buffer_t = ::stdex::uninitialized_buffer<T, rebind_alloc_t<T>>;
-  using rebind_inlined_bitset_t = inlined_bitset<std::uint64_t, 0, rebind_alloc_t<std::uint64_t>>;
+  using pilot_type                = typename Storage::pilot_type;
+  using remap_type                = typename Storage::remap_type;
+  using bucket_offsets_type       = typename Storage::bucket_offsets_type;
+  using bucket_length_prefix_type = typename Storage::bucket_length_prefix_type;
+  using bucket_order_type         = typename Storage::bucket_order_type;
+  using slot_owner_buffer_type    = typename Storage::slot_owner_buffer_type;
+  using hash_buffer_type          = typename Storage::hash_buffer_type;
+  using slot_scratch_type         = typename Storage::slot_scratch_type;
+  using occupied_slots_type       = typename Storage::occupied_slots_type;
+  using eviction_heap_type        = typename Storage::eviction_heap_type;
 
   using slot_owner_type     = std::uint32_t;
   static constexpr slot_owner_type vacant_slot      = (std::numeric_limits<slot_owner_type>::max)();
@@ -162,15 +306,15 @@ private:
   /// untouched so the table does not need a full-table initialization.
   struct bucket_placement_context
   {
-    rebind_vector_t<std::uint32_t> const &bucket_offsets;
-    rebind_uninitialized_buffer_t<std::uint64_t> const &hashes;
-    rebind_uninitialized_buffer_t<std::uint32_t> &slot_owners;
-    rebind_inlined_bitset_t &occupied_slots;
-    rebind_vector_t<std::pair<std::uint32_t, std::uint32_t>> &eviction_heap;
+    std::span<std::uint32_t const> bucket_offsets;
+    std::span<std::uint64_t const> hashes;
+    std::span<std::uint32_t> slot_owners;
+    occupied_slots_type &occupied_slots;
+    eviction_heap_type &eviction_heap;
     std::array<std::uint32_t, recent_bucket_capacity> &recent_buckets;
     splitmix64 &random_engine;
     size_type &eviction_count;
-    rebind_uninitialized_buffer_t<size_type> &slot_scratch;
+    std::span<size_type> slot_scratch;
     size_type recent_index { 0 };
 
     [[nodiscard]] constexpr std::span<std::uint64_t const> bucket_hashes(std::uint32_t const bucket) const noexcept
@@ -200,40 +344,39 @@ public:
 private:
   struct build_tag {};
 
-  constexpr ptr_hash(build_tag, Hasher hasher, Allocator allocator)
-      : hasher_ { std::move(hasher) }
+  constexpr basic_ptr_hash(build_tag, hasher hasher_arg, allocator_type allocator)
+      : hasher_ { std::move(hasher_arg) }
       , allocator_ { std::move(allocator) }
-      , pilots_ { rebind_alloc_t<std::uint8_t> { allocator_ } }
-      , remap_ { rebind_alloc_t<std::uint32_t> { allocator_ } }
+      , storage_ { allocator_ }
   {
   }
 
 public:
-  constexpr ptr_hash() noexcept  = default;
-  constexpr ~ptr_hash() noexcept = default;
+  constexpr basic_ptr_hash() noexcept  = default;
+  constexpr ~basic_ptr_hash() noexcept = default;
 
   template <std::forward_iterator Iterator, std::sentinel_for<Iterator> Sentinel>
-  requires std::same_as<std::remove_cvref_t<std::iter_value_t<Iterator>>, Key>
-  constexpr ptr_hash(Iterator first, Sentinel last, Hasher hasher = {}, Allocator allocator = {})
-      : ptr_hash { build_tag {}, std::move(hasher), std::move(allocator) }
+  requires std::same_as<std::remove_cvref_t<std::iter_value_t<Iterator>>, key_type>
+  constexpr basic_ptr_hash(Iterator first, Sentinel last, hasher hasher_arg = {}, allocator_type allocator = {})
+      : basic_ptr_hash { build_tag {}, std::move(hasher_arg), std::move(allocator) }
   {
     if (!try_build_impl_(first, last)) throw_runtime_error_("construction failure");
   }
 
-  constexpr ptr_hash(std::initializer_list<Key> keys, Hasher hasher = {}, Allocator allocator = {})
-      : ptr_hash { keys.begin(), keys.end(), std::move(hasher), std::move(allocator) }
+  constexpr basic_ptr_hash(std::initializer_list<key_type> keys, hasher hasher_arg = {}, allocator_type allocator = {})
+      : basic_ptr_hash { keys.begin(), keys.end(), std::move(hasher_arg), std::move(allocator) }
   {
   }
 
   template <std::ranges::forward_range Range>
-  requires std::same_as<std::remove_cvref_t<std::ranges::range_value_t<Range>>, Key>
-  constexpr explicit ptr_hash(Range &&keys, Hasher hasher = {}, Allocator allocator = {})
-      : ptr_hash { std::ranges::begin(keys), std::ranges::end(keys), std::move(hasher), std::move(allocator) }
+  requires std::same_as<std::remove_cvref_t<std::ranges::range_value_t<Range>>, key_type>
+  constexpr explicit basic_ptr_hash(Range &&keys, hasher hasher_arg = {}, allocator_type allocator = {})
+      : basic_ptr_hash { std::ranges::begin(keys), std::ranges::end(keys), std::move(hasher_arg), std::move(allocator) }
   {
   }
 
 private:
-  [[nodiscard]] static constexpr bool has_duplicate_value_(rebind_uninitialized_buffer_t<std::uint64_t> const &hashes) noexcept
+  [[nodiscard]] static constexpr bool has_duplicate_value_(std::span<std::uint64_t const> const hashes) noexcept
   {
     for (size_type i { 1 }; i < hashes.size(); ++i) {
       if (hashes[i - 1] == hashes[i]) return true;
@@ -241,23 +384,21 @@ private:
     return false;
   }
 
-  constexpr void build_remap_(rebind_inlined_bitset_t const &occupied_slots)
+  constexpr void build_remap_(occupied_slots_type const &occupied_slots)
   {
     if constexpr (opts.hash_scheme == ptr_hash_scheme::perfect) {
-      remap_.clear();
-      remap_.shrink_to_fit();
+      storage_.clear_remap();
     } else {
       size_type const remapped_slot_count = slot_count_ - key_count_;
       if (remapped_slot_count == 0) {
-        remap_.clear();
-        remap_.shrink_to_fit();
+        storage_.clear_remap();
         return;
       }
 
       // Entries for free high slots are never observed by a query, but keeping
       // them in range preserves the `index() < size()` guarantee for every input.
       slot_owner_type const fallback = key_count_ == 0 ? 0 : static_cast<slot_owner_type>(key_count_ - 1);
-      remap_.assign(remapped_slot_count, fallback);
+      storage_.prepare_remap(remapped_slot_count, fallback);
 
       // Free low slots and occupied high slots are equinumerous, so the two
       // cursors meet exactly once per occupied high slot without extra storage.
@@ -270,10 +411,10 @@ private:
         }
         assert(next_high_slot < slot_count_ && "free/occupied slot counts diverged");
         if (next_high_slot >= slot_count_) break;
-        remap_[next_high_slot - key_count_] = static_cast<slot_owner_type>(low_slot);
+        storage_.set_remap(next_high_slot - key_count_, static_cast<remap_type>(low_slot));
         ++next_high_slot;
       }
-      remap_.shrink_to_fit();
+      storage_.shrink_remap();
     }
   }
 
@@ -303,7 +444,7 @@ private:
         if (!distinct) continue;
       }
 
-      pilots_[bucket] = static_cast<std::uint8_t>(pilot);
+      storage_.set_pilot(bucket, static_cast<pilot_type>(pilot));
       for (size_type i = 0; i < BucketSize; ++i) {
         context.occupied_slots[slots[i]] = true;
         context.slot_owners[slots[i]]    = bucket;
@@ -356,7 +497,7 @@ private:
         context.occupied_slots[slot] = true;
       }
       if (distinct) {
-        pilots_[bucket] = static_cast<std::uint8_t>(pilot);
+        storage_.set_pilot(bucket, static_cast<pilot_type>(pilot));
         for (size_type i = 0; i < bucket_size; ++i) {
           context.slot_owners[context.slot_scratch[i]] = bucket;
         }
@@ -428,7 +569,7 @@ private:
 
     if (best_collision_score == (std::numeric_limits<std::uint64_t>::max)()) return false;
 
-    pilots_[bucket]                = static_cast<std::uint8_t>(best_pilot);
+    storage_.set_pilot(bucket, static_cast<pilot_type>(best_pilot));
     std::uint64_t const pilot_hash = pilot_hash_value_(best_pilot);
 
     for (std::uint64_t const hash : bucket_hashes) {
@@ -440,7 +581,7 @@ private:
         std::push_heap(context.eviction_heap.begin(), context.eviction_heap.end());
 
         std::span<std::uint64_t const> const owner_hashes = context.bucket_hashes(owner);
-        std::uint64_t const owner_pilot_hash              = pilot_hash_value_(pilots_[owner]);
+        std::uint64_t const owner_pilot_hash              = pilot_hash_value_(storage_.pilot(owner));
         for (std::uint64_t const owner_hash : owner_hashes) {
           size_type const owner_slot         = slot_index_(owner_hash, owner_pilot_hash);
           context.occupied_slots[owner_slot] = false;
@@ -456,13 +597,13 @@ private:
     return true;
   }
 
-  [[nodiscard]] constexpr bool try_build_from_sorted_hashes_(rebind_uninitialized_buffer_t<std::uint64_t> const &hashes)
+  [[nodiscard]] constexpr bool try_build_from_sorted_hashes_(std::span<std::uint64_t const> const hashes)
   {
-    pilots_.assign(bucket_count_, std::uint8_t { 0 });
+    storage_.prepare_pilots(bucket_count_);
 
     // Build the histogram in one linear scan, then turn counts into the
     // starting offset of every bucket with one prefix-sum pass.
-    rebind_vector_t<std::uint32_t> bucket_offsets(bucket_count_ + 1U, std::uint32_t { 0 }, rebind_alloc_t<std::uint32_t> { allocator_ });
+    bucket_offsets_type bucket_offsets = storage_.make_bucket_offsets(bucket_count_ + 1U, allocator_);
     for (size_type i = 0; i < hashes.size(); ++i) {
       ++bucket_offsets[bucket_index_(hashes[i]) + 1U];
     }
@@ -478,7 +619,7 @@ private:
       if (length > max_bucket_length) max_bucket_length = length;
     }
 
-    rebind_vector_t<std::uint32_t> bucket_length_prefix(max_bucket_length + 1U, std::uint32_t { 0 }, rebind_alloc_t<std::uint32_t> { allocator_ });
+    bucket_length_prefix_type bucket_length_prefix = storage_.make_bucket_length_prefix(max_bucket_length + 1U, allocator_);
     for (size_type bucket = 0; bucket < bucket_count_; ++bucket) {
       ++bucket_length_prefix[bucket_length_(bucket_offsets, bucket)];
     }
@@ -490,26 +631,34 @@ private:
     }
     size_type const non_empty_bucket_count = bucket_length_prefix[0];
 
-    rebind_uninitialized_buffer_t<std::uint32_t> bucket_order(non_empty_bucket_count, rebind_alloc_t<std::uint32_t> { allocator_ });
+    bucket_order_type bucket_order = storage_.make_bucket_order(non_empty_bucket_count, allocator_);
     for (size_type bucket = 0; bucket < bucket_count_; ++bucket) {
       size_type const length = bucket_length_(bucket_offsets, bucket);
       if (length != 0) bucket_order[bucket_length_prefix[length]++] = static_cast<std::uint32_t>(bucket);
     }
 
-    rebind_inlined_bitset_t occupied_slots(slot_count_, rebind_alloc_t<std::uint64_t> { allocator_ });
+    occupied_slots_type occupied_slots = storage_.make_occupied_slots(slot_count_, allocator_);
 
     {
       // The owner table is only read for occupied slots; leaving free entries
       // uninitialized removes a full-table memset from every build attempt.
-      rebind_uninitialized_buffer_t<std::uint32_t> slot_owners(slot_count_, rebind_alloc_t<std::uint32_t> { allocator_ });
-      rebind_vector_t<std::pair<std::uint32_t, std::uint32_t>> eviction_heap(rebind_alloc_t<std::pair<std::uint32_t, std::uint32_t>> { allocator_ });
+      slot_owner_buffer_type slot_owners = storage_.make_slot_owners(slot_count_, allocator_);
+      eviction_heap_type eviction_heap   = storage_.make_eviction_heap(allocator_);
       std::array<std::uint32_t, recent_bucket_capacity> recent_buckets;
-      rebind_uninitialized_buffer_t<size_type> slot_scratch(max_bucket_length, rebind_alloc_t<size_type> { allocator_ });
+      slot_scratch_type slot_scratch = storage_.make_slot_scratch(max_bucket_length, allocator_);
       splitmix64 random_engine { hash_seed_ ^ 0x9E'37'79'B9'7F'4A'7C'15ULL };
       size_type eviction_count = 0;
 
       bucket_placement_context context {
-        bucket_offsets, hashes, slot_owners, occupied_slots, eviction_heap, recent_buckets, random_engine, eviction_count, slot_scratch
+        std::span<std::uint32_t const> { bucket_offsets.data(), bucket_offsets.size() },
+        std::span<std::uint64_t const> { hashes.data(), hashes.size() },
+        std::span<std::uint32_t> { slot_owners.data(), slot_owners.size() },
+        occupied_slots,
+        eviction_heap,
+        recent_buckets,
+        random_engine,
+        eviction_count,
+        std::span<size_type> { slot_scratch.data(), slot_scratch.size() }
       };
 
       // Largest buckets first: they are the hardest to place and the cheapest
@@ -552,8 +701,7 @@ private:
 
   constexpr void reset_build_state_() noexcept
   {
-    pilots_.clear();
-    remap_.clear();
+    storage_.reset();
     key_count_       = 0;
     slot_count_      = 0;
     bucket_count_    = 0;
@@ -593,10 +741,12 @@ private:
     slot_reciprocal_ = slot_count_ == 0 ? 0 : (std::numeric_limits<std::uint64_t>::max)() / slot_count_ + 1U;
     bucket_count_    = bucket_count;
 
-    rebind_uninitialized_buffer_t<std::uint64_t> hashes(key_count_, rebind_alloc_t<std::uint64_t> { allocator_ });
-    bool const uses_external_radix_buffer = key_count_ > stable_radix_sort_detail::kRadixSortThreshold;
-    rebind_uninitialized_buffer_t<std::uint64_t> radix_sort_buffer(
-        uses_external_radix_buffer ? key_count_ : size_type { 0 }, rebind_alloc_t<std::uint64_t> { allocator_ });
+    hash_buffer_type hashes = storage_.make_hash_buffer(key_count_, allocator_);
+    // Fixed-capacity storage has no allocator-backed fallback, so it always
+    // provides the explicit radix buffer instead of letting the sorter allocate.
+    bool const uses_external_radix_buffer =
+        Storage::is_fixed_capacity || key_count_ > stable_radix_sort_detail::kRadixSortThreshold;
+    hash_buffer_type radix_sort_buffer = storage_.make_hash_buffer(uses_external_radix_buffer ? key_count_ : size_type { 0 }, allocator_);
 
     splitmix64 seed_eng(161803); // PI: 314159 / PHI: 161803
     for (size_type attempt { 0 }; attempt < opts.max_build_attempts; ++attempt) {
@@ -615,8 +765,8 @@ private:
         stable_radix_sort<radix_sort_options {}>(hashes.data(), hashes.data() + key_count_, rebind_alloc_t<std::uint64_t> { allocator_ });
       }
 
-      if (has_duplicate_value_(hashes)) continue;
-      if (try_build_from_sorted_hashes_(hashes)) return true;
+      if (has_duplicate_value_(std::span<std::uint64_t const> { hashes.data(), hashes.size() })) continue;
+      if (try_build_from_sorted_hashes_(std::span<std::uint64_t const> { hashes.data(), hashes.size() })) return true;
     }
     reset_build_state_();
     return false;
@@ -624,19 +774,19 @@ private:
 
 public:
   template <std::forward_iterator Iterator, std::sentinel_for<Iterator> Sentinel>
-  requires std::same_as<std::remove_cvref_t<std::iter_value_t<Iterator>>, Key>
+  requires std::same_as<std::remove_cvref_t<std::iter_value_t<Iterator>>, key_type>
   [[nodiscard]] constexpr bool try_build(Iterator first, Sentinel last)
   {
     return try_build_impl_(first, last);
   }
 
-  [[nodiscard]] constexpr bool try_build(std::initializer_list<Key> keys)
+  [[nodiscard]] constexpr bool try_build(std::initializer_list<key_type> keys)
   {
     return try_build(keys.begin(), keys.end());
   }
 
   template <std::ranges::forward_range Range>
-  requires std::same_as<std::remove_cvref_t<std::ranges::range_value_t<Range>>, Key>
+  requires std::same_as<std::remove_cvref_t<std::ranges::range_value_t<Range>>, key_type>
   [[nodiscard]] constexpr bool try_build(Range &&keys)
   {
     return try_build(std::ranges::begin(keys), std::ranges::end(keys));
@@ -651,31 +801,34 @@ public:
   [[nodiscard]] constexpr hasher hash_function() const noexcept { return hasher_; }
   [[nodiscard]] constexpr allocator_type get_allocator() const noexcept { return allocator_; }
 
-  [[nodiscard]] constexpr size_type index_unchecked(Key const &key) const
+  [[nodiscard]] constexpr size_type index_unchecked(key_type const &key) const
   {
     assert(!empty() && "stdex::ptr_hash::index_unchecked called on an empty table");
     std::uint64_t const hash   = hash_key_(key);
-    std::uint8_t const pilot   = pilots_[bucket_index_(hash)];
+    pilot_type const pilot     = storage_.pilot(bucket_index_(hash));
     size_type const slot_index = slot_index_(hash, pilot_hash_value_(pilot));
     if constexpr (opts.hash_scheme == ptr_hash_scheme::minimal_perfect) {
-      return slot_index < key_count_ ? slot_index : static_cast<size_type>(remap_[slot_index - key_count_]);
+      return slot_index < key_count_ ? slot_index : static_cast<size_type>(storage_.remap(slot_index - key_count_));
     } else {
       return slot_index;
     }
   }
 
-  [[nodiscard]] constexpr size_type index(Key const &key) const
+  [[nodiscard]] constexpr size_type index(key_type const &key) const
   {
     if (empty()) return npos;
     return index_unchecked(key);
   }
 
 private:
-  [[nodiscard]] constexpr std::uint64_t hash_key_(Key const &key) const noexcept(std::is_nothrow_invocable_v<Hasher const &, Key const &>)
+  template <class T>
+  using rebind_alloc_t = typename std::allocator_traits<allocator_type>::template rebind_alloc<T>;
+
+  [[nodiscard]] constexpr std::uint64_t hash_key_(key_type const &key) const noexcept(std::is_nothrow_invocable_v<hasher const &, key_type const &>)
   {
     // hash<T> intentionally omits its final avalanche multiply; the default
     // PtrHash path restores it here. Custom hashers keep their own semantics.
-    if constexpr (std::same_as<std::remove_cv_t<Hasher>, hash<Key>>) {
+    if constexpr (std::same_as<std::remove_cv_t<hasher>, hash<key_type>>) {
       return static_cast<std::uint64_t>(hasher_(key, hash_seed_)) * kPhiMixMultConstant;
     } else {
       return static_cast<std::uint64_t>(hasher_(key)) ^ hash_seed_;
@@ -694,7 +847,8 @@ private:
     return static_cast<size_type>(umul128(bucket_count_, transform_bucket_hash_(hash)).hi());
   }
 
-  [[nodiscard]] constexpr size_type bucket_length_(rebind_vector_t<std::uint32_t> const &bucket_offsets, std::size_t const bucket) const noexcept
+  template <class Offsets>
+  [[nodiscard]] static constexpr size_type bucket_length_(Offsets const &bucket_offsets, std::size_t const bucket) noexcept
   {
     return bucket_offsets[bucket + 1] - bucket_offsets[bucket];
   }
@@ -737,14 +891,16 @@ private:
   }
 
 private:
-  [[no_unique_address]] Hasher hasher_ {};
-  [[no_unique_address]] Allocator allocator_ {};
-  rebind_vector_t<std::uint8_t> pilots_ { rebind_alloc_t<std::uint8_t> { allocator_ } };
-  rebind_vector_t<std::uint32_t> remap_ { rebind_alloc_t<std::uint32_t> { allocator_ } };
+  [[no_unique_address]] hasher hasher_ {};
+  [[no_unique_address]] allocator_type allocator_ {};
+  storage_type storage_ { allocator_ };
   size_type key_count_ {};
   size_type slot_count_ {};
   size_type bucket_count_ {};
   std::uint64_t slot_reciprocal_ {};
   std::uint64_t hash_seed_ {};
 };
+
+template <class Key, class hasher = hash<Key>, class Options = ptr_hash_fast, class Allocator = std::allocator<Key>>
+using ptr_hash = basic_ptr_hash<ptr_hash_detail::heap_storage<Allocator>, Key, hasher, Options>;
 } // namespace stdex
