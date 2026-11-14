@@ -976,7 +976,7 @@ public:
   template <container_compatible_range<value_type> R>
   constexpr void insert_range(R &&range)
   {
-    insert(std::ranges::begin(range), std::ranges::end(range));
+    insert(std::ranges::begin(std::forward<R>(range)), std::ranges::end(std::forward<R>(range)));
   }
 
 public:

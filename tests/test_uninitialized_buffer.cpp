@@ -15,7 +15,7 @@
  */
 
 // test_uninitialized_buffer.cpp
-// Covers stdex::uninitialized_buffer allocation, accessors and move semantics.
+// Covers stdex::uninitialized_buffer allocation, accessors, copy and move semantics.
 #include <cstddef>
 #include <memory>
 #include <print>
@@ -41,11 +41,54 @@ static int g_fail = 0;
 
 using int_buffer = stdex::uninitialized_buffer<int>;
 
+struct non_trivially_copyable
+{
+  int value;
+  non_trivially_copyable() = default;
+  non_trivially_copyable(non_trivially_copyable const &other)
+      : value { other.value }
+  {
+  }
+};
+
+static_assert(std::is_trivially_default_constructible_v<non_trivially_copyable>);
+static_assert(std::is_trivially_destructible_v<non_trivially_copyable>);
+static_assert(!std::is_trivially_copyable_v<non_trivially_copyable>);
+static_assert(!std::is_copy_constructible_v<stdex::uninitialized_buffer<non_trivially_copyable>>);
+static_assert(!std::is_copy_assignable_v<stdex::uninitialized_buffer<non_trivially_copyable>>);
+
+struct deleted_copy_constructor
+{
+  int value;
+  deleted_copy_constructor()                                 = default;
+  deleted_copy_constructor(deleted_copy_constructor const &) = delete;
+};
+
+static_assert(std::is_trivially_copyable_v<deleted_copy_constructor>);
+static_assert(!std::is_copy_constructible_v<deleted_copy_constructor>);
+static_assert(std::is_copy_assignable_v<deleted_copy_constructor>);
+static_assert(!std::is_copy_constructible_v<stdex::uninitialized_buffer<deleted_copy_constructor>>);
+static_assert(!std::is_copy_assignable_v<stdex::uninitialized_buffer<deleted_copy_constructor>>);
+
+struct deleted_copy_assignment
+{
+  int value;
+  deleted_copy_assignment()                                            = default;
+  deleted_copy_assignment(deleted_copy_assignment const &)             = default;
+  deleted_copy_assignment &operator= (deleted_copy_assignment const &) = delete;
+};
+
+static_assert(std::is_trivially_copyable_v<deleted_copy_assignment>);
+static_assert(std::is_copy_constructible_v<deleted_copy_assignment>);
+static_assert(!std::is_copy_assignable_v<deleted_copy_assignment>);
+static_assert(std::is_copy_constructible_v<stdex::uninitialized_buffer<deleted_copy_assignment>>);
+static_assert(!std::is_copy_assignable_v<stdex::uninitialized_buffer<deleted_copy_assignment>>);
+
 static_assert(std::is_default_constructible_v<int_buffer>);
 static_assert(std::is_move_constructible_v<int_buffer>);
 static_assert(std::is_move_assignable_v<int_buffer>);
-static_assert(!std::is_copy_constructible_v<int_buffer>);
-static_assert(!std::is_copy_assignable_v<int_buffer>);
+static_assert(std::is_copy_constructible_v<int_buffer>);
+static_assert(std::is_copy_assignable_v<int_buffer>);
 static_assert(std::is_same_v<int_buffer::size_type, std::size_t>);
 static_assert(std::is_same_v<int_buffer::pointer, int *>);
 static_assert(std::is_same_v<int_buffer::allocator_type, std::allocator<int>>);
@@ -182,12 +225,33 @@ static void test_move_semantics()
   CHECK(target[0] == 1 && target[1] == 2 && target[2] == 3);
 }
 
+static void test_copy_semantics()
+{
+  SECTION("uninitialized_buffer: copy construction / assignment");
+  int_buffer source(3);
+  source[0] = 1;
+  source[1] = 2;
+  source[2] = 3;
+
+  int_buffer copied(source);
+  CHECK(copied.size() == 3);
+  CHECK(copied[0] == 1 && copied[1] == 2 && copied[2] == 3);
+  CHECK(source[0] == 1 && source[1] == 2 && source[2] == 3);
+
+  int_buffer target(1);
+  target[0] = 99;
+  target = source;
+  CHECK(target.size() == 3);
+  CHECK(target[0] == 1 && target[1] == 2 && target[2] == 3);
+}
+
 int main()
 {
   test_basic_accessors();
   test_fancy_allocator();
   test_default_and_empty();
   test_move_semantics();
+  test_copy_semantics();
 
   std::println("\npass={} fail={}", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;

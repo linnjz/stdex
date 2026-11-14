@@ -1333,8 +1333,8 @@ public:
   // ---------- from_range (bit-wise) ----------
   template <std::ranges::input_range Rng>
   requires std::convertible_to<std::ranges::range_reference_t<Rng>, bool>
-  constexpr inlined_bitset(std::from_range_t, Rng &&rng, allocator_type const &alloc = allocator_type {})
-      : inlined_bitset { std::ranges::begin(rng), std::ranges::end(rng), alloc }
+  constexpr inlined_bitset(std::from_range_t, Rng &&range, allocator_type const &alloc = allocator_type {})
+      : inlined_bitset { std::ranges::begin(std::forward<Rng>(range)), std::ranges::end(std::forward<Rng>(range)), alloc }
   {
   }
 #endif
@@ -1378,8 +1378,8 @@ public:
   template <std::ranges::input_range Rng>
   requires std::unsigned_integral<std::remove_cvref_t<std::ranges::range_value_t<Rng>>>
         && std::convertible_to<std::ranges::range_reference_t<Rng>, block_type>
-  constexpr inlined_bitset(from_blocks_t, Rng &&rng, allocator_type const &alloc = allocator_type {})
-      : inlined_bitset { from_blocks, std::ranges::begin(rng), std::ranges::end(rng), alloc }
+  constexpr inlined_bitset(from_blocks_t, Rng &&range, allocator_type const &alloc = allocator_type {})
+      : inlined_bitset { from_blocks, std::ranges::begin(std::forward<Rng>(range)), std::ranges::end(std::forward<Rng>(range)), alloc }
   {
   }
 #endif
@@ -1840,9 +1840,9 @@ public:
 #if defined(__cpp_lib_ranges)
   template <std::ranges::input_range Rng>
   requires std::convertible_to<std::ranges::range_reference_t<Rng>, bool>
-  constexpr iterator insert_range(size_type pos, Rng &&rng)
+  constexpr iterator insert_range(size_type pos, Rng &&range)
   {
-    return insert(pos, std::ranges::begin(rng), std::ranges::end(rng));
+    return insert(pos, std::ranges::begin(std::forward<Rng>(range)), std::ranges::end(std::forward<Rng>(range)));
   }
 #endif
 
@@ -1890,9 +1890,9 @@ public:
 #if defined(__cpp_lib_ranges)
   template <std::ranges::input_range Rng>
   requires std::convertible_to<std::ranges::range_reference_t<Rng>, bool>
-  constexpr void assign_range(Rng &&rng)
+  constexpr void assign_range(Rng &&range)
   {
-    assign(std::ranges::begin(rng), std::ranges::end(rng));
+    assign(std::ranges::begin(std::forward<Rng>(range)), std::ranges::end(std::forward<Rng>(range)));
   }
 #endif
 
@@ -2010,9 +2010,9 @@ public:
   template <std::ranges::input_range Rng>
   requires std::unsigned_integral<std::remove_cvref_t<std::ranges::range_value_t<Rng>>>
         && std::convertible_to<std::ranges::range_reference_t<Rng>, block_type>
-  constexpr block_iterator insert_range(from_blocks_t, size_type block_pos, Rng &&rng)
+  constexpr block_iterator insert_range(from_blocks_t, size_type block_pos, Rng &&range)
   {
-    return insert(from_blocks, block_pos, std::ranges::begin(rng), std::ranges::end(rng));
+    return insert(from_blocks, block_pos, std::ranges::begin(std::forward<Rng>(range)), std::ranges::end(std::forward<Rng>(range)));
   }
 #endif
 
@@ -2057,9 +2057,9 @@ public:
   template <std::ranges::input_range Rng>
   requires std::unsigned_integral<std::remove_cvref_t<std::ranges::range_value_t<Rng>>>
         && std::convertible_to<std::ranges::range_reference_t<Rng>, block_type>
-  constexpr void assign_range(from_blocks_t, Rng &&rng)
+  constexpr void assign_range(from_blocks_t, Rng &&range)
   {
-    assign(from_blocks, std::ranges::begin(rng), std::ranges::end(rng));
+    assign(from_blocks, std::ranges::begin(std::forward<Rng>(range)), std::ranges::end(std::forward<Rng>(range)));
   }
 #endif
 

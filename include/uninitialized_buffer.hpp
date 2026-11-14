@@ -1,10 +1,11 @@
 #pragma once
 
+#include <algorithm>    // std::copy_n
 #include <concepts>     // std::constructible_from
 #include <cstddef>      // std::size_t
 #include <iterator>     // std::iter_difference_t
 #include <memory>       // std::allocator, std::allocator_traits, std::to_address
-#include <type_traits>  // std::is_same_v, std::is_trivially_default_constructible_v, ...
+#include <type_traits>  // std::is_same_v, std::is_trivially_copyable_v, std::is_trivially_default_constructible_v, ...
 #include <utility>      // std::exchange, std::forward, std::move, std::move_if_noexcept
 
 #include "uninitialized_algorithms.hpp"
@@ -12,11 +13,16 @@
 namespace stdex
 {
 /**
- * Fixed-capacity raw storage for trivially default-constructible types.
+ * @brief Fixed-capacity raw storage for trivially default-constructible types.
  *
- * Storage is allocated through Allocator, but elements are left uninitialized;
- * allocator_traits::construct is deliberately not used because the buffer is
- * meant to be filled by the caller before reading.
+ * @details Storage is allocated through @p Allocator, and elements are left
+ * uninitialized until the caller fills them. Allocator-aware uninitialized
+ * algorithms are used when the buffer itself has to copy or move elements.
+ *
+ * Copy construction and copy assignment are enabled only when the element
+ * type is trivially copyable and the corresponding copy operation is
+ * available, so traits such as std::is_copy_constructible_v report what the
+ * buffer can actually instantiate.
  */
 template <class T, class Allocator = std::allocator<T>>
 class uninitialized_buffer
@@ -70,13 +76,73 @@ public:
     if (count_ != 0) {
       data_ = allocator_traits::allocate(allocator_, count_);
       allocation_guard guard { data_, count_, allocator_ };
-      ::stdex::uninitialized_default_construct_n(std::to_address(data_), static_cast<std::iter_difference_t<T *>>(count_));
+      ::stdex::uninitialized_default_construct_n(std::to_address(data_), static_cast<std::iter_difference_t<T *>>(count_), allocator_);
       guard.dismiss();
     }
   }
 
-  uninitialized_buffer(uninitialized_buffer const &)             = delete;
-  uninitialized_buffer &operator= (uninitialized_buffer const &) = delete;
+  constexpr uninitialized_buffer(uninitialized_buffer const &other)
+  requires (std::is_trivially_copyable_v<T> && std::is_copy_constructible_v<T> &&
+            std::is_copy_constructible_v<allocator_type>)
+      : allocator_(allocator_traits::select_on_container_copy_construction(other.allocator_))
+      , count_(other.count_)
+  {
+    if (count_ != 0) {
+      data_ = allocator_traits::allocate(allocator_, count_);
+      allocation_guard guard { data_, count_, allocator_ };
+      ::stdex::uninitialized_copy_n(other.data(), static_cast<std::iter_difference_t<T *>>(count_),
+                                    data(), data() + count_, allocator_);
+      guard.dismiss();
+    }
+  }
+
+  uninitialized_buffer(uninitialized_buffer const &)
+  requires (!(std::is_trivially_copyable_v<T> && std::is_copy_constructible_v<T> &&
+              std::is_copy_constructible_v<allocator_type>))
+  = delete;
+
+  constexpr uninitialized_buffer &operator= (uninitialized_buffer const &other)
+  requires (std::is_trivially_copyable_v<T> && std::is_copy_constructible_v<T> &&
+            std::is_copy_assignable_v<T> && std::is_copy_assignable_v<allocator_type>)
+  {
+    if (this == std::addressof(other)) return *this;
+
+    if constexpr (allocator_traits::propagate_on_container_copy_assignment::value) {
+      if constexpr (!allocator_traits::is_always_equal::value) {
+        if (!(allocator_ == other.allocator_)) {
+          release();
+          allocator_ = other.allocator_;
+        }
+      } else {
+        allocator_ = other.allocator_;
+      }
+    }
+
+    if (count_ == other.count_) {
+      std::copy_n(other.data(), count_, data());
+      return *this;
+    }
+
+    pointer new_data {};
+    size_type const count = other.count_;
+    if (count != 0) {
+      new_data = allocator_traits::allocate(allocator_, count);
+      allocation_guard guard { new_data, count, allocator_ };
+      ::stdex::uninitialized_copy_n(other.data(), static_cast<std::iter_difference_t<T *>>(count),
+                                    std::to_address(new_data), std::to_address(new_data) + count, allocator_);
+      guard.dismiss();
+    }
+
+    release();
+    data_  = new_data;
+    count_ = count;
+    return *this;
+  }
+
+  uninitialized_buffer &operator= (uninitialized_buffer const &)
+  requires (!(std::is_trivially_copyable_v<T> && std::is_copy_constructible_v<T> &&
+              std::is_copy_assignable_v<T> && std::is_copy_assignable_v<allocator_type>))
+  = delete;
 
   constexpr uninitialized_buffer(uninitialized_buffer &&other) noexcept(std::is_nothrow_move_constructible_v<allocator_type>)
       : allocator_(std::move(other.allocator_))
@@ -89,9 +155,7 @@ public:
       requires (allocator_traits::propagate_on_container_move_assignment::value ||
                 allocator_traits::is_always_equal::value || std::is_move_constructible_v<T>)
   {
-    if (this == &other) {
-      return *this;
-    }
+    if (this == std::addressof(other)) return *this;
 
     if constexpr (allocator_traits::propagate_on_container_move_assignment::value ||
                   allocator_traits::is_always_equal::value) {
@@ -102,24 +166,46 @@ public:
       data_  = std::exchange(other.data_, pointer {});
       count_ = std::exchange(other.count_, 0);
     } else {
-      size_type const count = other.count_;
-      pointer new_data      = count == 0 ? pointer {} : allocator_traits::allocate(allocator_, count);
-      allocation_guard guard { new_data, count, allocator_ };
-      for (size_type constructed = 0; constructed < count; ++constructed) {
-        std::construct_at(std::to_address(new_data) + constructed, std::move_if_noexcept(other.data()[constructed]));
+      if constexpr (requires { allocator_ == other.allocator_; }) {
+        if (allocator_ == other.allocator_) {
+          release();
+          data_  = std::exchange(other.data_, pointer {});
+          count_ = std::exchange(other.count_, 0);
+          return *this;
+        }
       }
-      guard.dismiss();
+
+      // Same-sized buffers owned by unequal allocators can be overwritten
+      // element-wise; this avoids an allocation and keeps both allocations
+      // attached to their original allocators.
+      if constexpr (std::is_move_assignable_v<T>) {
+        if (count_ == other.count_) {
+          for (size_type i = 0; i < count_; ++i) data()[i] = std::move(other.data()[i]);
+          other.release();
+          return *this;
+        }
+      }
+
+      size_type const count = other.count_;
+      pointer new_data {};
+      if (count != 0) {
+        new_data = allocator_traits::allocate(allocator_, count);
+        allocation_guard guard { new_data, count, allocator_ };
+        ::stdex::uninitialized_move_n(other.data(), static_cast<std::iter_difference_t<T *>>(count),
+                                      std::to_address(new_data), std::to_address(new_data) + count, allocator_);
+        guard.dismiss();
+      }
       release();
       data_  = new_data;
       count_ = count;
+      other.release();
     }
     return *this;
   }
 
   constexpr ~uninitialized_buffer() noexcept { release(); }
 
-  [[nodiscard]] constexpr allocator_type get_allocator() const
-      noexcept(std::is_nothrow_copy_constructible_v<allocator_type>)
+  [[nodiscard]] constexpr allocator_type get_allocator() const noexcept(std::is_nothrow_copy_constructible_v<allocator_type>)
   {
     return allocator_;
   }

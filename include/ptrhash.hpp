@@ -694,7 +694,7 @@ public:
   template <std::ranges::forward_range Range>
   requires std::same_as<std::remove_cvref_t<std::ranges::range_value_t<Range>>, key_type>
   constexpr explicit basic_ptr_hash(Range &&keys, hasher hasher_arg = {}, allocator_type allocator = {})
-      : basic_ptr_hash { std::ranges::begin(keys), std::ranges::end(keys), std::move(hasher_arg), std::move(allocator) }
+      : basic_ptr_hash { std::ranges::begin(std::forward<Range>(keys)), std::ranges::end(std::forward<Range>(keys)), std::move(hasher_arg), std::move(allocator) }
   {
   }
 
@@ -1077,7 +1077,7 @@ private:
 
       auto current = first;
       for (size_type i { 0 }; i < key_count_; ++i, ++current) {
-        hashes[i] = hash_key_(*current);
+        hashes[i] = hash_value(*current);
       }
       if (uses_external_radix_buffer) [[likely]] {
         stable_radix_sort<radix_sort_options {}>(
@@ -1112,7 +1112,7 @@ public:
   requires std::same_as<std::remove_cvref_t<std::ranges::range_value_t<Range>>, key_type>
   [[nodiscard]] constexpr bool try_build(Range &&keys)
   {
-    return try_build(std::ranges::begin(keys), std::ranges::end(keys));
+    return try_build(std::ranges::begin(std::forward<Range>(keys)), std::ranges::end(std::forward<Range>(keys)));
   }
 
 public:
@@ -1127,7 +1127,23 @@ public:
   [[nodiscard]] constexpr size_type index_unchecked(key_type const &key) const
   {
     assert(!empty() && "stdex::ptr_hash::index_unchecked called on an empty table");
-    std::uint64_t const hash   = hash_key_(key);
+    return index_from_hash(hash_value(key));
+  }
+
+  [[nodiscard]] constexpr std::uint64_t hash_value(key_type const &key) const noexcept(std::is_nothrow_invocable_v<hasher const &, key_type const &>)
+  {
+    // hash<T> intentionally omits its final avalanche multiply; the default
+    // PtrHash path restores it here. Custom hashers keep their own semantics.
+    if constexpr (std::same_as<std::remove_cv_t<hasher>, hash<key_type>>) {
+      return static_cast<std::uint64_t>(hasher_(key, hash_seed_)) * kPhiMixMultConstant;
+    } else {
+      return static_cast<std::uint64_t>(hasher_(key)) ^ hash_seed_;
+    }
+  }
+
+  [[nodiscard]] constexpr size_type index_from_hash(std::uint64_t const hash) const noexcept
+  {
+    assert(!empty() && "stdex::ptr_hash::index_from_hash called on an empty table");
     pilot_type const pilot     = storage_.pilot(bucket_index_(hash));
     size_type const slot_index = slot_index_(hash, pilot_hash_value_(pilot));
     if constexpr (opts.hash_scheme == ptr_hash_scheme::minimal_perfect) {
@@ -1146,17 +1162,6 @@ public:
 private:
   template <class T>
   using rebind_alloc_t = typename std::allocator_traits<allocator_type>::template rebind_alloc<T>;
-
-  [[nodiscard]] constexpr std::uint64_t hash_key_(key_type const &key) const noexcept(std::is_nothrow_invocable_v<hasher const &, key_type const &>)
-  {
-    // hash<T> intentionally omits its final avalanche multiply; the default
-    // PtrHash path restores it here. Custom hashers keep their own semantics.
-    if constexpr (std::same_as<std::remove_cv_t<hasher>, hash<key_type>>) {
-      return static_cast<std::uint64_t>(hasher_(key, hash_seed_)) * kPhiMixMultConstant;
-    } else {
-      return static_cast<std::uint64_t>(hasher_(key)) ^ hash_seed_;
-    }
-  }
 
   [[nodiscard]] constexpr size_type slot_index_(std::uint64_t const hash, std::uint64_t const pilot_hash) const noexcept
   {
