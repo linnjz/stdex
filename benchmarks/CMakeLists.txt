@@ -28,12 +28,16 @@ endif()
 if(_stdex_have_vcpkg_tree)
     FindVcpkgPackage(boost_unordered LINKAGE STATIC CONFIG QUIET)
     FindVcpkgPackage(absl LINKAGE STATIC CONFIG QUIET)
+    FindVcpkgPackage(frozen LINKAGE STATIC CONFIG QUIET)
 endif()
 if(NOT TARGET Boost::unordered)
     find_package(boost_unordered CONFIG QUIET)
 endif()
 if(NOT TARGET absl::flat_hash_map)
     find_package(absl CONFIG QUIET)
+endif()
+if(NOT TARGET frozen::frozen)
+    find_package(frozen CONFIG QUIET)
 endif()
 
 # bench_hash_table needs both comparison libraries; the other benchmarks do
@@ -92,6 +96,15 @@ if(TARGET Boost::unordered AND TARGET absl::flat_hash_map)
         INCLUDES "${CMAKE_SOURCE_DIR}/include/unordered_flat_detail"
         LIBS Boost::unordered absl::flat_hash_map
     )
+endif()
+
+if(TARGET frozen::frozen)
+    stdex_add_bench(bench_minimal_perfect_hash bench_minimal_perfect_hash.cpp
+        LIBS frozen::frozen
+    )
+else()
+    message(WARNING
+        "Skipping bench_minimal_perfect_hash: frozen was not found.")
 endif()
 
 stdex_add_bench(bench_hash bench_hash.cpp
