@@ -19,8 +19,8 @@
 // ctors, observers, growth, reserve/shrink/reset/clear, insert/range helpers,
 // guards, copy/move helpers, swap, storage_equal_/storage_compare_,
 // exception safety, fancy pointers, heap/stack combinations, boundary cases,
-// model fuzz, constexpr (heap only;
-// stack constexpr needs C++26 start_lifetime, unavailable locally).
+// model fuzz, constexpr (heap: consteval; stack: runtime checks on
+// C++20, constant evaluation gated by __cpp_lib_start_lifetime at C++26).
 //
 // The mutating surface is protected by design, so tests drive it through a
 // derived fixture that re-exports each helper. Step helpers that cannot stand
@@ -3260,8 +3260,12 @@ static void test_assign_range()
 }
 
 // ------------------------------------------------------------------
-// 19. constexpr evaluation (heap paths only; stack constexpr needs
-//     C++26 start_lifetime, unavailable in this toolchain)
+// 19. constexpr evaluation: heap paths evaluate on today's toolchains;
+//     stack paths run as runtime checks (constexpr functions) and gain
+//     constant evaluation once C++26 std::start_lifetime arrives -- the
+//     inner stack union gains an active member only through
+//     start_lifetime, so compile-time evaluation cannot construct stack
+//     elements before that.
 // ------------------------------------------------------------------
 consteval bool heap_ce_basic()
 {
@@ -3299,6 +3303,95 @@ consteval bool heap_ce_ctors()
   return true;
 }
 
+// Stack-mode checks as constexpr functions: they run at runtime today
+// (C++20) and are compile-time asserted behind the __cpp_lib_start_lifetime
+// gate below, matching the guard on initialize_storage_ / demote_to_stack_
+// in inline_storage.hpp.
+constexpr bool stack_ce_push_read()
+{
+  fix<int, 8> s(std::allocator<int> {});
+  if (!s.is_stack()) return false;
+  for (int i = 0; i < 8; ++i) s.emplace_one_at_back_(i);
+  if (s.size() != 8) return false;
+  for (int i = 0; i < 8; ++i)
+    if (s.data()[i] != i) return false;
+  return s.storage_equal_(s) && s.storage_compare_(s) == std::strong_ordering::equivalent;
+}
+
+constexpr bool stack_ce_resize_cycle()
+{
+  fix<int, 8> s(std::allocator<int> {});
+  for (int i = 0; i < 6; ++i) s.emplace_one_at_back_(i);
+  s.resize(3);
+  if (s.size() != 3 || s.data()[2] != 2) return false;
+  for (int i = 3; i < 6; ++i) s.emplace_one_at_back_(i);
+  return s.size() == 6 && s.data()[5] == 5 && s.is_stack();
+}
+
+constexpr bool stack_ce_copy()
+{
+  fix<int, 8> a(std::allocator<int> {});
+  for (int i = 0; i < 4; ++i) a.emplace_one_at_back_(i);
+  fix<int, 8> b(std::allocator<int> {});
+  b.copy_construct_from_(a);
+  return b.size() == 4 && b.is_stack() && b.data()[3] == 3 && a.data()[3] == 3;
+}
+
+// move_construct_from_ only builds the destination; the source stays
+// intact and disposal is the caller's job.
+constexpr bool stack_ce_move()
+{
+  fix<int, 8> a(std::allocator<int> {});
+  for (int i = 0; i < 4; ++i) a.emplace_one_at_back_(i);
+  fix<int, 8> b(std::allocator<int> {});
+  (void) b.move_construct_from_(std::move(a));
+  return b.size() == 4 && b.is_stack() && b.data()[3] == 3;
+}
+
+constexpr bool stack_ce_swap()
+{
+  fix<int, 8> a(std::allocator<int> {});
+  fix<int, 8> b(std::allocator<int> {});
+  a.emplace_one_at_back_(1);
+  a.emplace_one_at_back_(2);
+  b.emplace_one_at_back_(9);
+  a.swap(b);
+  return a.size() == 1 && a.data()[0] == 9 && b.size() == 2 && b.data()[1] == 2 && a.is_stack() && b.is_stack();
+}
+
+constexpr bool stack_ce_reset()
+{
+  fix<int, 8> s(std::allocator<int> {});
+  s.emplace_one_at_back_(1);
+  s.reset();
+  return s.empty() && s.is_stack();
+}
+
+constexpr bool stack_ce_promote()
+{
+  fix<int, 8> s(std::allocator<int> {});
+  for (int i = 0; i < 8; ++i) s.emplace_one_at_back_(i);
+  if (!s.is_stack()) return false;
+  s.emplace_one_at_back_(8); // exceeds inline capacity: promote to heap
+  if (!s.is_heap() || s.size() != 9) return false;
+  for (int i = 0; i < 9; ++i)
+    if (s.data()[i] != i) return false;
+  s.reset();
+  return s.empty() && s.is_stack();
+}
+
+// Constant evaluation of stack paths waits for C++26 std::start_lifetime;
+// the runtime CHECKs in test_constexpr cover the same bodies today.
+#if defined(__cpp_lib_start_lifetime) && __cpp_lib_start_lifetime >= 202603L
+static_assert(stack_ce_push_read());
+static_assert(stack_ce_resize_cycle());
+static_assert(stack_ce_copy());
+static_assert(stack_ce_move());
+static_assert(stack_ce_swap());
+static_assert(stack_ce_reset());
+static_assert(stack_ce_promote());
+#endif
+
 static void test_constexpr()
 {
   SECTION("constexpr (heap)");
@@ -3307,6 +3400,17 @@ static void test_constexpr()
   CHECK(heap_ce_basic());
   CHECK(heap_ce_ctors());
   CHECK(fix<int, 0>::inline_capacity == 0);
+
+  SECTION("constexpr (stack runtime)");
+  // Same bodies as the gated static_asserts above: runtime-covered on
+  // C++20 toolchains, compile-time-covered once C++26 start_lifetime lands.
+  CHECK(stack_ce_push_read());
+  CHECK(stack_ce_resize_cycle());
+  CHECK(stack_ce_copy());
+  CHECK(stack_ce_move());
+  CHECK(stack_ce_swap());
+  CHECK(stack_ce_reset());
+  CHECK(stack_ce_promote());
 }
 
 int main()
