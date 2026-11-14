@@ -21,10 +21,10 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <cstdio>
 #include <iterator>
 #include <memory>
 #include <new>
-#include <print>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -41,11 +41,11 @@ static int g_fail = 0;
       ++g_pass;                                                              \
     } else {                                                                 \
       ++g_fail;                                                              \
-      std::println(stderr, "  [FAIL] {}:{}  {}", __FILE__, __LINE__, #cond); \
+      std::fprintf(stderr, "  [FAIL] %s:%d  %s\n", __FILE__, __LINE__, #cond); \
     }                                                                        \
   } while (0)
 
-#define SECTION(name) std::println("\n=== {} ===", name)
+#define SECTION(name) std::printf("\n=== %s ===\n", name)
 
 // ------------------------------------------------------------------
 // tracking types
@@ -2624,6 +2624,6 @@ int main()
   test_copy_move_iter_equiv_alloc();
   test_copy_n_move_iter_equiv();
 
-  std::println("\npass={} fail={}", g_pass, g_fail);
+  std::printf("\npass=%d fail=%d\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;
 }

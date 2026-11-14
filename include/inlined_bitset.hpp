@@ -36,6 +36,7 @@
 #include <string_view>      // std::basic_string_view
 #include <type_traits>      // std::remove_cv_t, std::remove_cvref_t
 #include <utility>          // std::forward
+#include <version>          // __cpp_lib_containers_ranges
 
 #if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_AMD64) || (defined(_M_IX86) && _M_IX86_FP >= 2))
 #  include <immintrin.h> // MSVC: every intrinsic is usable without /arch; dispatch is the caller's job

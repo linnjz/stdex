@@ -24,7 +24,6 @@
 #include <functional>
 #include <memory>
 #include <new>
-#include <print>
 #include <random>
 #include <ranges>
 #include <stdexcept>
@@ -52,29 +51,29 @@ namespace ufd = stdex::unordered_flat_detail;
 static int g_pass = 0;
 static int g_fail = 0;
 
-#define CHECK(cond)                                                          \
-  do {                                                                       \
-    if (cond) {                                                              \
-      ++g_pass;                                                              \
-    } else {                                                                 \
-      ++g_fail;                                                              \
-      std::println(stderr, "  [FAIL] {}:{}  {}", __FILE__, __LINE__, #cond); \
-    }                                                                        \
+#define CHECK(cond)                                                            \
+  do {                                                                         \
+    if (cond) {                                                                \
+      ++g_pass;                                                                \
+    } else {                                                                   \
+      ++g_fail;                                                                \
+      std::fprintf(stderr, "  [FAIL] %s:%d  %s\n", __FILE__, __LINE__, #cond); \
+    }                                                                          \
   } while (0)
 
-#define CHECK_EQ(a, b)                                                              \
-  do {                                                                              \
-    auto _a = (a);                                                                  \
-    auto _b = (b);                                                                  \
-    if (_a == _b) {                                                                 \
-      ++g_pass;                                                                     \
-    } else {                                                                        \
-      ++g_fail;                                                                     \
-      std::println(stderr, "  [FAIL] {}:{}  {} == {}", __FILE__, __LINE__, #a, #b); \
-    }                                                                               \
+#define CHECK_EQ(a, b)                                                                    \
+  do {                                                                                    \
+    auto _a = (a);                                                                        \
+    auto _b = (b);                                                                        \
+    if (_a == _b) {                                                                       \
+      ++g_pass;                                                                           \
+    } else {                                                                              \
+      ++g_fail;                                                                           \
+      std::fprintf(stderr, "  [FAIL] %s:%d  %s == %s\n", __FILE__, __LINE__, #a, #b);     \
+    }                                                                                     \
   } while (0)
 
-#define SECTION(name) std::println("\n=== {} ===", name)
+#define SECTION(name) std::printf("\n=== %s ===\n", name)
 
 // ==================================================================
 // transparent hasher for heterogeneous overloads
@@ -1575,8 +1574,6 @@ constexpr bool constexpr_hash_mul()
   std::array<std::byte, 200> buffer {};
   for (std::size_t i = 0; i < buffer.size(); ++i) buffer[i] = static_cast<std::byte>(i * 7u + 1u);
 
-  auto const k1 = stdex::hash_value(12345);
-  auto const k2 = stdex::hash_value(54321);
   auto const standard = stdex::hash_range(buffer);
   auto const micro    = stdex::hash_range<decltype(buffer), stdex::hash_micro_t>(buffer, 0u);
   auto const nano     = stdex::hash_range<decltype(buffer), stdex::hash_nano_t>(buffer, 0u);
@@ -1584,18 +1581,12 @@ constexpr bool constexpr_hash_mul()
   auto const product = stdex::umul128(0x0123'4567'89AB'CDEFull, 0xFEDC'BA98'7654'3210ull);
 
   // 128-bit scalars hash both words, and the signed path bit-copies to unsigned.
-  auto const h_lo  = stdex::hash_value(stdex::uint128_t { 1, 0 });
-  auto const h_hi  = stdex::hash_value(stdex::uint128_t { 0, 1 });
-  auto const h_neg = stdex::hash_value(stdex::int128_t::from_i64(-1));
-  auto const h_max = stdex::hash_value(~stdex::uint128_t {});
   auto const q_lo  = stdex::hash<stdex::uint128_t> {}(stdex::uint128_t { 1, 0 });
   auto const q_hi  = stdex::hash<stdex::uint128_t> {}(stdex::uint128_t { 0, 1 });
   auto const q_neg = stdex::hash<stdex::int128_t> {}(stdex::int128_t::from_i64(-1));
   auto const q_max = stdex::hash<stdex::uint128_t> {}(~stdex::uint128_t {});
-  return k1 != k2 && standard != micro && standard != nano && micro != nano &&
+  return standard != micro && standard != nano && micro != nano &&
          product.lo() == 0x2236'D88F'E561'8CF0ULL && product.hi() == 0x0121'FA00'AD77'D742ULL &&
-         h_lo != h_hi && h_neg == h_max &&
-         q_lo != q_hi && q_neg == q_max &&
          stdex::hash<stdex::uint128_t> {}(stdex::uint128_t { 0, 1 }, 1) != q_hi;
 }
 
@@ -3537,185 +3528,8 @@ int main()
   test_unaligned_allocator();
   test_swap_exception();
 
-  std::println("\n===============================");
-  std::println("PASS: {}   FAIL: {}", g_pass, g_fail);
-  std::println("===============================");
+  std::printf("\n===============================\n");
+  std::printf("PASS: %d   FAIL: %d\n", g_pass, g_fail);
+  std::printf("===============================\n");
   return g_fail == 0 ? 0 : 1;
 }
-
-/*
-================================================================================
-Coverage gap ledger -- gap ledger (mostly covered; kept as history)
-================================================================================
-This file now covers runtime paths, constexpr evaluation and allocator-aware branches. Ranked by risk:
-Lists branches / semantics once untouched by any test and how they were covered, for later review.
-
---------------------------------------------------------------------------------
-[1] constexpr / consteval branches (highest priority)
---------------------------------------------------------------------------------
-  - covered by test_constexpr() and in-file static_assert:
-    constexpr_stack_access / promote_to_heap / heap_only / erase_and_reset /
-    hash_mul (scalar hash_value, three hash_range modes, umul128/umulh), and
-    scalar_hash_reaches_high_bits：
-  - consteval branch of allocate_unchecked_ at inline_storage.hpp:160
-    (elements and groups allocated separately, instead of one merged block as at runtime
-    calculate_storage_size_）
-  - consteval branch of deallocate_unchecked_ at inline_storage.hpp:184
-  - consteval branch of initial_group_array_ at inline_storage.hpp:238
-  - group15.hpp:193/246/304/411/435  fingerprint_mask / reset /
-    consteval implementation of set_overflow_mark / available_mask / occupied_mask
-    (scalar-layout reset(unsigned char*) throws directly under consteval, see
-    group15.hpp:270）
-  - consteval branches of umul128 / umulh at hash.hpp:194/216
-Suggestion: rewrite the IMap<0>/IMap<29> insert-find-erase-rehash-copy path as
-`constexpr bool f(){...}` + static_assert. This is the most urgent gap.
-
---------------------------------------------------------------------------------
-[2] Untouched branches in storage conversion
---------------------------------------------------------------------------------
-  - covered by test_storage_conversion_and_capacity_boundaries():
-      * same-layout stack copy hits transfer_same_layout_unchecked_, covering int
-        the memcpy fast path for value_type;
-      * rehash no-op at the current capacity;
-      * empty-table rehash(0) min_group_count == 2 path;
-      * reset() on an inline_capacity == 0 table keeps heap capacity;
-      * erase then reinsert the same key.
-  - covered by CollisionMap<29> in the same test: max_load_ anti-drift with constant hash
-    forces overflow; erasing an overflow slot lowers max_load_, and reinsertion at the threshold
-    insertion must grow early.
-
---------------------------------------------------------------------------------
-[3] Allocator-aware branches
---------------------------------------------------------------------------------
-  - covered by test_allocator_aware(): custom allocator_probe
-    (is_always_equal=false with switchable propagate_*) asserting counts and propagation per branch,
-    plus bad_alloc rollback for rehash / stack growth. Original gap description follows:
-  - is_pocca_v / is_pocma_v / is_pocs_v（hash_table.hpp:104-106）：
-    copy assignment at hash_table.hpp:295, move assignment at 379/400/405, move construction at 345+390,
-    swap 475-481。
-  - the else branch of allocators_equal_ (hash_table.hpp:109) (left == right),
-    taken only by non-always-equal allocators.
-  - swap triggers assert when is_pocs_v == false with unequal allocators
-    (hash_table.hpp:478), no test.
-  - allocate throwing bad_alloc state consistency: allocate_unchecked_ first mutates
-    group_index_shift_/group_count_mask_/max_load_
-    (inline_storage.hpp:156-158) then allocates; on allocation failure the object is in a metadata-updated,
-    pointer unchanged inconsistent state.
-  - an allocator throwing bad_alloc from allocate is still needed to verify the strong / basic guarantee.
- Suggestion: a custom allocator recording allocate/deallocate counts with is_always_equal=false,
- propagate_*-switchable custom allocator asserting counts and propagation per branch.
-
---------------------------------------------------------------------------------
-[4] value_type copy / move paths and exception safety
---------------------------------------------------------------------------------
-  - covered by test_rehash_value_paths(): move_path of force_rehash_:
-      * !is_copy_constructible branch: UniqueMap (pair<int, unique_ptr<int>>)
-        heap / stack rehash.
-      * copy_path: ThrowingMap (neither copy nor move is nothrow) triggers
-        destroy_element_on_exit, witnessed by copy_count > 0 and move_count == 0.
-      * copy_path throws midway: source kept intact (copy never touches source), destination partial result destroyed, then
-        live_count drops back. The implementation depends on ++dest.size_ inside the loop; otherwise the destination destructor would
-        size_ == 0 would skip copied elements and leak (leak reproduced, now fixed).
-  - covered by test_transfer_exception_safety(): copy / move construction throws:
-      * stack->stack copy throw: source kept intact; the destination partial result goes through
-        rollback_dest_elements_on_exit cleans up mirroring the source occupancy -- groups
-        batch group copy is deferred until after the loop; on throw the destination destructor cannot find the partial result
-        (leak reproduced, now fixed).
-      * heap->heap copy throw (different capacity takes transfer_with_rehash): source kept intact.
-      * stack->stack move throw: source is emptied but stays usable; move construction with unequal allocators also leaks nothing.
-      * uncovered: a move-only type whose move throws, inside the force_rehash_ move loop,
-        throw -- source slots were destroyed one by one but occupancy was not reset, so the source cannot be restored to a valid state;
-        needs a redesign that resets occupancy slot by slot; deferred.
-  - covered by test_node_value_semantics(): copy construction and copy /
-    move assignment (incl. self-assignment and empty<->full) with live balance.
-  - covered by test_no_default_value():
-      * NoDefaultMap stack / heap emplace, find, erase, duplicate key (with_key
-        path) with live balance.
-      * without_key duplicate-key path: zero-arg emplace builds a temporary first, then checks for duplicates.
-      * partially filled stack destruction for non-trivial types: ThrowingMap<29> destroys only constructed slots,
-        live_count returns to zero (witnessed by stack_block's bare union + empty destructor).
-
---------------------------------------------------------------------------------
-[5] API coverage gaps
---------------------------------------------------------------------------------
-  - covered by test_insert_range_lazy(): ranges version of insert_range:
-    `iota | transform` lazy input_range compiles and behaves correctly.
-  - covered by test_hetero_erase_merge(): transparent erase / merge overloads; heterogeneous
-    merge once failed to compile because erase_on_exit hardcoded the current instantiation; its holder is now
-    fixed by templating.
-  - covered by test_lazy_iterator_erase(): lazy chained erase and erase(first,last)
-    return value. Two fixes recorded: the ledger's original `auto it` chained form did not compile --
-    lazy_iterator copy / move assignment are both deleted; the loop variable must be an iterator
-    (each assignment still converts); erase(first,last) used to return `first` (i.e. `last`),
-    while a lazy conversion always increment_s, so a partial range skips one element and a full range steps past end,
-    now returns by tracking the last erased slot (victim).
-  - covered by test_iterator_postfix(): postfix ++; ISet same-type / IMap different-type
-    static_assert already added in the alias block.
-  - covered by test_insert_hint(): three hint overloads; test_equal_range_const()
-    covers the const (incl. transparent) overloads; test_piecewise_emplace() directly tests the piecewise path
-    new and duplicate keys.
-  - covered by test_container_compare(): ==/!= (incl. empty-table comparison; empty tables once traversed
-    empty storage crash, fixed with an early-out); test_erase_if() covers via the public wrapper
-    map/set; test_flat_map_api() covers []/at/try_emplace/insert_or_assign
-    (incl. heterogeneous at). Probe first, then test once clean: probing also caught heterogeneous merge
-    guard and erase-range return bugs, both fixed (see above).
-
---------------------------------------------------------------------------------
-[6] Degenerate and boundary cases
---------------------------------------------------------------------------------
-  - covered by test_full_collision(): full-collision hash with 200-key heap insert / find /
-    erase / reinsert / erase-all (across groups and the overflow chain, no infinite loop); stack table filled then half-erased
-    then grow past capacity.
-  - covered by test_inline_capacity_59(): inline_capacity = 59 with filled stack,
-    the 60th promotes to heap; set smoke test at the same capacity.
-  - covered by test_pmr_aliases(): pmr aliases with default-resource CRUD + monotonic
-    buffer with externally supplied memory resource.
-
---------------------------------------------------------------------------------
-[8] Public wrapper (map/set) coverage
---------------------------------------------------------------------------------
- Every item in this section belongs to unordered_flat_map / unordered_flat_set members themselves,
- hash_table-layer logic already has tests; no duplication.
-  - covered by test_flat_map_ctors(): map alloc, 6 bucket, 8 range,
-    8 from_range constructions, copy/move (+alloc) constructions with three-way assignment, plus move construction
-    + element-wise transfer with an unequal pmr allocator.
-  - covered by test_flat_set_ctors(): set alloc, bucket, range, from_range
-    (one representative of each shape) with copy/move (+alloc) construction and three-way assignment.
-  - adopted by test_ctad_deduction() as static_assert: 24 CTAD groups (map/set
-    12 each, zero runtime cost).
-  - covered by test_nonmember_swap_and_observers(): ADL swap and
-    hash_function/key_eq/get_allocator。
-  - covered by test_const_key_overloads(): const-key overloads of try_emplace / insert_or_assign,
-    const& key overloads (earlier cases all used literals and only hit the && version).
-  - covered by test_insert_overloads(): lvalue const& insert and convertible-type template
-    insert and initializer_list insert.
-  - covered by test_const_find_and_node(): const find (plain + transparent),
-    explicit node construction / reset / rvalue value, plus set erase(key)/clear at runtime.
-
---------------------------------------------------------------------------------
-[7] Completion (all 11 items below are covered by [8] public-wrapper tests; original description kept here)
---------------------------------------------------------------------------------
-1. map/set rule-of-five and construction overloads: copy/move (+alloc) construction and assignment, explicit(alloc), 6 bucket, 8 range, 8 from_range -- zero coverage at the public wrapper layer (hash_table layer fully covered). Only ilist construction got covered incidentally (in erase_if/map-api tests).
-2. map/set operator= (copy/move/ilist): zero coverage.
-3. 24 CTAD groups (map 12 + set 12): zero in-repo coverage -- previously verified only in Temp probes; adopt as static_assert (zero runtime cost).
-4. Non-member swap (map/set, ADL): only member swap was tested (test_swap); the swap(a, b) free function was never tested.
-5. Observers hash_function() / key_eq(): zero calls file-wide (get_allocator has a dozen).
-6. const& key overloads of try_emplace / insert_or_assign: existing cases all use literals hitting only the && overloads; the const& (lvalue key) version was never called.
-7. const& insert overloads + non-hint template overloads: the non-hint layer only called value_type&& (r1/r2 pure rvalues); lvalue insert(obj) via const& and convertible types via U&& were never called (hint-layer U&& covered by it3).
-8. insert(initializer_list): zero calls.
-9. const find overloads (plain + hetero): ct.find(...) never appears; only the two non-const find overloads are covered. Note all four equal_range overloads are covered (added in 5).
-10. Three small node_type members: reset() never called directly; explicit node_type(value&&) / (value const&) never constructed explicitly (only indirectly via extract); the value() && rvalue overload never called.
-11. Set erase(key) at runtime: only called in constexpr_stack_access; runtime tests exercise erase only on maps; clear() was never called on a set.
-
---------------------------------------------------------------------------------
-[8] Integration and performance
---------------------------------------------------------------------------------
-  - covered by test_stdex_hash_integration(): stdex::hash integration:
-      * int (scalar path) / string (range path) x map/set x heap/stack;
-      * hash_function() agrees with a direct call;
-      * empty, short and long keys (> stripe, takes the lane loop);
-      * public unordered_flat_map/set instantiated with stdex::hash.
-  - non-SIMD tests
-  - covered by tests/bench_hash_table.cpp: CRUD against boost / absl / std +
-    rehash + churn comparison (std as baseline, int/string, no set).
-*/

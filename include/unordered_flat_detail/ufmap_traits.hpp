@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <cstddef> // std::size_t
 #include <utility> // std::pair
 
 namespace stdex::unordered_flat_detail

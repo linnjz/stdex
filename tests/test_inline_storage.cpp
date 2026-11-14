@@ -38,7 +38,6 @@
 #include <limits>
 #include <memory>
 #include <new>
-#include <print>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -58,11 +57,11 @@ static int g_fail = 0;
       ++g_pass;                                                          \
     } else {                                                             \
       ++g_fail;                                                          \
-      std::println(stderr, "  [FAIL] {}:{}  {}", __FILE__, __LINE__, #__VA_ARGS__); \
+      std::fprintf(stderr, "  [FAIL] %s:%d  %s\n", __FILE__, __LINE__, #__VA_ARGS__); \
     }                                                                    \
   } while (0)
 
-#define SECTION(name) std::println("\n=== {} ===", name)
+#define SECTION(name) std::printf("\n=== %s ===\n", name)
 
 // ------------------------------------------------------------------
 // fixture: re-export every testable helper
@@ -2149,28 +2148,28 @@ static void fuzz_one(unsigned long long seed, int ops)
   std::vector<int> mb;
   auto sync_check = [&](int line) {
     if (a.size() != ma.size() || b.size() != mb.size()) {
-      std::println(stderr, "  [FAIL] fuzz size line={} seed={}", line, seed);
+      std::fprintf(stderr, "  [FAIL] fuzz size line=%d seed=%llu\n", line, seed);
       ++g_fail;
       return;
     }
     ++g_pass;
     for (std::size_t i = 0; i < ma.size(); ++i) {
       if (a.data()[i] != ma[i]) {
-        std::println(stderr, "  [FAIL] fuzz elem a line={} seed={}", line, seed);
+        std::fprintf(stderr, "  [FAIL] fuzz elem a line=%d seed=%llu\n", line, seed);
         ++g_fail;
         return;
       }
     }
     for (std::size_t i = 0; i < mb.size(); ++i) {
       if (b.data()[i] != mb[i]) {
-        std::println(stderr, "  [FAIL] fuzz elem b line={} seed={}", line, seed);
+        std::fprintf(stderr, "  [FAIL] fuzz elem b line=%d seed=%llu\n", line, seed);
         ++g_fail;
         return;
       }
     }
     ++g_pass;
     if (!a.invariants() || !b.invariants()) {
-      std::println(stderr, "  [FAIL] fuzz invariant line={} seed={}", line, seed);
+      std::fprintf(stderr, "  [FAIL] fuzz invariant line=%d seed=%llu\n", line, seed);
       ++g_fail;
       return;
     }
@@ -2282,14 +2281,14 @@ static void test_fuzz_leaks()
       }
       }
       if (a.size() != model.size()) {
-        std::println(stderr, "  [FAIL] fuzz-leak size drift");
+        std::fprintf(stderr, "  [FAIL] fuzz-leak size drift\n");
         ++g_fail;
         return;
       }
       ++g_pass;
       for (std::size_t k = 0; k < model.size(); ++k) {
         if (a.data()[k].value != model[k]) {
-          std::println(stderr, "  [FAIL] fuzz-leak value drift");
+          std::fprintf(stderr, "  [FAIL] fuzz-leak value drift\n");
           ++g_fail;
           return;
         }
@@ -3341,6 +3340,6 @@ int main()
   test_fuzz_leaks();
   test_constexpr();
 
-  std::println("\npass={} fail={}", g_pass, g_fail);
+  std::printf("\npass=%d fail=%d\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;
 }

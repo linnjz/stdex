@@ -16,7 +16,7 @@
 
 // test_hash.cpp
 //
-// Functional and statistical checks for stdex::hash / hash_value / hash_range.
+// Functional and statistical checks for stdex::hash / hash_range.
 // All statistical inputs are generated from fixed seeds so failures are
 // reproducible; quality thresholds are deliberately below the ideal values.
 #include <algorithm>
@@ -192,11 +192,6 @@ void test_strings_and_ranges()
   CHECK(stdex::hash_range(bytes) == stdex::hash_bytes(std::span<std::byte const> { bytes }));
   CHECK((stdex::hash_range<decltype(bytes), stdex::hash_micro_t>(bytes) != stdex::hash_range(bytes)));
   CHECK((stdex::hash_range<decltype(bytes), stdex::hash_nano_t>(bytes) != stdex::hash_range(bytes)));
-
-  std::vector<std::uint32_t> values { 1, 2, 3, 4, 5 };
-  u64 manual = 0;
-  for (std::uint32_t const value : values) manual = stdex::hash_value<std::uint32_t>(value, manual);
-  CHECK(stdex::hash_range(values) == manual);
 }
 
 void test_128()

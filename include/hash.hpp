@@ -286,51 +286,12 @@ template <hash_detail::contiguous_object_range Range, hash_mode Mode = hash_stan
 [[nodiscard]] constexpr std::uint64_t hash_range(Range const &range, std::uint64_t seed = 0) noexcept
 {
   using value_type = std::remove_cv_t<std::ranges::range_value_t<Range>>;
-  if constexpr (hash_detail::scalar_hashable<value_type>) {
-    // Per-element hash_value keeps this consistent with the scalar path on every
-    // platform (little_endian_array, -0.0 folding); a raw as_bytes pass would bake
-    // in native endianness. Structs without hash_value support take the branch below.
-    std::uint64_t h = seed;
-    for (value_type const v : range) {
-      h = hash_value<value_type, Mode>(v, h);
-    }
-    return h;
-  } else {
-    static_assert(std::has_unique_object_representations_v<value_type>, "stdex::hash_range: value_type has padding or aliased representations; "
-                                                                        "hashing raw bytes would violate a == b => hash(a) == hash(b). "
-                                                                        "Provide a custom hash over members.");
-    auto const objects = std::span<value_type const> { std::ranges::data(range), std::ranges::size(range) };
-    return hash_bytes<std::byte, Mode>(std::as_bytes(objects), seed);
-  }
-}
-
-template <hash_mode Mode = hash_standard_t>
-[[nodiscard]] constexpr std::uint64_t hash_value(std::string_view text, std::uint64_t seed = 0) noexcept
-{
-  return hash_bytes<char, Mode>(std::span<char const> { text.data(), text.size() }, seed);
-}
-
-template <hash_detail::scalar_hashable T, hash_mode Mode = hash_standard_t>
-[[nodiscard]] constexpr std::uint64_t hash_value(T const value, std::uint64_t const seed = 0) noexcept
-{
-  auto const bytes = little_endian_array(hash_detail::to_hashable_unsigned(value));
-  using array_type = std::remove_cv_t<decltype(bytes)>;
-  return hash_range<array_type, Mode>(bytes, seed);
-}
-
-template <hash_mode Mode = hash_standard_t>
-[[nodiscard]] constexpr std::uint64_t hash_value(uint128_t const value, std::uint64_t const seed = 0) noexcept
-{
-  auto const low_bytes  = little_endian_array(value.lo());
-  auto const high_bytes = little_endian_array(value.hi());
-  using array_type      = std::remove_cv_t<decltype(low_bytes)>;
-  return hash_range<array_type, Mode>(high_bytes, hash_range<array_type, Mode>(low_bytes, seed));
-}
-
-template <hash_mode Mode = hash_standard_t>
-[[nodiscard]] constexpr std::uint64_t hash_value(int128_t const value, std::uint64_t const seed = 0) noexcept
-{
-  return hash_value<Mode>(uint128_t { value.lo(), value.hi() }, seed);
+  static_assert(std::has_unique_object_representations_v<value_type>,
+               "stdex::hash_range: value_type has padding or aliased representations; "
+               "hashing raw bytes would violate a == b => hash(a) == hash(b). "
+               "Provide a custom hash over members.");
+  auto const objects = std::span<value_type const> { std::ranges::data(range), std::ranges::size(range) };
+  return hash_bytes<std::byte, Mode>(std::as_bytes(objects), seed);
 }
 
 template <class T>

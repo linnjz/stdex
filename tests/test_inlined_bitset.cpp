@@ -34,7 +34,6 @@
 #include <limits>
 #include <memory>
 #include <new>
-#include <print>
 #include <random>
 #include <ranges>
 #include <sstream>
@@ -51,19 +50,19 @@ static int g_pass = 0;
 static int g_fail = 0;
 
 // Variadic so template-id commas inside conditions do not split macro args.
-#define CHECK(...)                                                       \
-  do {                                                                   \
-    if (__VA_ARGS__) {                                                   \
-      ++g_pass;                                                          \
-    } else {                                                             \
-      ++g_fail;                                                          \
-      std::println(stderr, "  [FAIL] {}:{}  {}", __FILE__, __LINE__, #__VA_ARGS__); \
-    }                                                                    \
+#define CHECK(...)                                                                       \
+  do {                                                                                   \
+    if (__VA_ARGS__) {                                                                   \
+      ++g_pass;                                                                          \
+    } else {                                                                             \
+      ++g_fail;                                                                          \
+      std::fprintf(stderr, "  [FAIL] %s:%d  %s\n", __FILE__, __LINE__, #__VA_ARGS__);    \
+    }                                                                                    \
   } while (0)
 
 #define CHECK_EQ(a, b) CHECK((a) == (b))
 
-#define SECTION(name) std::println("\n=== {} ===", name)
+#define SECTION(name) std::printf("\n=== %s ===\n", name)
 
 namespace bs_test
 {
@@ -2551,8 +2550,8 @@ int main()
   test_allocator_lifecycle();
   test_constexpr();
 
-  std::println("\n===============================");
-  std::println("PASS: {}   FAIL: {}", g_pass, g_fail);
-  std::println("===============================");
+  std::printf("\n===============================\n");
+  std::printf("PASS: %d   FAIL: %d\n", g_pass, g_fail);
+  std::printf("===============================\n");
   return g_fail == 0 ? 0 : 1;
 }

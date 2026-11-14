@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include <cstddef> // std::size_t
+
 namespace stdex::unordered_flat_detail
 {
 template <class KeyType, std::size_t N>

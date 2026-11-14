@@ -17,8 +17,8 @@
 // test_uninitialized_buffer.cpp
 // Covers stdex::uninitialized_buffer allocation, accessors, copy and move semantics.
 #include <cstddef>
+#include <cstdio>
 #include <memory>
-#include <print>
 #include <type_traits>
 #include <utility>
 
@@ -33,11 +33,11 @@ static int g_fail = 0;
       ++g_pass;                                                              \
     } else {                                                                 \
       ++g_fail;                                                              \
-      std::println(stderr, "  [FAIL] {}:{}  {}", __FILE__, __LINE__, #cond); \
+      std::fprintf(stderr, "  [FAIL] %s:%d  %s\n", __FILE__, __LINE__, #cond); \
     }                                                                        \
   } while (0)
 
-#define SECTION(name) std::println("\n=== {} ===", name)
+#define SECTION(name) std::printf("\n=== %s ===\n", name)
 
 using int_buffer = stdex::uninitialized_buffer<int>;
 
@@ -253,6 +253,6 @@ int main()
   test_move_semantics();
   test_copy_semantics();
 
-  std::println("\npass={} fail={}", g_pass, g_fail);
+  std::printf("\npass=%d fail=%d\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;
 }
