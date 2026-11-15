@@ -24,6 +24,9 @@
 #include <functional>
 #include <memory>
 #include <new>
+#if __cplusplus >= 202603L
+#  include <optional>
+#endif
 #include <random>
 #include <ranges>
 #include <stdexcept>
@@ -1133,6 +1136,47 @@ void test_heterogeneous_lookup()
   CHECK(b != e);
   CHECK_EQ(t.count(sv), 1u);
 }
+
+// ==================================================================
+// 10b. P3091-style lookup
+// ==================================================================
+#if __cplusplus >= 202603L
+void test_lookup()
+{
+  SECTION("lookup");
+
+  stdex::unordered_flat_map<std::string, int, 0, stdex::hash<std::string>, std::equal_to<>> map;
+  map.emplace("alpha", 1);
+  map.emplace("beta", 2);
+
+  auto hit = map.lookup("alpha");
+  CHECK(hit.has_value());
+  CHECK_EQ(hit.value(), 1);
+  CHECK_EQ(*hit, 1);
+  CHECK(&*hit == &map.at("alpha"));
+
+  auto miss = map.lookup("missing");
+  CHECK(!miss);
+  CHECK_EQ(miss.value_or(-1), -1);
+
+  auto const &const_map = map;
+  auto const_hit        = const_map.lookup(std::string_view { "beta" });
+  static_assert(std::is_same_v<decltype(const_hit), std::optional<const int &>>);
+  CHECK(const_hit.has_value());
+  CHECK_EQ(*const_hit, 2);
+
+  struct non_default_mapped
+  {
+    explicit non_default_mapped(int value) : value(value) {}
+    int value;
+  };
+  stdex::unordered_flat_map<int, non_default_mapped> non_default_map;
+  non_default_map.try_emplace(1, 7);
+  auto non_default_hit = non_default_map.lookup(1);
+  CHECK(non_default_hit.has_value());
+  CHECK_EQ(non_default_hit->value, 7);
+}
+#endif
 
 // ==================================================================
 // 11. Load factor / capacity / stats API
@@ -3485,6 +3529,9 @@ int main()
   test_stack_heap_iteration();
   test_insert_variants();
   test_heterogeneous_lookup();
+#if __cplusplus >= 202603L
+  test_lookup();
+#endif
   test_introspection();
   test_extract();
   test_insert_node();

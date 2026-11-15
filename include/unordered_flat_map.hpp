@@ -15,9 +15,11 @@
  */
 
 #pragma once
-
+#if __cplusplus >= 202603L
+#include <optional>  // std::optional
+#endif
 #include <stdexcept> // std::out_of_range
-#include <version>
+#include <version>   // __cpp_lib_containers_ranges
 
 #include "unordered_flat_detail/ufmap_traits.hpp"
 #include "unordered_flat_detail/hash_table.hpp"
@@ -420,6 +422,39 @@ public:
     if (it == this->end()) throw std::out_of_range("unordered_flat_map::at: key not found");
     return it->second;
   }
+
+#if __cplusplus >= 202603L
+  // ---------- lookup ----------
+  [[nodiscard]] constexpr std::optional<mapped_type &> lookup(key_type const &key_val)
+  {
+    auto it = this->find(key_val);
+    if (it == this->end()) return std::nullopt;
+    return it->second;
+  }
+
+  [[nodiscard]] constexpr std::optional<const mapped_type &> lookup(key_type const &key_val) const
+  {
+    auto it = this->find(key_val);
+    if (it == this->end()) return std::nullopt;
+    return it->second;
+  }
+
+  template <class K> requires unordered_flat_detail::heterogeneous_key<K const &, hasher, key_equal, iterator, const_iterator>
+  [[nodiscard]] constexpr std::optional<mapped_type &> lookup(K const &key_val)
+  {
+    auto it = this->find(key_val);
+    if (it == this->end()) return std::nullopt;
+    return it->second;
+  }
+
+  template <class K> requires unordered_flat_detail::heterogeneous_key<K const &, hasher, key_equal, iterator, const_iterator>
+  [[nodiscard]] constexpr std::optional<const mapped_type &> lookup(K const &key_val) const
+  {
+    auto it = this->find(key_val);
+    if (it == this->end()) return std::nullopt;
+    return it->second;
+  }
+#endif
 
   // ---------- try_emplace ----------
   template <class... Mappedty>
