@@ -173,12 +173,12 @@ void test_profiles()
   std::printf("\n=== minimal_perfect_hash: profiles ===\n");
   std::vector<std::uint64_t> const keys = make_random_keys(3000, 777);
   {
-    stdex::minimal_perfect_hash_set<std::uint64_t, stdex::hash<std::uint64_t>, std::equal_to<std::uint64_t>, std::allocator<std::uint64_t>, stdex::ptr_hash_option_balanced>
+    stdex::minimal_perfect_hash_set<std::uint64_t, stdex::hash<std::uint64_t>, std::equal_to<std::uint64_t>, std::allocator<std::uint64_t>, stdex::ptr_hash_heap_option_balanced<std::allocator<std::uint64_t>>>
         set(keys.begin(), keys.end());
     for (std::uint64_t key : keys) CHECK(set.contains(key));
   }
   {
-    stdex::minimal_perfect_hash_set<std::uint64_t, stdex::hash<std::uint64_t>, std::equal_to<std::uint64_t>, std::allocator<std::uint64_t>, stdex::ptr_hash_option_compact>
+    stdex::minimal_perfect_hash_set<std::uint64_t, stdex::hash<std::uint64_t>, std::equal_to<std::uint64_t>, std::allocator<std::uint64_t>, stdex::ptr_hash_heap_option_compact<std::allocator<std::uint64_t>>>
         set(keys.begin(), keys.end());
     for (std::uint64_t key : keys) CHECK(set.contains(key));
   }

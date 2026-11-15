@@ -37,7 +37,7 @@ namespace stdex
 /// throws if the minimal-perfect hash index cannot be built from them. Because
 /// the table is immutable, `lookup` exposes only const references to mapped
 /// values.
-template <class KeyType, class MappedType, class Hasher = stdex::hash<KeyType>, class KeyEqual = std::equal_to<KeyType>, class Allocator = std::allocator<std::pair<KeyType, MappedType>>, class Options = ptr_hash_option_default>
+template <class KeyType, class MappedType, class Hasher = stdex::hash<KeyType>, class KeyEqual = std::equal_to<KeyType>, class Allocator = std::allocator<std::pair<KeyType, MappedType>>, class Options = ptr_hash_heap_option_default<Allocator>>
 class minimal_perfect_hash_map
     : public minimal_perfect_hash_detail::hash_table<minimal_perfect_hash_detail::mphmap_traits<KeyType, MappedType>, Hasher, KeyEqual, Allocator, Options>
 {

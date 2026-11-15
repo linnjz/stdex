@@ -83,7 +83,7 @@ concept heterogeneous_key =
 /**
  * @brief Immutable associative table backed by a minimal-perfect hash index.
  *
- * @details The @c basic_ptr_hash index stores no keys, and its @c index()
+ * @details The @c ptr_hash index stores no keys, and its @c index()
  * result is only unique over the keys that were used to build it; an arbitrary
  * query still lands on some slot in @c [0, size()). @c values_ therefore
  * stores the elements in index order, and every lookup verifies the candidate
@@ -104,7 +104,7 @@ concept heterogeneous_key =
  * index built from @c key_type.
  */
 template <class Traits, class Hasher, class KeyEqual, class Allocator, class Options>
-requires std::same_as<std::remove_cv_t<decltype(Options::value)>, ptr_hash_options>
+requires ::stdex::ptr_hash_detail::is_ptr_hash_options_v<std::remove_cv_t<decltype(Options::value)>>
 class hash_table
 {
 public:
@@ -129,7 +129,7 @@ private:
   using fingerprint_allocator_type = typename std::allocator_traits<allocator_type>::template rebind_alloc<fingerprint_type>;
   using fingerprints_type          = ::stdex::uninitialized_buffer<fingerprint_type, fingerprint_allocator_type>;
 
-  using index_type = basic_ptr_hash<ptr_hash_detail::heap_storage<allocator_type>, key_type, hasher, Options>;
+  using index_type = ptr_hash<key_type, Hasher, Options>;
 
   using order_index_type     = std::uint32_t;
   using order_allocator_type = typename std::allocator_traits<allocator_type>::template rebind_alloc<order_index_type>;
@@ -413,7 +413,7 @@ private:
   [[nodiscard]] static constexpr index_type make_index_(values_type const &values, hasher const &hash, allocator_type const &alloc)
   {
     auto keys = values | std::views::transform([](value_type const &value) -> key_type const & { return Traits::key_of(value); });
-    return index_type { keys, hash, alloc };
+    return index_type { std::ranges::begin(keys), std::ranges::end(keys), hash, alloc };
   }
 
   [[nodiscard]] static constexpr fingerprint_type fingerprint_of_(std::uint64_t const hash) noexcept

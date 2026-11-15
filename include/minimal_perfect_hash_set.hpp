@@ -31,7 +31,7 @@ namespace stdex
 ///
 /// The key set is fixed at construction. Keys must be unique; construction
 /// throws if the minimal-perfect hash index cannot be built from them.
-template <class KeyType, class Hasher = stdex::hash<KeyType>, class KeyEqual = std::equal_to<KeyType>, class Allocator = std::allocator<KeyType>, class Options = ptr_hash_option_default>
+template <class KeyType, class Hasher = stdex::hash<KeyType>, class KeyEqual = std::equal_to<KeyType>, class Allocator = std::allocator<KeyType>, class Options = ptr_hash_heap_option_default<Allocator>>
 class minimal_perfect_hash_set
     : public minimal_perfect_hash_detail::hash_table<minimal_perfect_hash_detail::mphset_traits<KeyType>, Hasher, KeyEqual, Allocator, Options>
 {
