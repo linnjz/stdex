@@ -28,9 +28,11 @@
                             // std::ranges::range_reference_t, std::ranges::begin, std::ranges::end,
                             // std::ranges::size, std::views::transform
 #include <stdexcept>        // std::out_of_range
+#include <tuple>            // std::tuple_element_t
 #include <type_traits>      // std::remove_cvref_t, std::remove_cv_t, std::is_move_assignable_v, std::is_trivially_copyable_v
 #include <utility>          // std::move
 #include <vector>           // std::vector
+#include <version>          // __cpp_lib_containers_ranges
 
 #if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
 #  include <intrin.h> // _mm_prefetch
@@ -43,6 +45,41 @@
 
 namespace stdex::minimal_perfect_hash_detail
 {
+template <std::input_iterator Iter>
+using guide_key_t = std::remove_const_t<std::tuple_element_t<0, typename std::iterator_traits<Iter>::value_type>>;
+template <std::input_iterator Iter>
+using guide_mapped_t = std::tuple_element_t<1, typename std::iterator_traits<Iter>::value_type>;
+template <class Range>
+using range_key_t = std::remove_const_t<std::tuple_element_t<0, std::ranges::range_value_t<Range>>>;
+template <class Range>
+using range_mapped_t = std::tuple_element_t<1, std::ranges::range_value_t<Range>>;
+
+template <class Alloc>
+concept is_allocator = requires (Alloc &alloc) {
+  typename Alloc::value_type;
+  alloc.deallocate(alloc.allocate(std::size_t { 1 }), std::size_t { 1 });
+};
+
+template <class Hasher, class Key>
+concept is_hasher_for = std::regular_invocable<Hasher const &, Key const &> &&
+                        std::convertible_to<std::invoke_result_t<Hasher const &, Key const &>, std::uint64_t>;
+
+template <class T>
+inline constexpr bool has_is_transparent = requires { typename T::is_transparent; };
+
+template <class Hasher, class KeyEqual>
+concept transparent_hash_equal = has_is_transparent<Hasher> && has_is_transparent<KeyEqual>;
+
+template <class KeyType, class Iter, class ConstIter>
+concept not_iterator_convertible = !std::is_convertible_v<KeyType, Iter> && !std::is_convertible_v<KeyType, ConstIter>;
+
+template <class KeyType, class Hasher, class KeyEqual, class Iter, class ConstIter, class K>
+concept heterogeneous_key =
+    transparent_hash_equal<Hasher, KeyEqual> &&
+    not_iterator_convertible<KeyType, Iter, ConstIter> &&
+    is_hasher_for<Hasher, K> &&
+    std::predicate<KeyEqual const &, KeyType const &, K const &>;
+
 /**
  * @brief Immutable associative table backed by a minimal-perfect hash index.
  *
@@ -60,6 +97,11 @@ namespace stdex::minimal_perfect_hash_detail
  * of exactly @c key_count elements is sufficient and all its slots are
  * populated. The @c perfect scheme leaves holes in @c [0, capacity) and would
  * need a separate slot-to-value mapping.
+ *
+ * Lookups also accept heterogeneous key types when both @c Hasher and
+ * @c KeyEqual expose @c is_transparent. The alternate key is hashed through the
+ * same seeded PtrHash path, so the resulting index stays consistent with the
+ * index built from @c key_type.
  */
 template <class Traits, class Hasher, class KeyEqual, class Allocator, class Options>
 requires std::same_as<std::remove_cv_t<decltype(Options::value)>, ptr_hash_options>
@@ -76,6 +118,8 @@ public:
   using difference_type = std::ptrdiff_t;
   using const_reference = value_type const &;
   using const_pointer   = typename std::allocator_traits<allocator_type>::const_pointer;
+  using reference       = const_reference;
+  using pointer         = const_pointer;
 
 private:
   using values_allocator_type      = typename std::allocator_traits<allocator_type>::template rebind_alloc<value_type>;
@@ -183,6 +227,7 @@ public:
   }
 
   // ---------- from_range constructors ----------
+#ifdef __cpp_lib_containers_ranges
   template <std::ranges::input_range Range>
   requires (!std::derived_from<std::remove_cvref_t<Range>, hash_table>) &&
                std::constructible_from<value_type, std::ranges::range_reference_t<Range>>
@@ -230,15 +275,80 @@ public:
       : hash_table { std::ranges::begin(range), std::ranges::end(range), hash, key_equal {}, alloc }
   {
   }
+#endif // __cpp_lib_containers_ranges
 
   [[nodiscard]] constexpr bool empty() const noexcept { return values_.empty(); }
   [[nodiscard]] constexpr size_type size() const noexcept { return values_.size(); }
+  [[nodiscard]] constexpr size_type max_size() const noexcept { return values_.max_size(); }
+  [[nodiscard]] constexpr size_type bucket_count() const noexcept { return index_.bucket_count(); }
+  /// The bucket array is fixed at construction, so the current count is also the maximum.
+  [[nodiscard]] constexpr size_type max_bucket_count() const noexcept { return index_.bucket_count(); }
   [[nodiscard]] constexpr const_iterator begin() const noexcept { return values_.begin(); }
   [[nodiscard]] constexpr const_iterator end() const noexcept { return values_.end(); }
   [[nodiscard]] constexpr const_iterator cbegin() const noexcept { return values_.cbegin(); }
   [[nodiscard]] constexpr const_iterator cend() const noexcept { return values_.cend(); }
 
-  [[nodiscard]] constexpr const_iterator find(key_type const &key) const
+  [[nodiscard]] constexpr const_iterator find(key_type const &key) const { return find_impl_(key); }
+  template <class K>
+  requires heterogeneous_key<key_type, hasher, key_equal, iterator, const_iterator, K>
+  [[nodiscard]] constexpr const_iterator find(K const &key) const { return find_impl_(key); }
+
+  [[nodiscard]] constexpr bool contains(key_type const &key) const { return contains_impl_(key); }
+  template <class K>
+  requires heterogeneous_key<key_type, hasher, key_equal, iterator, const_iterator, K>
+  [[nodiscard]] constexpr bool contains(K const &key) const { return contains_impl_(key); }
+
+  [[nodiscard]] constexpr size_type count(key_type const &key) const { return contains(key) ? 1U : 0U; }
+  template <class K>
+  requires heterogeneous_key<key_type, hasher, key_equal, iterator, const_iterator, K>
+  [[nodiscard]] constexpr size_type count(K const &key) const { return contains(key) ? 1U : 0U; }
+
+  [[nodiscard]] constexpr std::pair<const_iterator, const_iterator> equal_range(key_type const &key) const
+  {
+    const_iterator const it = find(key);
+    if (it == end()) return { end(), end() };
+    return { it, it + 1 };
+  }
+
+  template <class K>
+  requires heterogeneous_key<key_type, hasher, key_equal, iterator, const_iterator, K>
+  [[nodiscard]] constexpr std::pair<const_iterator, const_iterator> equal_range(K const &key) const
+  {
+    const_iterator const it = find(key);
+    if (it == end()) return { end(), end() };
+    return { it, it + 1 };
+  }
+
+  [[nodiscard]] constexpr mapped_type const &at(key_type const &key) const { return at_impl_(key); }
+  template <class K>
+  requires heterogeneous_key<key_type, hasher, key_equal, iterator, const_iterator, K>
+  [[nodiscard]] constexpr mapped_type const &at(K const &key) const { return at_impl_(key); }
+
+  [[nodiscard]] constexpr mapped_type const &at_unchecked(key_type const &key) const
+  {
+    size_type const index = index_.index_unchecked(key);
+    assert(index < values_.size());
+    assert(key_eq_(Traits::key_of(values_[index]), key));
+    return Traits::mapped_of(values_[index]);
+  }
+
+  template <class K>
+  requires heterogeneous_key<key_type, hasher, key_equal, iterator, const_iterator, K>
+  [[nodiscard]] constexpr mapped_type const &at_unchecked(K const &key) const
+  {
+    size_type const index = index_.index_unchecked(key);
+    assert(index < values_.size());
+    assert(key_eq_(Traits::key_of(values_[index]), key));
+    return Traits::mapped_of(values_[index]);
+  }
+
+  [[nodiscard]] constexpr hasher hash_function() const noexcept { return index_.hash_function(); }
+  [[nodiscard]] constexpr key_equal key_eq() const noexcept { return key_eq_; }
+  [[nodiscard]] constexpr allocator_type get_allocator() const noexcept { return values_.get_allocator(); }
+
+private:
+  template <class K>
+  [[nodiscard]] constexpr const_iterator find_impl_(K const &key) const
   {
     if (empty()) [[unlikely]]
       return end();
@@ -261,7 +371,8 @@ public:
                                                         : values_.end();
   }
 
-  [[nodiscard]] constexpr bool contains(key_type const &key) const
+  template <class K>
+  [[nodiscard]] constexpr bool contains_impl_(K const &key) const
   {
     if (empty()) [[unlikely]]
       return false;
@@ -272,9 +383,8 @@ public:
     return fingerprints_[index] == fingerprint_of_(hash) && key_eq_(Traits::key_of(values_[index]), key);
   }
 
-  [[nodiscard]] constexpr size_type count(key_type const &key) const { return contains(key) ? 1U : 0U; }
-
-  [[nodiscard]] constexpr mapped_type const &at(key_type const &key) const
+  template <class K>
+  [[nodiscard]] constexpr mapped_type const &at_impl_(K const &key) const
   {
     if (empty()) [[unlikely]] {
       throw std::out_of_range("minimal_perfect_hash::at: key not found");
@@ -289,19 +399,6 @@ public:
     return Traits::mapped_of(values_[index]);
   }
 
-  [[nodiscard]] constexpr mapped_type const &at_unchecked(key_type const &key) const
-  {
-    size_type const index = index_.index_unchecked(key);
-    assert(index < values_.size());
-    assert(key_eq_(Traits::key_of(values_[index]), key));
-    return Traits::mapped_of(values_[index]);
-  }
-
-  [[nodiscard]] constexpr hasher hash_function() const noexcept { return index_.hash_function(); }
-  [[nodiscard]] constexpr key_equal key_eq() const noexcept { return key_eq_; }
-  [[nodiscard]] constexpr allocator_type get_allocator() const noexcept { return values_.get_allocator(); }
-
-private:
   template <std::ranges::input_range Range>
   [[nodiscard]] static constexpr values_type make_values_(Range &&values, allocator_type const &alloc)
   {

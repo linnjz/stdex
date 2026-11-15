@@ -296,6 +296,11 @@ void test_key_types()
       CHECK(index < table.size());
       CHECK(taken[index] == 0);
       taken[index] = 1;
+
+      std::string_view const view = key;
+      CHECK(table.hash_value(view) == table.hash_value(key));
+      CHECK(table.index(view) == index);
+      CHECK(table.index_unchecked(view) == index);
     }
   }
 

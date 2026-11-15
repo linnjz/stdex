@@ -1032,6 +1032,26 @@ private:
     hash_seed_       = 0;
   }
 
+  template <class K>
+  static constexpr bool hash_value_uses_seeded_call_v =
+      std::same_as<std::remove_cv_t<hasher>, hash<key_type>> &&
+      std::invocable<hasher const &, K const &, std::uint64_t>;
+
+  template <class K>
+  [[nodiscard]] constexpr std::uint64_t hash_value_impl_(K const &key) const
+      noexcept(hash_value_uses_seeded_call_v<K>
+                   ? std::is_nothrow_invocable_v<hasher const &, K const &, std::uint64_t>
+                   : std::is_nothrow_invocable_v<hasher const &, K const &>)
+  {
+    // hash<T> intentionally omits its final avalanche multiply; the default
+    // PtrHash path restores it here. Custom hashers keep their own semantics.
+    if constexpr (hash_value_uses_seeded_call_v<K>) {
+      return static_cast<std::uint64_t>(hasher_(key, hash_seed_)) * kPhiMixMultConstant;
+    } else {
+      return static_cast<std::uint64_t>(hasher_(key)) ^ hash_seed_;
+    }
+  }
+
   template <std::forward_iterator Iterator, std::sentinel_for<Iterator> Sentinel>
   [[nodiscard]] constexpr bool try_build_impl_(Iterator first, Sentinel last)
   {
@@ -1130,15 +1150,27 @@ public:
     return index_from_hash(hash_value(key));
   }
 
+  template <class K>
+  requires (!std::same_as<std::remove_cvref_t<K>, key_type>) && ptr_hash_detail::key_hasher<hasher, K>
+  [[nodiscard]] constexpr size_type index_unchecked(K const &key) const
+  {
+    assert(!empty() && "stdex::ptr_hash::index_unchecked called on an empty table");
+    return index_from_hash(hash_value(key));
+  }
+
   [[nodiscard]] constexpr std::uint64_t hash_value(key_type const &key) const noexcept(std::is_nothrow_invocable_v<hasher const &, key_type const &>)
   {
-    // hash<T> intentionally omits its final avalanche multiply; the default
-    // PtrHash path restores it here. Custom hashers keep their own semantics.
-    if constexpr (std::same_as<std::remove_cv_t<hasher>, hash<key_type>>) {
-      return static_cast<std::uint64_t>(hasher_(key, hash_seed_)) * kPhiMixMultConstant;
-    } else {
-      return static_cast<std::uint64_t>(hasher_(key)) ^ hash_seed_;
-    }
+    return hash_value_impl_(key);
+  }
+
+  template <class K>
+  requires (!std::same_as<std::remove_cvref_t<K>, key_type>) && ptr_hash_detail::key_hasher<hasher, K>
+  [[nodiscard]] constexpr std::uint64_t hash_value(K const &key) const
+      noexcept(hash_value_uses_seeded_call_v<K>
+                   ? std::is_nothrow_invocable_v<hasher const &, K const &, std::uint64_t>
+                   : std::is_nothrow_invocable_v<hasher const &, K const &>)
+  {
+    return hash_value_impl_(key);
   }
 
   [[nodiscard]] constexpr size_type index_from_hash(std::uint64_t const hash) const noexcept
@@ -1154,6 +1186,14 @@ public:
   }
 
   [[nodiscard]] constexpr size_type index(key_type const &key) const
+  {
+    if (empty()) [[unlikely]] return npos;
+    return index_unchecked(key);
+  }
+
+  template <class K>
+  requires (!std::same_as<std::remove_cvref_t<K>, key_type>) && ptr_hash_detail::key_hasher<hasher, K>
+  [[nodiscard]] constexpr size_type index(K const &key) const
   {
     if (empty()) [[unlikely]] return npos;
     return index_unchecked(key);

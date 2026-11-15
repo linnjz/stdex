@@ -357,26 +357,53 @@ struct hash<T>
 template <class CharT, class Allocator>
 struct hash<std::basic_string<CharT, std::char_traits<CharT>, Allocator>>
 {
-  using argument_type = std::basic_string<CharT, std::char_traits<CharT>, Allocator>;
-  using result_type   = std::size_t;
+  using argument_type  = std::basic_string<CharT, std::char_traits<CharT>, Allocator>;
+  using result_type    = std::size_t;
+  using is_transparent = void;
 
   template <hash_mode Mode = hash_standard_t>
   [[nodiscard]] constexpr std::size_t operator() (argument_type const &str, std::uint64_t seed = 0) const noexcept
   {
     return hash_detail::to_size_t(stdex::hash_range<argument_type, Mode>(str, seed));
   }
+
+  template <hash_mode Mode = hash_standard_t>
+  [[nodiscard]] constexpr std::size_t operator() (std::basic_string_view<CharT, std::char_traits<CharT>> str, std::uint64_t seed = 0) const noexcept
+  {
+    return hash_detail::to_size_t(stdex::hash_range<std::basic_string_view<CharT, std::char_traits<CharT>>, Mode>(str, seed));
+  }
+
+  template <hash_mode Mode = hash_standard_t>
+  [[nodiscard]] constexpr std::size_t operator() (CharT const *str, std::uint64_t seed = 0) const noexcept
+  {
+    return hash_detail::to_size_t(stdex::hash_range<std::basic_string_view<CharT, std::char_traits<CharT>>, Mode>(
+        std::basic_string_view<CharT, std::char_traits<CharT>> { str }, seed));
+  }
 };
 
 template <class CharT>
 struct hash<std::basic_string_view<CharT, std::char_traits<CharT>>>
 {
-  using argument_type = std::basic_string_view<CharT, std::char_traits<CharT>>;
-  using result_type   = std::size_t;
+  using argument_type  = std::basic_string_view<CharT, std::char_traits<CharT>>;
+  using result_type    = std::size_t;
+  using is_transparent = void;
 
   template <hash_mode Mode = hash_standard_t>
   [[nodiscard]] constexpr std::size_t operator() (argument_type sv, std::uint64_t seed = 0) const noexcept
   {
     return hash_detail::to_size_t(stdex::hash_range<argument_type, Mode>(sv, seed));
+  }
+
+  template <hash_mode Mode = hash_standard_t, class Allocator>
+  [[nodiscard]] constexpr std::size_t operator() (std::basic_string<CharT, std::char_traits<CharT>, Allocator> const &str, std::uint64_t seed = 0) const noexcept
+  {
+    return hash_detail::to_size_t(stdex::hash_range<argument_type, Mode>(argument_type { str.data(), str.size() }, seed));
+  }
+
+  template <hash_mode Mode = hash_standard_t>
+  [[nodiscard]] constexpr std::size_t operator() (CharT const *str, std::uint64_t seed = 0) const noexcept
+  {
+    return hash_detail::to_size_t(stdex::hash_range<argument_type, Mode>(argument_type { str }, seed));
   }
 };
 

@@ -22,6 +22,8 @@
 #include <cstdio>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -88,7 +90,7 @@ void test_set_basic()
 {
   std::printf("\n=== minimal_perfect_hash: set basic ===\n");
   std::vector<std::uint64_t> const keys = make_random_keys(2000, 12345);
-  stdex::minimal_perfect_hash_set<std::uint64_t> set(std::from_range_t{}, keys);
+  stdex::minimal_perfect_hash_set<std::uint64_t> set(keys.begin(), keys.end());
 
   CHECK(set.size() == keys.size());
   for (std::uint64_t key : keys) {
@@ -123,7 +125,7 @@ void test_map_basic()
   for (std::uint64_t key = 0; key < 1500; ++key) {
     values.emplace_back(key * 37 + 11, "value-" + std::to_string(key));
   }
-  stdex::minimal_perfect_hash_map<std::uint64_t, std::string> map(std::from_range_t {}, values);
+  stdex::minimal_perfect_hash_map<std::uint64_t, std::string> map(values.begin(), values.end());
 
   CHECK(map.size() == values.size());
   for (auto const &[key, value] : values) {
@@ -169,12 +171,12 @@ void test_profiles()
   std::vector<std::uint64_t> const keys = make_random_keys(3000, 777);
   {
     stdex::minimal_perfect_hash_set<std::uint64_t, stdex::hash<std::uint64_t>, std::equal_to<std::uint64_t>, std::allocator<std::uint64_t>, stdex::ptr_hash_option_balanced>
-        set(std::from_range_t {}, keys);
+        set(keys.begin(), keys.end());
     for (std::uint64_t key : keys) CHECK(set.contains(key));
   }
   {
     stdex::minimal_perfect_hash_set<std::uint64_t, stdex::hash<std::uint64_t>, std::equal_to<std::uint64_t>, std::allocator<std::uint64_t>, stdex::ptr_hash_option_compact>
-        set(std::from_range_t {}, keys);
+        set(keys.begin(), keys.end());
     for (std::uint64_t key : keys) CHECK(set.contains(key));
   }
 }
@@ -184,7 +186,7 @@ void test_string_keys()
   std::printf("\n=== minimal_perfect_hash: string keys ===\n");
   std::vector<std::string> keys;
   for (int i = 0; i < 1000; ++i) keys.push_back("key-" + std::to_string(i));
-  stdex::minimal_perfect_hash_set<std::string> set(std::from_range_t {}, keys);
+  stdex::minimal_perfect_hash_set<std::string> set(keys.begin(), keys.end());
   for (auto const &key : keys) CHECK(set.contains(key));
   CHECK(!set.contains("missing"));
 }
@@ -210,7 +212,7 @@ void test_copy_move()
 {
   std::printf("\n=== minimal_perfect_hash: copy and move ===\n");
   std::vector<std::uint64_t> const keys = make_random_keys(300, 31415);
-  stdex::minimal_perfect_hash_set<std::uint64_t> original(std::from_range_t {}, keys);
+  stdex::minimal_perfect_hash_set<std::uint64_t> original(keys.begin(), keys.end());
   auto copy  = original;
   auto moved = std::move(original);
   for (std::uint64_t key : keys) {
@@ -219,12 +221,202 @@ void test_copy_move()
   }
 }
 
+void test_interface()
+{
+  std::printf("\n=== minimal_perfect_hash: interface ===\n");
+  std::vector<std::uint64_t> const keys = make_random_keys(128, 2026);
+  stdex::minimal_perfect_hash_set<std::uint64_t> set(keys.begin(), keys.end());
+
+  using set_type = decltype(set);
+  static_assert(std::is_same_v<set_type::reference, set_type::const_reference>);
+  static_assert(std::is_same_v<set_type::pointer, set_type::const_pointer>);
+  static_assert(std::is_same_v<set_type::iterator, set_type::const_iterator>);
+
+  CHECK(set.max_size() >= set.size());
+  CHECK(set.bucket_count() > 0);
+  CHECK(set.max_bucket_count() == set.bucket_count());
+
+  auto const found = set.equal_range(keys.front());
+  CHECK(found.first != set.end());
+  CHECK(found.second == found.first + 1);
+  CHECK(*found.first == keys.front());
+  auto const missing = set.equal_range(999999999);
+  CHECK(missing.first == set.end());
+  CHECK(missing.second == set.end());
+
+  stdex::minimal_perfect_hash_map<std::uint64_t, std::string> map { { 1, "one" }, { 2, "two" } };
+  auto const [first, last] = map.equal_range(2);
+  CHECK(first != map.end());
+  CHECK(first->second == "two");
+  CHECK(last == first + 1);
+  CHECK(map.equal_range(3).first == map.end());
+  CHECK(map.max_size() >= map.size());
+  CHECK(map.bucket_count() > 0);
+  CHECK(map.max_bucket_count() == map.bucket_count());
+}
+
+void test_ctad()
+{
+  std::printf("\n=== minimal_perfect_hash: CTAD ===\n");
+  using MapAlloc = std::allocator<std::pair<int, int>>;
+  using SetAlloc = std::allocator<int>;
+  MapAlloc map_alloc;
+  SetAlloc set_alloc;
+  std::hash<int> hasher;
+  std::vector<std::pair<int, int>> values { { 1, 10 }, { 2, 20 } };
+  std::vector<int> keys { 1, 2, 3 };
+  std::initializer_list<std::pair<int, int>> ilist = { { 1, 10 }, { 2, 20 } };
+  std::initializer_list<int> key_ilist            = { 1, 2, 3 };
+
+  stdex::minimal_perfect_hash_map m1(values.begin(), values.end());
+  static_assert(std::is_same_v<typename decltype(m1)::key_type, int>);
+  static_assert(std::is_same_v<typename decltype(m1)::mapped_type, int>);
+  CHECK(m1.size() == values.size());
+
+  stdex::minimal_perfect_hash_map m2(values.begin(), values.end(), map_alloc);
+  static_assert(std::is_same_v<typename decltype(m2)::allocator_type, MapAlloc>);
+  CHECK(m2.size() == values.size());
+
+  stdex::minimal_perfect_hash_map m3(values.begin(), values.end(), hasher, map_alloc);
+  static_assert(std::is_same_v<typename decltype(m3)::hasher, std::hash<int>>);
+  CHECK(m3.size() == values.size());
+
+  stdex::minimal_perfect_hash_map m4 { std::pair { 1, 1 }, std::pair { 2, 2 } };
+  static_assert(std::is_same_v<typename decltype(m4)::key_type, int>);
+  static_assert(std::is_same_v<typename decltype(m4)::mapped_type, int>);
+  CHECK(m4.size() == 2);
+
+  stdex::minimal_perfect_hash_map m5(ilist, map_alloc);
+  static_assert(std::is_same_v<typename decltype(m5)::allocator_type, MapAlloc>);
+  CHECK(m5.size() == ilist.size());
+
+  stdex::minimal_perfect_hash_map m6(ilist, hasher, map_alloc);
+  static_assert(std::is_same_v<typename decltype(m6)::hasher, std::hash<int>>);
+  CHECK(m6.size() == ilist.size());
+
+#ifdef __cpp_lib_containers_ranges
+  stdex::minimal_perfect_hash_map m7(std::from_range, values);
+  static_assert(std::is_same_v<typename decltype(m7)::key_type, int>);
+  CHECK(m7.size() == values.size());
+
+  stdex::minimal_perfect_hash_map m8(std::from_range, values, map_alloc);
+  static_assert(std::is_same_v<typename decltype(m8)::allocator_type, MapAlloc>);
+  CHECK(m8.size() == values.size());
+
+  stdex::minimal_perfect_hash_map m9(std::from_range, values, hasher, map_alloc);
+  static_assert(std::is_same_v<typename decltype(m9)::hasher, std::hash<int>>);
+  CHECK(m9.size() == values.size());
+#endif
+
+  stdex::minimal_perfect_hash_set s1(keys.begin(), keys.end());
+  static_assert(std::is_same_v<typename decltype(s1)::key_type, int>);
+  CHECK(s1.size() == keys.size());
+
+  stdex::minimal_perfect_hash_set s2(keys.begin(), keys.end(), set_alloc);
+  static_assert(std::is_same_v<typename decltype(s2)::allocator_type, SetAlloc>);
+  CHECK(s2.size() == keys.size());
+
+  stdex::minimal_perfect_hash_set s3(keys.begin(), keys.end(), hasher, set_alloc);
+  static_assert(std::is_same_v<typename decltype(s3)::hasher, std::hash<int>>);
+  CHECK(s3.size() == keys.size());
+
+  stdex::minimal_perfect_hash_set s4 { 1, 2, 3 };
+  static_assert(std::is_same_v<typename decltype(s4)::key_type, int>);
+  CHECK(s4.size() == 3);
+
+  stdex::minimal_perfect_hash_set s5(key_ilist, set_alloc);
+  static_assert(std::is_same_v<typename decltype(s5)::allocator_type, SetAlloc>);
+  CHECK(s5.size() == key_ilist.size());
+
+  stdex::minimal_perfect_hash_set s6(key_ilist, hasher, set_alloc);
+  static_assert(std::is_same_v<typename decltype(s6)::hasher, std::hash<int>>);
+  CHECK(s6.size() == key_ilist.size());
+
+#ifdef __cpp_lib_containers_ranges
+  stdex::minimal_perfect_hash_set s7(std::from_range, keys);
+  static_assert(std::is_same_v<typename decltype(s7)::key_type, int>);
+  CHECK(s7.size() == keys.size());
+
+  stdex::minimal_perfect_hash_set s8(std::from_range, keys, set_alloc);
+  static_assert(std::is_same_v<typename decltype(s8)::allocator_type, SetAlloc>);
+  CHECK(s8.size() == keys.size());
+
+  stdex::minimal_perfect_hash_set s9(std::from_range, keys, hasher, set_alloc);
+  static_assert(std::is_same_v<typename decltype(s9)::hasher, std::hash<int>>);
+  CHECK(s9.size() == keys.size());
+#endif
+}
+
+void test_heterogeneous_lookup()
+{
+  std::printf("\n=== minimal_perfect_hash: heterogeneous lookup ===\n");
+
+  std::vector<std::string> keys;
+  std::vector<std::pair<std::string, int>> values;
+  for (int i = 0; i < 1000; ++i) {
+    keys.push_back("key-" + std::to_string(i));
+    values.emplace_back(keys.back(), i);
+  }
+
+  using map_type = stdex::minimal_perfect_hash_map<std::string, int, stdex::hash<std::string>, std::equal_to<>>;
+  map_type map(values.begin(), values.end());
+
+  std::string_view const hit = values[42].first;
+  auto const found           = map.find(hit);
+  CHECK(found != map.end());
+  CHECK(found->second == 42);
+  CHECK(map.contains(std::string_view { "key-77" }));
+  CHECK(map.count(std::string_view { "key-77" }) == 1);
+  CHECK(!map.contains(std::string_view { "missing" }));
+  CHECK(map.at(std::string_view { "key-9" }) == 9);
+  CHECK(map.at_unchecked(std::string_view { "key-9" }) == 9);
+
+  auto const [first, last] = map.equal_range(std::string_view { "key-123" });
+  CHECK(first != map.end());
+  CHECK(first->second == 123);
+  CHECK(last == first + 1);
+
+  CHECK(map.contains("key-5"));
+  CHECK(map.at("key-5") == 5);
+  CHECK(map.find("key-5") != map.end());
+
+  using set_type = stdex::minimal_perfect_hash_set<std::string, stdex::hash<std::string>, std::equal_to<>>;
+  set_type set(keys.begin(), keys.end());
+  CHECK(set.contains(std::string_view { "key-7" }));
+  CHECK(set.count("key-7") == 1);
+  CHECK(set.find(std::string_view { "key-7" }) != set.end());
+  CHECK(set.at(std::string_view { "key-7" }) == "key-7");
+  CHECK(set.equal_range(std::string_view { "key-7" }).first != set.end());
+
+  using view_set_type = stdex::minimal_perfect_hash_set<std::string_view, stdex::hash<std::string_view>, std::equal_to<>>;
+  std::vector<std::string_view> views;
+  for (std::string const &key : keys) views.emplace_back(key);
+  view_set_type view_set(views.begin(), views.end());
+  CHECK(view_set.contains(keys.front()));
+  CHECK(view_set.find(keys.back()) != view_set.end());
+
+  struct transparent_string_hash
+  {
+    using is_transparent = void;
+
+    std::size_t operator() (std::string const &value) const noexcept { return stdex::hash<std::string> {}(value); }
+    std::size_t operator() (std::string_view const value) const noexcept { return stdex::hash<std::string_view> {}(value); }
+    std::size_t operator() (char const *const value) const noexcept { return stdex::hash<std::string_view> {}(value); }
+  };
+
+  using custom_map_type = stdex::minimal_perfect_hash_map<std::string, int, transparent_string_hash, std::equal_to<>>;
+  custom_map_type custom_map(values.begin(), values.end());
+  CHECK(custom_map.find(std::string_view { "key-321" }) != custom_map.end());
+  CHECK(custom_map.contains("key-321"));
+  CHECK(custom_map.at(std::string_view { "key-321" }) == 321);
+}
+
 void test_stress_sizes()
 {
   std::printf("\n=== minimal_perfect_hash: stress sizes ===\n");
   for (std::size_t count = 0; count <= 500; ++count) {
     std::vector<std::uint64_t> const keys = make_random_keys(count, count * 131u + 7u);
-    stdex::minimal_perfect_hash_set<std::uint64_t> set(std::from_range_t {}, keys);
+    stdex::minimal_perfect_hash_set<std::uint64_t> set(keys.begin(), keys.end());
     CHECK(set.size() == count);
     for (std::uint64_t key : keys) CHECK(set.contains(key));
   }
@@ -240,6 +432,9 @@ int main()
   test_string_keys();
   test_initializer_list();
   test_copy_move();
+  test_interface();
+  test_ctad();
+  test_heterogeneous_lookup();
   test_stress_sizes();
 
   std::printf("\n=== minimal_perfect_hash summary: %d passed, %d failed ===\n", g_pass, g_fail);

@@ -29,6 +29,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 #include "hash.hpp"
@@ -186,6 +187,14 @@ void test_strings_and_ranges()
   CHECK(stdex::hash<std::string> {}(text) == stdex::hash_detail::to_size_t(stdex::hash_range<std::string>(text)));
   CHECK(stdex::hash<std::string_view> {}(view) == stdex::hash_detail::to_size_t(stdex::hash_range<std::string_view>(view)));
   CHECK(stdex::hash<std::string> {}(text, 17) == stdex::hash_detail::to_size_t(stdex::hash_range<std::string>(text, 17)));
+
+  static_assert(std::is_same_v<typename stdex::hash<std::string>::is_transparent, void>);
+  static_assert(std::is_same_v<typename stdex::hash<std::string_view>::is_transparent, void>);
+  CHECK(stdex::hash<std::string> {}(view) == stdex::hash<std::string> {}(text));
+  CHECK(stdex::hash<std::string> {}(view, 17) == stdex::hash<std::string> {}(text, 17));
+  CHECK(stdex::hash<std::string> {}(text.c_str()) == stdex::hash<std::string> {}(text));
+  CHECK(stdex::hash<std::string_view> {}(text) == stdex::hash<std::string_view> {}(view));
+  CHECK(stdex::hash<std::string_view> {}(text.c_str()) == stdex::hash<std::string_view> {}(view));
 
   std::array<std::byte, 200> bytes {};
   for (std::size_t i = 0; i < bytes.size(); ++i) bytes[i] = static_cast<std::byte>(i * 37U + 11U);
