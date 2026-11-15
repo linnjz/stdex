@@ -20,6 +20,9 @@
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#if __cplusplus >= 202603L
+#include <optional>
+#endif
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -411,6 +414,35 @@ void test_heterogeneous_lookup()
   CHECK(custom_map.at(std::string_view { "key-321" }) == 321);
 }
 
+#if __cplusplus >= 202603L
+void test_lookup()
+{
+  std::printf("\n=== minimal_perfect_hash: lookup ===\n");
+
+  std::vector<std::pair<std::string, int>> values;
+  for (int i = 0; i < 256; ++i) values.emplace_back("key-" + std::to_string(i), i);
+
+  using map_type = stdex::minimal_perfect_hash_map<std::string, int, stdex::hash<std::string>, std::equal_to<>>;
+  map_type map(values.begin(), values.end());
+
+  auto hit = map.lookup(std::string_view { "key-42" });
+  static_assert(std::is_same_v<decltype(hit), std::optional<const int &>>);
+  CHECK(hit.has_value());
+  CHECK(hit.value() == 42);
+  CHECK(*hit == 42);
+  CHECK(&*hit == &map.at(std::string_view { "key-42" }));
+
+  auto miss = map.lookup("missing");
+  CHECK(!miss);
+  CHECK(miss.value_or(-1) == -1);
+
+  auto const &const_map = map;
+  auto const_hit        = const_map.lookup("key-7");
+  CHECK(const_hit.has_value());
+  CHECK(*const_hit == 7);
+}
+#endif
+
 void test_stress_sizes()
 {
   std::printf("\n=== minimal_perfect_hash: stress sizes ===\n");
@@ -435,6 +467,9 @@ int main()
   test_interface();
   test_ctad();
   test_heterogeneous_lookup();
+#if __cplusplus >= 202603L
+  test_lookup();
+#endif
   test_stress_sizes();
 
   std::printf("\n=== minimal_perfect_hash summary: %d passed, %d failed ===\n", g_pass, g_fail);

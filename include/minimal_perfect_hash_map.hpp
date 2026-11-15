@@ -19,6 +19,9 @@
 #include <functional> // std::equal_to
 #include <iterator>   // std::input_iterator
 #include <memory>     // std::allocator
+#if __cplusplus >= 202603L
+#include <optional>   // std::optional
+#endif
 #include <utility>    // std::pair
 #include <version>    // __cpp_lib_containers_ranges
 
@@ -31,7 +34,9 @@ namespace stdex
 /// Immutable hash map with O(1) lookup and no insertion or erase operations.
 ///
 /// The key set is fixed at construction. Keys must be unique; construction
-/// throws if the minimal-perfect hash index cannot be built from them.
+/// throws if the minimal-perfect hash index cannot be built from them. Because
+/// the table is immutable, `lookup` exposes only const references to mapped
+/// values.
 template <class KeyType, class MappedType, class Hasher = stdex::hash<KeyType>, class KeyEqual = std::equal_to<KeyType>, class Allocator = std::allocator<std::pair<KeyType, MappedType>>, class Options = ptr_hash_option_default>
 class minimal_perfect_hash_map
     : public minimal_perfect_hash_detail::hash_table<minimal_perfect_hash_detail::mphmap_traits<KeyType, MappedType>, Hasher, KeyEqual, Allocator, Options>
@@ -58,6 +63,25 @@ public:
   using base::base;
 
   constexpr minimal_perfect_hash_map() = default;
+
+#if __cplusplus >= 202603L
+  // ---------- lookup ----------
+  [[nodiscard]] constexpr std::optional<const mapped_type &> lookup(key_type const &key) const
+  {
+    auto const it = this->find(key);
+    if (it == this->end()) return std::nullopt;
+    return it->second;
+  }
+
+  template <class K>
+  requires minimal_perfect_hash_detail::heterogeneous_key<key_type, hasher, key_equal, iterator, const_iterator, K>
+  [[nodiscard]] constexpr std::optional<const mapped_type &> lookup(K const &key) const
+  {
+    auto const it = this->find(key);
+    if (it == this->end()) return std::nullopt;
+    return it->second;
+  }
+#endif
 };
 
 // ---------- CTAD iterator-range ----------
