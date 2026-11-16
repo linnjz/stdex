@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      cxx_version:
+        description: "C++ standard (e.g. 23 or 26)"
+        required: false
+        default: "23"
+      defines:
+        description: "Preprocessor macros, ';'-separated NAME or NAME=VAL"
+        required: false
+        default: ""
+      relaxed:
+        description: "Linux gcc/clang: add -w to suppress warnings (only if pre-existing warnings reappear; strict is green)"
+        required: false
+        default: "false"
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / ${{ matrix.compiler }} / C++${{ github.event.inputs.cxx_version || '23' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, compiler: msvc }
+          - { os: windows-latest, compiler: clang-cl }
+          - { os: ubuntu-latest,  compiler: gcc }
+          - { os: ubuntu-latest,  compiler: clang }
+    env:
+      CXX_STANDARD: ${{ github.event.inputs.cxx_version || '23' }}
+      DEFINES: ${{ github.event.inputs.defines || '' }}
+      RELAXED: ${{ github.event.inputs.relaxed || 'false' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Ensure Ninja (Windows)
+        if: runner.os == 'Windows'
+        uses: seanmiddleditch/gha-setup-ninja@v5
+
+      - name: Ensure Ninja (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Setup MSVC developer environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Run all tests (Windows: msvc / clang-cl)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./ci/run-tests.ps1 -Compiler ${{ matrix.compiler }} -CxxStandard $env:CXX_STANDARD -Defines $env:DEFINES
+
+      - name: Run all tests (Linux: gcc / clang)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          extra=""
+          if [ "${RELAXED}" = "true" ]; then extra="-r"; fi
+          bash ./ci/run-tests.sh -c ${{ matrix.compiler }} -s "$CXX_STANDARD" -d "$DEFINES" $extra
