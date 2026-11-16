@@ -182,10 +182,10 @@ struct counting_allocator
     return std::allocator<T> {}.allocate(count);
   }
 
-  constexpr void deallocate(T *pointer, std::size_t count)
+  constexpr void deallocate(T *ptr, std::size_t count)
   {
     ++allocation_stats::deallocations;
-    std::allocator<T> {}.deallocate(pointer, count);
+    std::allocator<T> {}.deallocate(ptr, count);
   }
 
   template <class U>
@@ -418,7 +418,7 @@ void test_initializer_list_and_ranges()
     stdex::ptr_hash<std::uint64_t, stdex::hash<std::uint64_t>, stdex::ptr_hash_heap_option_balanced<std::allocator<std::uint64_t>>> table { 10, 20, 30, 40, 50, 60, 70 };
     CHECK(table.size() == 7);
     std::vector<unsigned char> taken(table.size(), 0);
-    for (std::uint64_t key : { 10, 20, 30, 40, 50, 60, 70 }) {
+    for (std::uint64_t key : { 10u, 20u, 30u, 40u, 50u, 60u, 70u }) {
       std::size_t const index = table.index(key);
       CHECK(index < table.size());
       CHECK(taken[index] == 0);

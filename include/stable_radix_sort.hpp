@@ -832,7 +832,7 @@ constexpr void sort_bool(RandIter first, RandIter last)
   for (auto curr = first; curr < last; ++curr) {
     bool const v    = static_cast<bool>(*curr);
     *curr           = !Descending;
-    *(first + cnt)  = v;
+    *(first + static_cast<std::ptrdiff_t>(cnt)) = v;
     cnt += static_cast<std::size_t>(Descending ? v : !v);
   }
 }

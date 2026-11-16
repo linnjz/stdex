@@ -672,7 +672,7 @@ static void test_float_nan_positions()
     0x7F800001U, // signalling NaN pattern
   };
   std::vector<float> v;
-  for (int i = 0; i < 1000; ++i) v.push_back(std::bit_cast<float>(patterns[i % std::size(patterns)]));
+  for (std::size_t i = 0; i < 1000; ++i) v.push_back(std::bit_cast<float>(patterns[i % std::size(patterns)]));
 
   constexpr auto with_nans = [](stdex::radix_sort_options base, stdex::radix_nans_pos_handling pos) {
     base.nans_assumption   = stdex::radix_nans_assumption::existence;

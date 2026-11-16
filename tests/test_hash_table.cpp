@@ -1625,10 +1625,10 @@ constexpr bool constexpr_hash_mul()
   auto const product = stdex::umul128(0x0123'4567'89AB'CDEFull, 0xFEDC'BA98'7654'3210ull);
 
   // 128-bit scalars hash both words, and the signed path bit-copies to unsigned.
-  auto const q_lo  = stdex::hash<stdex::uint128_t> {}(stdex::uint128_t { 1, 0 });
+  [[maybe_unused]] auto const q_lo  = stdex::hash<stdex::uint128_t> {}(stdex::uint128_t { 1, 0 });
   auto const q_hi  = stdex::hash<stdex::uint128_t> {}(stdex::uint128_t { 0, 1 });
-  auto const q_neg = stdex::hash<stdex::int128_t> {}(stdex::int128_t::from_i64(-1));
-  auto const q_max = stdex::hash<stdex::uint128_t> {}(~stdex::uint128_t {});
+  [[maybe_unused]] auto const q_neg = stdex::hash<stdex::int128_t> {}(stdex::int128_t::from_i64(-1));
+  [[maybe_unused]] auto const q_max = stdex::hash<stdex::uint128_t> {}(~stdex::uint128_t {});
   return standard != micro && standard != nano && micro != nano &&
          product.lo() == 0x2236'D88F'E561'8CF0ULL && product.hi() == 0x0121'FA00'AD77'D742ULL &&
          stdex::hash<stdex::uint128_t> {}(stdex::uint128_t { 0, 1 }, 1) != q_hi;
@@ -3088,7 +3088,7 @@ struct move_only_throwing
   static inline int moves = 0;
   static inline int throw_at = 0;
 
-  explicit move_only_throwing(int value) : value { value } { ++live; }
+  explicit move_only_throwing(int v) : value { v } { ++live; }
   move_only_throwing(move_only_throwing const &) = delete;
   move_only_throwing &operator= (move_only_throwing const &) = delete;
 

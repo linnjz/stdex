@@ -379,7 +379,11 @@ struct inline_storage : public Traits
       if (std::is_constant_evaluated()) {
 #  if defined(__clang__)
 #    pragma clang diagnostic push
-#    pragma clang diagnostic ignored "-Wterminate"
+#    ifdef __has_warning
+#      if __has_warning("-Wterminate")
+#        pragma clang diagnostic ignored "-Wterminate"
+#      endif
+#    endif
 #  elif defined(__GNUC__) && !defined(__clang__)
 #    pragma GCC diagnostic push
 #    pragma GCC diagnostic ignored "-Wterminate"
@@ -442,7 +446,11 @@ struct inline_storage : public Traits
       if (std::is_constant_evaluated()) {
 #  if defined(__clang__)
 #    pragma clang diagnostic push
-#    pragma clang diagnostic ignored "-Wterminate"
+#    ifdef __has_warning
+#      if __has_warning("-Wterminate")
+#        pragma clang diagnostic ignored "-Wterminate"
+#      endif
+#    endif
 #  elif defined(__GNUC__) && !defined(__clang__)
 #    pragma GCC diagnostic push
 #    pragma GCC diagnostic ignored "-Wterminate"

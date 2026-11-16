@@ -136,7 +136,7 @@ distribution_result measure_distribution(std::vector<u64> const &keys, Fn fn)
   double const mean = static_cast<double>(keys.size()) / bucket_count;
   double chi_square = 0.0;
   for (std::size_t const count : buckets) {
-    double const delta = count - mean;
+    double const delta = static_cast<double>(count) - mean;
     chi_square += delta * delta / mean;
   }
 
@@ -278,7 +278,7 @@ void test_bit_balance()
   double min_ratio = 1.0;
   double max_ratio = 0.0;
   for (unsigned bit = 0; bit < width; ++bit) {
-    double const ratio = ones[bit] / expected;
+    double const ratio = static_cast<double>(ones[bit]) / expected;
     min_ratio = std::min(min_ratio, ratio);
     max_ratio = std::max(max_ratio, ratio);
   }

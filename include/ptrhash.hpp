@@ -1210,9 +1210,10 @@ private:
     // hash<T> intentionally omits its final avalanche multiply; the default
     // PtrHash path restores it here. Custom hashers keep their own semantics.
     if constexpr (hash_value_uses_seeded_call_v<K>) {
-      return static_cast<std::uint64_t>(hasher_(key, hash_seed_)) * kPhiMixMultConstant;
+      return static_cast<std::uint64_t>(hasher_(static_cast<key_type>(key),
+                                                static_cast<std::uint64_t>(hash_seed_))) * kPhiMixMultConstant;
     } else {
-      return static_cast<std::uint64_t>(hasher_(key)) ^ hash_seed_;
+      return static_cast<std::uint64_t>(hasher_(static_cast<key_type>(key))) ^ hash_seed_;
     }
   }
 
