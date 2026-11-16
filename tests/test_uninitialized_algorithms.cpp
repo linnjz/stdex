@@ -348,6 +348,19 @@ struct fancy_counting_alloc
   }
 };
 
+/// Sentinel deliberately lacking operator-, so sized_sentinel_for is false.
+template <class It>
+struct unsized_sentinel
+{
+  It end;
+
+  friend bool operator==(It it, unsized_sentinel const &s) noexcept { return it == s.end; }
+  friend bool operator==(unsized_sentinel const &s, It it) noexcept { return it == s.end; }
+};
+
+static_assert(std::sentinel_for<unsized_sentinel<int*>, int*>);
+static_assert(!std::sized_sentinel_for<unsized_sentinel<int*>, int*>);
+
 // ------------------------------------------------------------------
 // overload-1 (no allocator): trivial memcpy path
 // ------------------------------------------------------------------
@@ -1655,6 +1668,57 @@ static void test_fill_alloc_fancy_success_noop()
 }
 
 // ------------------------------------------------------------------
+// uninitialized_fill with std::allocator: plain-pointer fast paths
+// ------------------------------------------------------------------
+static void test_fill_alloc_plain_trivial_sized()
+{
+  SECTION("fill/alloc-plain: sized trivial-assign path");
+  alignas(int) unsigned char buf[3 * sizeof(int)];
+  int* dst = reinterpret_cast<int*>(buf);
+  std::allocator<int> al;
+
+  auto r = stdex::uninitialized_fill(dst, dst + 3, 7, al);
+  CHECK((r == dst + 3));
+  CHECK(dst[0] == 7 && dst[1] == 7 && dst[2] == 7);
+  std::destroy(dst, dst + 3);
+
+  alignas(int) unsigned char zbuf[3 * sizeof(int)];
+  int* zdst = reinterpret_cast<int*>(zbuf);
+  auto rz   = stdex::uninitialized_fill(zdst, zdst + 3, 0, al);
+  CHECK((rz == zdst + 3));
+  CHECK(zdst[0] == 0 && zdst[1] == 0 && zdst[2] == 0);
+  std::destroy(zdst, zdst + 3);
+}
+
+static void test_fill_alloc_plain_unsized_sentinel()
+{
+  SECTION("fill/alloc-plain: unsized sentinel");
+  alignas(int) unsigned char buf[3 * sizeof(int)];
+  int* dst = reinterpret_cast<int*>(buf);
+  std::allocator<int> al;
+
+  auto r = stdex::uninitialized_fill(dst, unsized_sentinel<int*> { dst + 3 }, 7, al);
+  CHECK((r == dst + 3));
+  CHECK(dst[0] == 7 && dst[1] == 7 && dst[2] == 7);
+  std::destroy(dst, dst + 3);
+
+  alignas(char) unsigned char cbuf[3];
+  char* cdst = reinterpret_cast<char*>(cbuf);
+  std::allocator<char> cal;
+  auto rc = stdex::uninitialized_fill(cdst, unsized_sentinel<char*> { cdst + 3 }, 'z', cal);
+  CHECK((rc == cdst + 3));
+  CHECK(cdst[0] == 'z' && cdst[2] == 'z');
+  std::destroy(cdst, cdst + 3);
+
+  alignas(int) unsigned char pbuf[3 * sizeof(int)];
+  int* pdst = reinterpret_cast<int*>(pbuf);
+  auto rp   = stdex::uninitialized_fill(pdst, unsized_sentinel<int*> { pdst + 3 }, 9);
+  CHECK((rp == pdst + 3));
+  CHECK(pdst[0] == 9 && pdst[2] == 9);
+  std::destroy(pdst, pdst + 3);
+}
+
+// ------------------------------------------------------------------
 // fill_n (plain + alloc)
 // ------------------------------------------------------------------
 static void test_fill_n_plain()
@@ -2578,6 +2642,9 @@ int main()
   test_fill_alloc_fancy_custom_construct_no_memset();
   test_fill_alloc_fancy_throw_custom_destroy();
   test_fill_alloc_fancy_success_noop();
+
+  test_fill_alloc_plain_trivial_sized();
+  test_fill_alloc_plain_unsized_sentinel();
 
   test_fill_n_plain();
   test_fill_n_alloc();

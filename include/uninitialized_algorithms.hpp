@@ -200,7 +200,7 @@ auto invoke_memcpy(InIt first, InSent last, OutIt dest_first, OutSent dest_last)
     n = static_cast<std::ptrdiff_t>(dest_last - dest_first);
   }
 
-  if (n == 0) [[unlikely]] {
+  if (n <= 0) [[unlikely]] {
     return { first, dest_first };
   }
 
@@ -244,20 +244,16 @@ constexpr bool fill_zero_memset_is_safe<OutIt, T, false> = false;
 template <class OutIt, class T>
 void invoke_memset(OutIt dest_first, T const &val, std::size_t count)
 {
-  if (count == 0) [[unlikely]] return;
   using value_type = std::iter_value_t<OutIt>;
   static_assert(sizeof(value_type) == sizeof(unsigned char));
   value_type dest_val = static_cast<value_type>(val);
-  std::memset(static_cast<void *>(to_address_unwrap(dest_first)),
-              static_cast<unsigned char>(dest_val), count);
+  std::memset(static_cast<void *>(to_address_unwrap(dest_first)), static_cast<unsigned char>(dest_val), count);
 }
 
 template <class OutIt>
 void invoke_zero_memset(OutIt dest_first, std::size_t count)
 {
-  if (count == 0) [[unlikely]] return;
-  std::memset(static_cast<void *>(to_address_unwrap(dest_first)),
-              0, count * sizeof(std::iter_value_t<OutIt>));
+  std::memset(static_cast<void *>(to_address_unwrap(dest_first)), 0, count * sizeof(std::iter_value_t<OutIt>));
 }
 
 template <class OutIt, bool = iterator_is_contiguous<OutIt>>
@@ -396,10 +392,16 @@ public:
   constexpr
 #endif
       void emplace_default() noexcept(
-          noexcept(allocator_traits::construct(alloc_, std::to_address(last_))) &&
+          (has_custom_construct<Allocator, value_type *>
+               ? noexcept(allocator_traits::construct(alloc_, std::to_address(last_)))
+               : std::is_nothrow_default_constructible_v<value_type>) &&
           noexcept(++last_))
   {
-    allocator_traits::construct(alloc_, std::to_address(last_));
+    if constexpr (has_custom_construct<Allocator, value_type *>) {
+      allocator_traits::construct(alloc_, std::to_address(last_));
+    } else {
+      default_construct_in_place(*last_);
+    }
     ++last_;
   }
 
@@ -488,7 +490,7 @@ constexpr auto uninitialized_move_n(InIt first, std::iter_difference_t<InIt> cou
                                     OutIt dest_first, OutSent dest_last)
     -> std::ranges::uninitialized_move_n_result<InIt, OutIt>
 {
-  if (count <= 0) {
+  if (count <= 0) [[unlikely]] {
     return { std::move(first), std::move(dest_first) };
   }
 
@@ -515,7 +517,7 @@ constexpr auto uninitialized_move_n(InIt first, std::iter_difference_t<InIt> cou
                                     OutIt dest_first, OutSent dest_last, Allocator &alloc)
     -> std::ranges::uninitialized_move_n_result<InIt, OutIt>
 {
-  if (count <= 0) {
+  if (count <= 0) [[unlikely]] {
     return { std::move(first), std::move(dest_first) };
   }
 
@@ -609,7 +611,7 @@ constexpr auto uninitialized_copy_n(InIt first, std::iter_difference_t<InIt> cou
                                     OutIt dest_first, OutSent dest_last)
     -> std::ranges::uninitialized_copy_n_result<InIt, OutIt>
 {
-  if (count <= 0) {
+  if (count <= 0) [[unlikely]] {
     return { std::move(first), std::move(dest_first) };
   }
 
@@ -636,7 +638,7 @@ constexpr auto uninitialized_copy_n(InIt first, std::iter_difference_t<InIt> cou
                                     OutIt dest_first, OutSent dest_last, Allocator &alloc)
     -> std::ranges::uninitialized_copy_n_result<InIt, OutIt>
 {
-  if (count <= 0) {
+  if (count <= 0) [[unlikely]] {
     return { std::move(first), std::move(dest_first) };
   }
 
@@ -670,15 +672,21 @@ constexpr OutIt uninitialized_fill(OutIt dest_first, OutSent dest_last, T const 
 
   if constexpr (memset_ok) {
     if (!std::is_constant_evaluated()) {
-      auto const n = static_cast<std::size_t>(dest_last - dest_first);
-      uninitialized_detail::invoke_memset(dest_first, val, n);
-      return dest_first + static_cast<std::iter_difference_t<OutIt>>(n);
+      auto const n = static_cast<std::iter_difference_t<OutIt>>(dest_last - dest_first);
+      if (n <= 0) [[unlikely]] {
+        return dest_first;
+      }
+      uninitialized_detail::invoke_memset(dest_first, val, static_cast<std::size_t>(n));
+      return dest_first + n;
     }
   } else if constexpr (zero_ok) {
     if (!std::is_constant_evaluated() && is_all_bits_zero(val)) {
-      auto const n = static_cast<std::size_t>(dest_last - dest_first);
-      uninitialized_detail::invoke_zero_memset(dest_first, n);
-      return dest_first + static_cast<std::iter_difference_t<OutIt>>(n);
+      auto const n = static_cast<std::iter_difference_t<OutIt>>(dest_last - dest_first);
+      if (n <= 0) [[unlikely]] {
+        return dest_first;
+      }
+      uninitialized_detail::invoke_zero_memset(dest_first, static_cast<std::size_t>(n));
+      return dest_first + n;
     }
   }
 
@@ -700,30 +708,33 @@ constexpr OutIt uninitialized_fill(OutIt dest_first, OutSent dest_last, T const 
   constexpr bool memset_ok = sized && uninitialized_detail::fill_memset_is_safe<OutIt, T> && !use_alloc;
   constexpr bool zero_ok   = sized && uninitialized_detail::fill_zero_memset_is_safe<OutIt, T> && !use_alloc;
 
-  if constexpr (memset_ok) {
-    if (!std::is_constant_evaluated()) {
-      auto const n = static_cast<std::size_t>(dest_last - dest_first);
-      uninitialized_detail::invoke_memset(dest_first, val, n);
-      return dest_first + static_cast<std::iter_difference_t<OutIt>>(n);
+  if constexpr (sized) {
+    auto const n = static_cast<std::iter_difference_t<OutIt>>(dest_last - dest_first);
+    if (n <= 0) [[unlikely]] {
+      return dest_first;
     }
-  } else if constexpr (zero_ok) {
-    if (!std::is_constant_evaluated() && is_all_bits_zero(val)) {
-      auto const n = static_cast<std::size_t>(dest_last - dest_first);
-      uninitialized_detail::invoke_zero_memset(dest_first, n);
-      return dest_first + static_cast<std::iter_difference_t<OutIt>>(n);
-    }
-  }
 
-  constexpr bool trivial_assign_ok = sized && !use_alloc &&
-                                     std::is_trivially_copyable_v<std::iter_value_t<OutIt>>;
-  if constexpr (trivial_assign_ok) {
-    if (!std::is_constant_evaluated()) {
-      using difference_type = std::iter_difference_t<OutIt>;
-      auto const n          = static_cast<difference_type>(dest_last - dest_first);
-      for (difference_type i = 0; i < n; ++i) {
-        dest_first[i] = static_cast<std::iter_value_t<OutIt>>(val);
+    if constexpr (memset_ok) {
+      if (!std::is_constant_evaluated()) {
+        uninitialized_detail::invoke_memset(dest_first, val, static_cast<std::size_t>(n));
+        return dest_first + n;
       }
-      return dest_first + n;
+    } else if constexpr (zero_ok) {
+      if (!std::is_constant_evaluated() && is_all_bits_zero(val)) {
+        uninitialized_detail::invoke_zero_memset(dest_first, static_cast<std::size_t>(n));
+        return dest_first + n;
+      }
+    }
+
+    constexpr bool trivial_assign_ok = !use_alloc &&
+                                       std::is_trivially_copyable_v<std::iter_value_t<OutIt>>;
+    if constexpr (trivial_assign_ok) {
+      if (!std::is_constant_evaluated()) {
+        for (std::iter_difference_t<OutIt> i = 0; i < n; ++i) {
+          dest_first[i] = static_cast<std::iter_value_t<OutIt>>(val);
+        }
+        return dest_first + n;
+      }
     }
   }
 
@@ -738,7 +749,7 @@ template <std::forward_iterator OutIt, class T>
 requires std::constructible_from<std::iter_value_t<OutIt>, T const &>
 constexpr OutIt uninitialized_fill_n(OutIt dest_first, std::iter_difference_t<OutIt> count, T const &val)
 {
-  if (count <= 0) {
+  if (count <= 0) [[unlikely]] {
     return dest_first;
   }
 
@@ -770,7 +781,7 @@ requires std::constructible_from<std::iter_value_t<OutIt>, T const &> &&
 constexpr OutIt uninitialized_fill_n(OutIt dest_first, std::iter_difference_t<OutIt> count,
                                       T const &val, Allocator &alloc)
 {
-  if (count <= 0) {
+  if (count <= 0) [[unlikely]] {
     return dest_first;
   }
 
@@ -851,7 +862,7 @@ template <std::forward_iterator OutIt>
 requires std::default_initializable<std::iter_value_t<OutIt>>
 constexpr OutIt uninitialized_default_construct_n(OutIt dest_first, std::iter_difference_t<OutIt> count)
 {
-  if (count <= 0) {
+  if (count <= 0) [[unlikely]] {
     return dest_first;
   }
 
@@ -874,7 +885,7 @@ requires std::default_initializable<std::iter_value_t<OutIt>> &&
 constexpr OutIt uninitialized_default_construct_n(OutIt dest_first, std::iter_difference_t<OutIt> count,
                                                   Allocator &alloc)
 {
-  if (count <= 0) {
+  if (count <= 0) [[unlikely]] {
     return dest_first;
   }
 
@@ -903,9 +914,12 @@ constexpr OutIt uninitialized_value_construct(OutIt dest_first, OutSent dest_las
 
   if constexpr (memset_ok) {
     if (!std::is_constant_evaluated()) {
-      auto const n = static_cast<std::size_t>(dest_last - dest_first);
-      uninitialized_detail::invoke_zero_memset(dest_first, n);
-      return dest_first + static_cast<std::iter_difference_t<OutIt>>(n);
+      auto const n = static_cast<std::iter_difference_t<OutIt>>(dest_last - dest_first);
+      if (n <= 0) [[unlikely]] {
+        return dest_first;
+      }
+      uninitialized_detail::invoke_zero_memset(dest_first, static_cast<std::size_t>(n));
+      return dest_first + n;
     }
   }
 
@@ -928,9 +942,12 @@ constexpr OutIt uninitialized_value_construct(OutIt dest_first, OutSent dest_las
 
   if constexpr (memset_ok) {
     if (!std::is_constant_evaluated()) {
-      auto const n = static_cast<std::size_t>(dest_last - dest_first);
-      uninitialized_detail::invoke_zero_memset(dest_first, n);
-      return dest_first + static_cast<std::iter_difference_t<OutIt>>(n);
+      auto const n = static_cast<std::iter_difference_t<OutIt>>(dest_last - dest_first);
+      if (n <= 0) [[unlikely]] {
+        return dest_first;
+      }
+      uninitialized_detail::invoke_zero_memset(dest_first, static_cast<std::size_t>(n));
+      return dest_first + n;
     }
   }
 
@@ -945,7 +962,7 @@ template <std::forward_iterator OutIt>
 requires std::default_initializable<std::iter_value_t<OutIt>>
 constexpr OutIt uninitialized_value_construct_n(OutIt dest_first, std::iter_difference_t<OutIt> count)
 {
-  if (count <= 0) {
+  if (count <= 0) [[unlikely]] {
     return dest_first;
   }
 
@@ -970,7 +987,7 @@ requires std::default_initializable<std::iter_value_t<OutIt>> &&
          std::same_as<typename std::allocator_traits<Allocator>::value_type, std::iter_value_t<OutIt>>
 constexpr OutIt uninitialized_value_construct_n(OutIt dest_first, std::iter_difference_t<OutIt> count, Allocator &alloc)
 {
-  if (count <= 0) {
+  if (count <= 0) [[unlikely]] {
     return dest_first;
   }
 
