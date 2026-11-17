@@ -180,7 +180,7 @@ struct heap_storage
   using remap_value_type   = std::uint32_t;
   using slot_index_type    = std::uint32_t;
   using bucket_index_type  = std::uint32_t;
-  using bucket_length_type = std::uint8_t; // Strongly linked with `pilot_value_type`
+  using bucket_length_type = std::uint32_t; // A bucket may hold up to key_count keys, so it cannot be uint8_t.
   using offset_type        = std::uint32_t;
 
   using pilot_table_type          = std::vector<pilot_value_type, rebind_alloc_t<pilot_value_type>>;
@@ -207,7 +207,7 @@ struct stack_storage
   using remap_value_type   = std::uint32_t;
   using slot_index_type    = std::uint32_t;
   using bucket_index_type  = std::uint32_t;
-  using bucket_length_type = std::uint8_t;
+  using bucket_length_type = std::uint32_t;
   using offset_type        = std::uint32_t;
 
   using pilot_table_type          = std::array<pilot_value_type, max_bucket_count>;

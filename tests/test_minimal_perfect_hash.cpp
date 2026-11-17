@@ -173,14 +173,62 @@ void test_profiles()
   std::printf("\n=== minimal_perfect_hash: profiles ===\n");
   std::vector<std::uint64_t> const keys = make_random_keys(3000, 777);
   {
-    stdex::minimal_perfect_hash_set<std::uint64_t, stdex::hash<std::uint64_t>, std::equal_to<std::uint64_t>, std::allocator<std::uint64_t>, stdex::ptr_hash_heap_option_balanced<std::allocator<std::uint64_t>>>
+    stdex::minimal_perfect_hash_set<std::uint64_t, stdex::hash<std::uint64_t>, std::equal_to<std::uint64_t>, stdex::ptr_hash_heap_options<std::allocator<std::uint64_t>>::profile_balanced()>
         set(keys.begin(), keys.end());
     for (std::uint64_t key : keys) CHECK(set.contains(key));
   }
   {
-    stdex::minimal_perfect_hash_set<std::uint64_t, stdex::hash<std::uint64_t>, std::equal_to<std::uint64_t>, std::allocator<std::uint64_t>, stdex::ptr_hash_heap_option_compact<std::allocator<std::uint64_t>>>
+    stdex::minimal_perfect_hash_set<std::uint64_t, stdex::hash<std::uint64_t>, std::equal_to<std::uint64_t>, stdex::ptr_hash_heap_options<std::allocator<std::uint64_t>>::profile_compact()>
         set(keys.begin(), keys.end());
     for (std::uint64_t key : keys) CHECK(set.contains(key));
+  }
+}
+
+void test_stack_mode()
+{
+  std::printf("\n=== minimal_perfect_hash: stack mode ===\n");
+
+  using set_type = stdex::minimal_perfect_hash_set<
+      std::uint64_t, stdex::hash<std::uint64_t>, std::equal_to<std::uint64_t>,
+      stdex::ptr_hash_stack_options<2048>::profile_default()>;
+  static_assert(set_type::storage_policy == stdex::ptr_hash_storage_policy::stack);
+
+  std::vector<std::uint64_t> const keys = make_random_keys(1500, 424242);
+  set_type set(keys.begin(), keys.end());
+  CHECK(set.size() == keys.size());
+  CHECK(set.max_size() == 2048);
+  for (std::uint64_t key : keys) {
+    CHECK(set.contains(key));
+    CHECK(set.find(key) != set.end());
+    CHECK(set.at_unchecked(key) == key);
+  }
+  CHECK(!set.contains(0xDEAD'BEEF'CAFE'BABEULL));
+
+  using map_type = stdex::minimal_perfect_hash_map<
+      std::uint64_t, std::uint64_t, stdex::hash<std::uint64_t>, std::equal_to<std::uint64_t>,
+      stdex::ptr_hash_stack_options<2048>::profile_default()>;
+  static_assert(map_type::storage_policy == stdex::ptr_hash_storage_policy::stack);
+
+  std::vector<std::pair<std::uint64_t, std::uint64_t>> values;
+  for (std::uint64_t i = 0; i < 1500; ++i) values.emplace_back(i * 13 + 1, i);
+  map_type map(values.begin(), values.end());
+  CHECK(map.size() == values.size());
+  for (auto const &[key, mapped] : values) {
+    CHECK(map.contains(key));
+    CHECK(map.at(key) == mapped);
+  }
+
+  // Non-trivial mapped values exercise the cycle permutation path with inline storage.
+  using string_map_type = stdex::minimal_perfect_hash_map<
+      std::uint64_t, std::string, stdex::hash<std::uint64_t>, std::equal_to<std::uint64_t>,
+      stdex::ptr_hash_stack_options<512>::profile_default()>;
+  std::vector<std::pair<std::uint64_t, std::string>> string_values;
+  for (std::uint64_t i = 0; i < 256; ++i) string_values.emplace_back(i * 7 + 3, "v" + std::to_string(i));
+  string_map_type string_map(string_values.begin(), string_values.end());
+  CHECK(string_map.size() == string_values.size());
+  for (auto const &[key, mapped] : string_values) {
+    CHECK(string_map.contains(key));
+    CHECK(string_map.at(key) == mapped);
   }
 }
 
@@ -461,6 +509,7 @@ int main()
   test_set_basic();
   test_map_basic();
   test_profiles();
+  test_stack_mode();
   test_string_keys();
   test_initializer_list();
   test_copy_move();

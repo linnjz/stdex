@@ -38,6 +38,7 @@
 #  include <intrin.h> // _mm_prefetch
 #endif
 
+#include "../inplace_vector.hpp"
 #include "../ptrhash.hpp"
 #include "../uninitialized_buffer.hpp"
 #include "mphmap_traits.hpp"
@@ -80,21 +81,62 @@ concept heterogeneous_key =
     is_hasher_for<Hasher, K> &&
     std::predicate<KeyEqual const &, KeyType const &, K const &>;
 
+/// Maps the storage policy carried by the option set onto the concrete value
+/// container: an allocator-backed @c std::vector for @c heap, and a
+/// fixed-capacity @c stdex::inplace_vector for @c stack. This mirrors
+/// @c ptr_hash_detail::ptr_hash_storage_selector so the value payload and the
+/// index share the same storage mode.
+template <::stdex::ptr_hash_storage_policy Policy, class Value, class Allocator, std::size_t Capacity>
+struct value_storage_selector;
+
+template <class Value, class Allocator, std::size_t Capacity>
+struct value_storage_selector<::stdex::ptr_hash_storage_policy::heap, Value, Allocator, Capacity>
+{
+  using allocator_type = typename std::allocator_traits<Allocator>::template rebind_alloc<Value>;
+  using type           = std::vector<Value, allocator_type>;
+};
+
+template <class Value, class Allocator, std::size_t Capacity>
+struct value_storage_selector<::stdex::ptr_hash_storage_policy::stack, Value, Allocator, Capacity>
+{
+  using type = ::stdex::inplace_vector<Value, Capacity>;
+};
+
+/// Auxiliary buffers (fingerprints and the permutation scratch) follow the same
+/// policy: allocator-backed @c uninitialized_buffer on the heap, inline
+/// @c inplace_vector on the stack. Both expose @c size() and @c operator[] over
+/// exactly the requested element count; every entry is written before it is read.
+template <::stdex::ptr_hash_storage_policy Policy, class T, class Allocator, std::size_t Capacity>
+struct buffer_storage_selector;
+
+template <class T, class Allocator, std::size_t Capacity>
+struct buffer_storage_selector<::stdex::ptr_hash_storage_policy::heap, T, Allocator, Capacity>
+{
+  using allocator_type = typename std::allocator_traits<Allocator>::template rebind_alloc<T>;
+  using type           = ::stdex::uninitialized_buffer<T, allocator_type>;
+};
+
+template <class T, class Allocator, std::size_t Capacity>
+struct buffer_storage_selector<::stdex::ptr_hash_storage_policy::stack, T, Allocator, Capacity>
+{
+  using type = ::stdex::inplace_vector<T, Capacity>;
+};
+
 /**
  * @brief Immutable associative table backed by a minimal-perfect hash index.
  *
  * @details The @c ptr_hash index stores no keys, and its @c index()
  * result is only unique over the keys that were used to build it; an arbitrary
- * query still lands on some slot in @c [0, size()). @c values_ therefore
+ * query still lands on some slot in @c [0, size()). @c storage_ therefore
  * stores the elements in index order, and every lookup verifies the candidate
  * with @c key_equal. A parallel one-byte fingerprint table rejects most misses
- * before @c values_ is touched; only a fingerprint match pays for the
+ * before @c storage_ is touched; only a fingerprint match pays for the
  * value-line fetch and the equality check. This keeps the final table free of
  * an occupancy bitmap or duplicate key storage.
  *
  * Only @c ptr_hash_scheme::minimal_perfect is supported: it is the scheme that
- * maps every key onto a distinct index in @c [0, key_count), so a value vector
- * of exactly @c key_count elements is sufficient and all its slots are
+ * maps every key onto a distinct index in @c [0, key_count), so a value
+ * container of exactly @c key_count elements is sufficient and all its slots are
  * populated. The @c perfect scheme leaves holes in @c [0, capacity) and would
  * need a separate slot-to-value mapping.
  *
@@ -103,17 +145,26 @@ concept heterogeneous_key =
  * same seeded PtrHash path, so the resulting index stays consistent with the
  * index built from @c key_type.
  */
-template <class Traits, class Hasher, class KeyEqual, class Allocator, class Options>
-requires ::stdex::ptr_hash_detail::is_ptr_hash_options_v<std::remove_cv_t<decltype(Options::value)>>
+template <class Traits, class Hasher, class KeyEqual, auto Options>
+requires ::stdex::ptr_hash_detail::is_ptr_hash_options_v<std::remove_cvref_t<decltype(Options)>>
 class hash_table
 {
 public:
+  using options_type = std::remove_cvref_t<decltype(Options)>;
+  static constexpr options_type options_value { Options };
+  /// Storage mode requested by the option set; selects the value container and auxiliary buffers.
+  static constexpr ::stdex::ptr_hash_storage_policy storage_policy { options_type::storage_traits::storage_policy };
+  /// The option set owns the allocator; rebinding it to @c value_type gives the
+  /// container's value allocator. Stack storage is inline and never allocates,
+  /// so there the rebound allocator only backs @c get_allocator().
+  using allocator_type = typename std::allocator_traits<
+      typename options_type::storage_traits::allocator_type>::template rebind_alloc<typename Traits::value_type>;
+
   using key_type        = typename Traits::key_type;
   using mapped_type     = typename Traits::mapped_type;
   using value_type      = typename Traits::value_type;
   using hasher          = Hasher;
   using key_equal       = KeyEqual;
-  using allocator_type  = Allocator;
   using size_type       = std::size_t;
   using difference_type = std::ptrdiff_t;
   using const_reference = value_type const &;
@@ -122,18 +173,28 @@ public:
   using pointer         = const_pointer;
 
 private:
-  using values_allocator_type      = typename std::allocator_traits<allocator_type>::template rebind_alloc<value_type>;
-  using values_type                = std::vector<value_type, values_allocator_type>;
+  template <class T>
+  using rebind_alloc_t = typename std::allocator_traits<allocator_type>::template rebind_alloc<T>;
 
-  using fingerprint_type           = std::uint8_t;
-  using fingerprint_allocator_type = typename std::allocator_traits<allocator_type>::template rebind_alloc<fingerprint_type>;
-  using fingerprints_type          = ::stdex::uninitialized_buffer<fingerprint_type, fingerprint_allocator_type>;
-
-  using index_type = ptr_hash<key_type, Hasher, Options>;
-
-  using order_index_type     = std::uint32_t;
-  using order_allocator_type = typename std::allocator_traits<allocator_type>::template rebind_alloc<order_index_type>;
-  using order_type           = ::stdex::uninitialized_buffer<order_index_type, order_allocator_type>;
+  using fingerprint_type = std::uint8_t;
+  using order_index_type = std::uint32_t;
+  
+  using ptr_hash_storage = ptr_hash<key_type, Hasher, Options>;
+  using value_storage    = typename value_storage_selector<
+      storage_policy,
+      value_type,
+      allocator_type,
+      options_type::storage_traits::max_key_count>::type;
+  using fingerprint_storage = typename buffer_storage_selector<
+      storage_policy,
+      fingerprint_type,
+      allocator_type,
+      options_type::storage_traits::max_key_count>::type;
+  using order_storage = typename buffer_storage_selector<
+      storage_policy,
+      order_index_type,
+      allocator_type,
+      options_type::storage_traits::max_key_count>::type;
 
   /// The cycle path avoids the second value buffer. Probe data shows that
   /// sequential out-of-place writes win for small values, while the cycle path
@@ -146,10 +207,11 @@ private:
        (!std::is_trivially_copyable_v<value_type> && sizeof(value_type) >= cycle_reorder_nontrivial_threshold));
 
 public:
-  using const_iterator = typename values_type::const_iterator;
+  using const_iterator = typename value_storage::const_iterator;
   using iterator       = const_iterator;
 
-  static_assert(Options::value.hash_scheme == ptr_hash_scheme::minimal_perfect, "minimal_perfect_hash containers require ptr_hash_scheme::minimal_perfect");
+  static_assert(options_value.hash_scheme == ptr_hash_scheme::minimal_perfect,
+                "minimal_perfect_hash containers require ptr_hash_scheme::minimal_perfect");
 
   constexpr hash_table() = default;
 
@@ -157,12 +219,12 @@ public:
   template <std::input_iterator Iterator, std::sentinel_for<Iterator> Sentinel>
   requires std::constructible_from<value_type, std::iter_reference_t<Iterator>>
   constexpr hash_table(Iterator first, Sentinel last, hasher const &hash, key_equal const &equal, allocator_type const &alloc)
-      : values_ { make_values_(std::ranges::subrange { std::move(first), std::move(last) }, alloc) }
-      , index_ { make_index_(values_, hash, alloc) }
-      , fingerprints_ { values_.size(), fingerprint_allocator_type { alloc } }
+      : storage_ { make_storage_(std::ranges::subrange { std::move(first), std::move(last) }, alloc) }
+      , ptr_hash_storage_ { make_ptr_hash_storage_(storage_, hash, alloc) }
+      , fingerprints_ { make_buffer_<fingerprint_storage>(storage_.size()) }
       , key_eq_ { equal }
   {
-    reorder_values_and_fingerprints_();
+    reorder_storage_and_fingerprints_();
   }
 
   template <std::input_iterator Iterator, std::sentinel_for<Iterator> Sentinel>
@@ -277,16 +339,16 @@ public:
   }
 #endif // __cpp_lib_containers_ranges
 
-  [[nodiscard]] constexpr bool empty() const noexcept { return values_.empty(); }
-  [[nodiscard]] constexpr size_type size() const noexcept { return values_.size(); }
-  [[nodiscard]] constexpr size_type max_size() const noexcept { return values_.max_size(); }
-  [[nodiscard]] constexpr size_type bucket_count() const noexcept { return index_.bucket_count(); }
+  [[nodiscard]] constexpr bool empty() const noexcept { return storage_.empty(); }
+  [[nodiscard]] constexpr size_type size() const noexcept { return storage_.size(); }
+  [[nodiscard]] constexpr size_type max_size() const noexcept { return storage_.max_size(); }
+  [[nodiscard]] constexpr size_type bucket_count() const noexcept { return ptr_hash_storage_.bucket_count(); }
   /// The bucket array is fixed at construction, so the current count is also the maximum.
-  [[nodiscard]] constexpr size_type max_bucket_count() const noexcept { return index_.bucket_count(); }
-  [[nodiscard]] constexpr const_iterator begin() const noexcept { return values_.begin(); }
-  [[nodiscard]] constexpr const_iterator end() const noexcept { return values_.end(); }
-  [[nodiscard]] constexpr const_iterator cbegin() const noexcept { return values_.cbegin(); }
-  [[nodiscard]] constexpr const_iterator cend() const noexcept { return values_.cend(); }
+  [[nodiscard]] constexpr size_type max_bucket_count() const noexcept { return ptr_hash_storage_.bucket_count(); }
+  [[nodiscard]] constexpr const_iterator begin() const noexcept { return storage_.begin(); }
+  [[nodiscard]] constexpr const_iterator end() const noexcept { return storage_.end(); }
+  [[nodiscard]] constexpr const_iterator cbegin() const noexcept { return storage_.cbegin(); }
+  [[nodiscard]] constexpr const_iterator cend() const noexcept { return storage_.cend(); }
 
   [[nodiscard]] constexpr const_iterator find(key_type const &key) const { return find_impl_(key); }
   template <class K>
@@ -326,25 +388,35 @@ public:
 
   [[nodiscard]] constexpr mapped_type const &at_unchecked(key_type const &key) const
   {
-    size_type const index = index_.index_unchecked(key);
-    assert(index < values_.size());
-    assert(key_eq_(Traits::key_of(values_[index]), key));
-    return Traits::mapped_of(values_[index]);
+    size_type const index = ptr_hash_storage_.index_unchecked(key);
+    assert(index < storage_.size());
+    assert(key_eq_(Traits::key_of(storage_[index]), key));
+    return Traits::mapped_of(storage_[index]);
   }
 
   template <class K>
   requires heterogeneous_key<key_type, hasher, key_equal, iterator, const_iterator, K>
   [[nodiscard]] constexpr mapped_type const &at_unchecked(K const &key) const
   {
-    size_type const index = index_.index_unchecked(key);
-    assert(index < values_.size());
-    assert(key_eq_(Traits::key_of(values_[index]), key));
-    return Traits::mapped_of(values_[index]);
+    size_type const index = ptr_hash_storage_.index_unchecked(key);
+    assert(index < storage_.size());
+    assert(key_eq_(Traits::key_of(storage_[index]), key));
+    return Traits::mapped_of(storage_[index]);
   }
 
-  [[nodiscard]] constexpr hasher hash_function() const noexcept { return index_.hash_function(); }
+  [[nodiscard]] constexpr hasher hash_function() const noexcept { return ptr_hash_storage_.hash_function(); }
   [[nodiscard]] constexpr key_equal key_eq() const noexcept { return key_eq_; }
-  [[nodiscard]] constexpr allocator_type get_allocator() const noexcept { return values_.get_allocator(); }
+  /// Heap storage keeps the allocator inside its value vector; stack storage is
+  /// inline and its allocator is always the stateless @c std::allocator, so no
+  /// separate allocator copy is stored for it.
+  [[nodiscard]] constexpr allocator_type get_allocator() const noexcept
+  {
+    if constexpr (storage_policy == ::stdex::ptr_hash_storage_policy::heap) {
+      return storage_.get_allocator();
+    } else {
+      return allocator_type {};
+    }
+  }
 
 private:
   template <class K>
@@ -353,22 +425,22 @@ private:
     if (empty()) [[unlikely]]
       return end();
 
-    std::uint64_t const hash = index_.hash_value(key);
-    size_type const index    = index_.index_from_hash(hash);
-    assert(index < values_.size());
+    std::uint64_t const hash = ptr_hash_storage_.hash_value(key);
+    size_type const index    = ptr_hash_storage_.index_from_hash(hash);
+    assert(index < storage_.size());
     if (fingerprints_[index] != fingerprint_of_(hash))
       return end();
 
 #if defined(__GNUC__) || defined(__clang__)
-    void const *const address = std::addressof(values_[index]);
+    void const *const address = std::addressof(storage_[index]);
     __builtin_prefetch(address, 0, 3);
 #elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
-    void const *const address = std::addressof(values_[index]);
+    void const *const address = std::addressof(storage_[index]);
     _mm_prefetch(static_cast<char const *>(address), _MM_HINT_T0);
 #endif
 
-    return key_eq_(Traits::key_of(values_[index]), key) ? values_.begin() + static_cast<difference_type>(index)
-                                                        : values_.end();
+    return key_eq_(Traits::key_of(storage_[index]), key) ? storage_.begin() + static_cast<difference_type>(index)
+                                                        : storage_.end();
   }
 
   template <class K>
@@ -377,10 +449,10 @@ private:
     if (empty()) [[unlikely]]
       return false;
 
-    std::uint64_t const hash = index_.hash_value(key);
-    size_type const index    = index_.index_from_hash(hash);
-    assert(index < values_.size());
-    return fingerprints_[index] == fingerprint_of_(hash) && key_eq_(Traits::key_of(values_[index]), key);
+    std::uint64_t const hash = ptr_hash_storage_.hash_value(key);
+    size_type const index    = ptr_hash_storage_.index_from_hash(hash);
+    assert(index < storage_.size());
+    return fingerprints_[index] == fingerprint_of_(hash) && key_eq_(Traits::key_of(storage_[index]), key);
   }
 
   template <class K>
@@ -390,30 +462,63 @@ private:
       throw std::out_of_range("minimal_perfect_hash::at: key not found");
     }
 
-    std::uint64_t const hash = index_.hash_value(key);
-    size_type const index    = index_.index_from_hash(hash);
-    assert(index < values_.size());
-    if (fingerprints_[index] != fingerprint_of_(hash) || !key_eq_(Traits::key_of(values_[index]), key)) [[unlikely]] {
+    std::uint64_t const hash = ptr_hash_storage_.hash_value(key);
+    size_type const index    = ptr_hash_storage_.index_from_hash(hash);
+    assert(index < storage_.size());
+    if (fingerprints_[index] != fingerprint_of_(hash) || !key_eq_(Traits::key_of(storage_[index]), key)) [[unlikely]] {
       throw std::out_of_range("minimal_perfect_hash::at: key not found");
     }
-    return Traits::mapped_of(values_[index]);
+    return Traits::mapped_of(storage_[index]);
   }
 
   template <std::ranges::input_range Range>
-  [[nodiscard]] static constexpr values_type make_values_(Range &&values, allocator_type const &alloc)
+  [[nodiscard]] static constexpr value_storage make_storage_(Range &&values, allocator_type const &alloc)
   {
-    values_type result { values_allocator_type { alloc } };
-    if constexpr (std::ranges::sized_range<Range>) {
-      result.reserve(static_cast<size_type>(std::ranges::size(values)));
+    if constexpr (storage_policy == ::stdex::ptr_hash_storage_policy::heap) {
+      value_storage result { rebind_alloc_t<value_type> { alloc } };
+      if constexpr (std::ranges::sized_range<Range>) {
+        result.reserve(static_cast<size_type>(std::ranges::size(values)));
+      }
+      for (auto &&value : values) result.emplace_back(std::forward<decltype(value)>(value));
+      return result;
+    } else {
+      (void) alloc;
+      value_storage result;
+      if constexpr (std::ranges::sized_range<Range>) {
+        result.reserve(static_cast<size_type>(std::ranges::size(values)));
+      }
+      for (auto &&value : values) result.emplace_back(std::forward<decltype(value)>(value));
+      return result;
     }
-    for (auto &&value : values) result.emplace_back(std::forward<decltype(value)>(value));
-    return result;
   }
 
-  [[nodiscard]] static constexpr index_type make_index_(values_type const &values, hasher const &hash, allocator_type const &alloc)
+  [[nodiscard]] static constexpr ptr_hash_storage make_ptr_hash_storage_(value_storage const &values, hasher const &hash, allocator_type const &alloc)
   {
     auto keys = values | std::views::transform([](value_type const &value) -> key_type const & { return Traits::key_of(value); });
-    return index_type { std::ranges::begin(keys), std::ranges::end(keys), hash, alloc };
+    if constexpr (storage_policy == ::stdex::ptr_hash_storage_policy::heap) {
+      return ptr_hash_storage { std::ranges::begin(keys), std::ranges::end(keys), hash, alloc };
+    } else {
+      return ptr_hash_storage { std::ranges::begin(keys), std::ranges::end(keys), hash };
+    }
+  }
+
+  template <class Buffer>
+  [[nodiscard]] constexpr Buffer make_buffer_(size_type const count) const
+  {
+    if constexpr (storage_policy == ::stdex::ptr_hash_storage_policy::heap) {
+      return Buffer { count, rebind_alloc_t<typename Buffer::value_type> { storage_.get_allocator() } };
+    } else {
+      return Buffer(count);
+    }
+  }
+
+  [[nodiscard]] constexpr value_storage make_empty_storage_() const
+  {
+    if constexpr (storage_policy == ::stdex::ptr_hash_storage_policy::heap) {
+      return value_storage { rebind_alloc_t<value_type> { storage_.get_allocator() } };
+    } else {
+      return value_storage {};
+    }
   }
 
   [[nodiscard]] static constexpr fingerprint_type fingerprint_of_(std::uint64_t const hash) noexcept
@@ -436,18 +541,18 @@ private:
    * which is outside the valid index range. Small values keep the sequential
    * out-of-place write used by the fallback.
    */
-  constexpr void reorder_values_and_fingerprints_()
+  constexpr void reorder_storage_and_fingerprints_()
   {
-    size_type const count = values_.size();
+    size_type const count = storage_.size();
     assert(fingerprints_.size() == count);
     if (count == 0) return;
     assert(count <= static_cast<size_type>((std::numeric_limits<order_index_type>::max)()));
 
-    order_type order { count, order_allocator_type { values_.get_allocator() } };
+    order_storage order = make_buffer_<order_storage>(count);
     for (size_type input_index = 0; input_index < count; ++input_index) {
-      key_type const &key          = Traits::key_of(values_[input_index]);
-      std::uint64_t const hash     = index_.hash_value(key);
-      size_type const output_index = index_.index_from_hash(hash);
+      key_type const &key          = Traits::key_of(storage_[input_index]);
+      std::uint64_t const hash     = ptr_hash_storage_.hash_value(key);
+      size_type const output_index = ptr_hash_storage_.index_from_hash(hash);
       assert(output_index < count);
       order[output_index]         = static_cast<order_index_type>(input_index);
       fingerprints_[output_index] = fingerprint_of_(hash);
@@ -462,31 +567,31 @@ private:
           continue;
         }
 
-        value_type pending    = std::move(values_[start]);
+        value_type pending    = std::move(storage_[start]);
         size_type destination = start;
         size_type source      = static_cast<size_type>(order[start]);
         while (source != start) {
-          values_[destination] = std::move(values_[source]);
+          storage_[destination] = std::move(storage_[source]);
           order[destination]   = visited;
           destination          = source;
           source               = static_cast<size_type>(order[source]);
         }
-        values_[destination] = std::move(pending);
+        storage_[destination] = std::move(pending);
         order[destination]   = visited;
       }
     } else {
-      values_type ordered { values_.get_allocator() };
+      value_storage ordered = make_empty_storage_();
       ordered.reserve(count);
       for (order_index_type input_index : order) {
-        ordered.emplace_back(std::move(values_[input_index]));
+        ordered.emplace_back(std::move(storage_[input_index]));
       }
-      values_.swap(ordered);
+      storage_.swap(ordered);
     }
   }
 
-  values_type values_;
-  index_type index_;
-  fingerprints_type fingerprints_;
+  value_storage storage_;
+  ptr_hash_storage ptr_hash_storage_;
+  fingerprint_storage fingerprints_;
   [[no_unique_address]] key_equal key_eq_ {};
 };
 } // namespace stdex::minimal_perfect_hash_detail

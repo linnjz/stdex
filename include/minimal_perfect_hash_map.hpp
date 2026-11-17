@@ -37,12 +37,12 @@ namespace stdex
 /// throws if the minimal-perfect hash index cannot be built from them. Because
 /// the table is immutable, `lookup` exposes only const references to mapped
 /// values.
-template <class KeyType, class MappedType, class Hasher = stdex::hash<KeyType>, class KeyEqual = std::equal_to<KeyType>, class Allocator = std::allocator<std::pair<KeyType, MappedType>>, class Options = ptr_hash_heap_option_default<Allocator>>
+template <class KeyType, class MappedType, class Hasher = stdex::hash<KeyType>, class KeyEqual = std::equal_to<KeyType>, auto Options = ptr_hash_heap_options<std::allocator<std::pair<KeyType, MappedType>>>::profile_default()>
 class minimal_perfect_hash_map
-    : public minimal_perfect_hash_detail::hash_table<minimal_perfect_hash_detail::mphmap_traits<KeyType, MappedType>, Hasher, KeyEqual, Allocator, Options>
+    : public minimal_perfect_hash_detail::hash_table<minimal_perfect_hash_detail::mphmap_traits<KeyType, MappedType>, Hasher, KeyEqual, Options>
 {
   using traits = minimal_perfect_hash_detail::mphmap_traits<KeyType, MappedType>;
-  using base   = minimal_perfect_hash_detail::hash_table<traits, Hasher, KeyEqual, Allocator, Options>;
+  using base   = minimal_perfect_hash_detail::hash_table<traits, Hasher, KeyEqual, Options>;
 
 public:
   using typename base::allocator_type;
@@ -96,14 +96,16 @@ requires std::input_iterator<Iter>
       && minimal_perfect_hash_detail::is_allocator<Alloc>
 minimal_perfect_hash_map(Iter, Iter, Hash = Hash(), KeyEq = KeyEq(), Alloc = Alloc()) ->
 minimal_perfect_hash_map<minimal_perfect_hash_detail::guide_key_t<Iter>,
-                         minimal_perfect_hash_detail::guide_mapped_t<Iter>, Hash, KeyEq, Alloc>;
+                         minimal_perfect_hash_detail::guide_mapped_t<Iter>, Hash, KeyEq,
+                         stdex::ptr_hash_heap_options<Alloc>::profile_default()>;
 
 template <class Iter, class Alloc>
 requires std::input_iterator<Iter> && minimal_perfect_hash_detail::is_allocator<Alloc>
 minimal_perfect_hash_map(Iter, Iter, Alloc) ->
 minimal_perfect_hash_map<minimal_perfect_hash_detail::guide_key_t<Iter>, minimal_perfect_hash_detail::guide_mapped_t<Iter>,
                          stdex::hash<minimal_perfect_hash_detail::guide_key_t<Iter>>,
-                         std::equal_to<minimal_perfect_hash_detail::guide_key_t<Iter>>, Alloc>;
+                         std::equal_to<minimal_perfect_hash_detail::guide_key_t<Iter>>,
+                         stdex::ptr_hash_heap_options<Alloc>::profile_default()>;
 
 template <class Iter, class Hash, class Alloc>
 requires std::input_iterator<Iter>
@@ -111,7 +113,8 @@ requires std::input_iterator<Iter>
       && minimal_perfect_hash_detail::is_allocator<Alloc>
 minimal_perfect_hash_map(Iter, Iter, Hash, Alloc) ->
 minimal_perfect_hash_map<minimal_perfect_hash_detail::guide_key_t<Iter>, minimal_perfect_hash_detail::guide_mapped_t<Iter>,
-                         Hash, std::equal_to<minimal_perfect_hash_detail::guide_key_t<Iter>>, Alloc>;
+                         Hash, std::equal_to<minimal_perfect_hash_detail::guide_key_t<Iter>>,
+                         stdex::ptr_hash_heap_options<Alloc>::profile_default()>;
 
 // ---------- CTAD initializer_list ----------
 template <class Key, class T,
@@ -122,18 +125,20 @@ requires minimal_perfect_hash_detail::is_hasher_for<Hash, Key>
       && (!minimal_perfect_hash_detail::is_allocator<KeyEq>)
       && minimal_perfect_hash_detail::is_allocator<Alloc>
 minimal_perfect_hash_map(std::initializer_list<std::pair<Key, T>>, Hash = Hash(), KeyEq = KeyEq(), Alloc = Alloc()) ->
-minimal_perfect_hash_map<Key, T, Hash, KeyEq, Alloc>;
+minimal_perfect_hash_map<Key, T, Hash, KeyEq, stdex::ptr_hash_heap_options<Alloc>::profile_default()>;
 
 template <class Key, class T, class Alloc>
 requires minimal_perfect_hash_detail::is_allocator<Alloc>
 minimal_perfect_hash_map(std::initializer_list<std::pair<Key, T>>, Alloc) ->
-minimal_perfect_hash_map<Key, T, stdex::hash<Key>, std::equal_to<Key>, Alloc>;
+minimal_perfect_hash_map<Key, T, stdex::hash<Key>, std::equal_to<Key>,
+                         stdex::ptr_hash_heap_options<Alloc>::profile_default()>;
 
 template <class Key, class T, class Hash, class Alloc>
 requires minimal_perfect_hash_detail::is_hasher_for<Hash, Key>
       && minimal_perfect_hash_detail::is_allocator<Alloc>
 minimal_perfect_hash_map(std::initializer_list<std::pair<Key, T>>, Hash, Alloc) ->
-minimal_perfect_hash_map<Key, T, Hash, std::equal_to<Key>, Alloc>;
+minimal_perfect_hash_map<Key, T, Hash, std::equal_to<Key>,
+                         stdex::ptr_hash_heap_options<Alloc>::profile_default()>;
 
 #ifdef __cpp_lib_containers_ranges
 // ---------- CTAD from_range ----------
@@ -147,20 +152,23 @@ requires minimal_perfect_hash_detail::is_hasher_for<Hash, minimal_perfect_hash_d
       && minimal_perfect_hash_detail::is_allocator<Alloc>
 minimal_perfect_hash_map(std::from_range_t, Rng &&, Hash = Hash(), KeyEq = KeyEq(), Alloc = Alloc()) ->
 minimal_perfect_hash_map<minimal_perfect_hash_detail::range_key_t<Rng>,
-                         minimal_perfect_hash_detail::range_mapped_t<Rng>, Hash, KeyEq, Alloc>;
+                         minimal_perfect_hash_detail::range_mapped_t<Rng>, Hash, KeyEq,
+                         stdex::ptr_hash_heap_options<Alloc>::profile_default()>;
 
 template <std::ranges::input_range Rng, class Alloc>
 requires minimal_perfect_hash_detail::is_allocator<Alloc>
 minimal_perfect_hash_map(std::from_range_t, Rng &&, Alloc) ->
 minimal_perfect_hash_map<minimal_perfect_hash_detail::range_key_t<Rng>, minimal_perfect_hash_detail::range_mapped_t<Rng>,
                          stdex::hash<minimal_perfect_hash_detail::range_key_t<Rng>>,
-                         std::equal_to<minimal_perfect_hash_detail::range_key_t<Rng>>, Alloc>;
+                         std::equal_to<minimal_perfect_hash_detail::range_key_t<Rng>>,
+                         stdex::ptr_hash_heap_options<Alloc>::profile_default()>;
 
 template <std::ranges::input_range Rng, class Hash, class Alloc>
 requires minimal_perfect_hash_detail::is_hasher_for<Hash, minimal_perfect_hash_detail::range_key_t<Rng>>
       && minimal_perfect_hash_detail::is_allocator<Alloc>
 minimal_perfect_hash_map(std::from_range_t, Rng &&, Hash, Alloc) ->
 minimal_perfect_hash_map<minimal_perfect_hash_detail::range_key_t<Rng>, minimal_perfect_hash_detail::range_mapped_t<Rng>,
-                         Hash, std::equal_to<minimal_perfect_hash_detail::range_key_t<Rng>>, Alloc>;
+                         Hash, std::equal_to<minimal_perfect_hash_detail::range_key_t<Rng>>,
+                         stdex::ptr_hash_heap_options<Alloc>::profile_default()>;
 #endif // __cpp_lib_containers_ranges
 } // namespace stdex
