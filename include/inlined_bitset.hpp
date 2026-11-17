@@ -22,6 +22,7 @@
 #include <concepts>         // std::convertible_to, std::unsigned_integral
 #include <cstdint>          // std::uint32_t, std::uint64_t
 #include <cstdlib>          // std::abort
+#include <cstring>          // std::memmove, std::memset
 #include <initializer_list> // std::initializer_list
 #include <iosfwd>           // std::basic_istream, std::basic_ostream
 #include <istream>          // std::basic_istream::sentry (extraction below)
@@ -501,6 +502,62 @@ private:
   constexpr void clear_tail_bits_(size_type nbits) noexcept
   {
     clear_tail_bits_(nbits, blocks_for_bits_(nbits));
+  }
+
+  /// A block is trivially copyable (guaranteed by the unsigned_integral
+  /// constraint) and the allocator injects no construct/destroy side effects,
+  /// so raw-buffer bulk moves and fills are equivalent to the allocator-aware
+  /// element path. A custom allocator therefore selects the element-wise
+  /// "slow" path everywhere this flag gates a fast path.
+  static constexpr bool block_bitwise_ops_ =
+      !has_custom_construct<allocator_type, block_type *, block_type> &&
+      !has_custom_destroy<allocator_type, block_type *>;
+
+  static constexpr void fill_blocks_unchecked_(block_type *const dst, size_type const count, block_type const value) noexcept
+  {
+    if (count == size_type {}) [[unlikely]] return;
+    if (!std::is_constant_evaluated()) {
+      if (value == block_type { 0 }) {
+        std::memset(static_cast<void *>(dst), 0, static_cast<std::size_t>(count) * sizeof(block_type));
+        return;
+      }
+      // bool's object representation is {0, 1}; memset(0xFF) could forge an
+      // invalid bool, so only integral blocks take the all-ones memset.
+      if constexpr (!std::is_same_v<block_type, bool>) {
+        if (value == static_cast<block_type>(~block_type { 0 })) {
+          std::memset(static_cast<void *>(dst), 0xFF, static_cast<std::size_t>(count) * sizeof(block_type));
+          return;
+        }
+      }
+    }
+    std::fill_n(dst, count, value);
+  }
+
+  /// Packs `count` bools from [first, ...) into bit positions [pos, pos + count),
+  /// touching only those bits (prefix/suffix bits of the boundary blocks are
+  /// preserved). Reads the source bit by bit but stores one block at a time, so
+  /// the write side stays word-granular instead of a per-bit read-modify-write.
+  template <class InIt>
+  constexpr void write_bits_unchecked_(size_type pos, InIt first, size_type const count)
+  {
+    block_type *const blocks = data();
+    size_type bit            = pos;
+    size_type remaining      = count;
+    while (remaining != 0) {
+      size_type const bi      = bit / bits_per_block;
+      size_type const off     = bit % bits_per_block;
+      size_type const n       = (std::min) (bits_per_block - off, remaining);
+      block_type value        = block_type { 0 };
+      for (size_type k = 0; k < n; ++k, ++first) {
+        value |= static_cast<block_type>(static_cast<block_type>(static_cast<bool>(*first)) << (off + k));
+      }
+      block_type const low  = (n == bits_per_block) ? static_cast<block_type>(~block_type { 0 })
+                                                    : static_cast<block_type>((block_type { 1 } << n) - block_type { 1 });
+      block_type const mask = static_cast<block_type>(low << off);
+      blocks[bi]            = static_cast<block_type>((blocks[bi] & static_cast<block_type>(~mask)) | value);
+      bit += n;
+      remaining -= n;
+    }
   }
 
   /// Shifts bits [pos, old_bits) right by `shift` bits inside storage that
@@ -1573,10 +1630,15 @@ public:
   [[nodiscard]] constexpr size_type count() const noexcept { return count_blocks_(data(), bit_size_); }
 
 private:
-  /// Applies op(block, mask) over [pos, pos + len). Requires pos + len <= bit_size_;
-  /// len == 0 is a no-op. Masks are whole-block for interior blocks.
-  template <class Op>
-  constexpr void apply_range_unchecked_(size_type const pos, size_type const len, Op op)
+  enum class range_op { set_bits, clear_bits, flip_bits };
+
+  /// Applies a bitwise mask operation over [pos, pos + len). Requires
+  /// pos + len <= bit_size_; len == 0 is a no-op. Only the two boundary blocks
+  /// need per-bit masking: the interior is fully covered, so set/clear there
+  /// collapse to a block fill (memset for 0 / all-ones) instead of a per-block
+  /// OR/AND loop.
+  template <range_op Op>
+  constexpr void apply_range_unchecked_(size_type const pos, size_type const len) noexcept
   {
     if (len == 0) [[unlikely]] return;
     block_type *const blocks    = data();
@@ -1586,15 +1648,29 @@ private:
     size_type const last_r      = (pos + len) % bits_per_block;
     block_type const all_ones   = static_cast<block_type>(~block_type { 0 });
     block_type const first_mask = static_cast<block_type>(all_ones << first_shift);
+    auto const apply_one        = [](block_type &block, block_type const mask) constexpr noexcept {
+      if constexpr (Op == range_op::set_bits) {
+        block |= mask;
+      } else if constexpr (Op == range_op::clear_bits) {
+        block &= static_cast<block_type>(~mask);
+      } else {
+        block ^= mask;
+      }
+    };
     if (first == last) {
-      op(blocks[first], last_r == 0 ? first_mask : static_cast<block_type>(first_mask & low_bits_mask_(last_r)));
+      apply_one(blocks[first], last_r == 0 ? first_mask : static_cast<block_type>(first_mask & low_bits_mask_(last_r)));
       return;
     }
-    op(blocks[first], first_mask);
-    for (size_type i = first + 1; i < last; ++i) {
-      op(blocks[i], all_ones);
+    apply_one(blocks[first], first_mask);
+    if constexpr (Op == range_op::flip_bits) {
+      for (size_type i = first + 1; i < last; ++i) {
+        blocks[i] = static_cast<block_type>(~blocks[i]);
+      }
+    } else {
+      fill_blocks_unchecked_(blocks + first + 1, last - first - 1,
+                             Op == range_op::set_bits ? all_ones : block_type { 0 });
     }
-    op(blocks[last], last_r == 0 ? all_ones : low_bits_mask_(last_r));
+    apply_one(blocks[last], last_r == 0 ? all_ones : low_bits_mask_(last_r));
   }
 
 public:
@@ -1605,10 +1681,10 @@ public:
     block_type *const blocks  = data();
     block_type const all_ones = static_cast<block_type>(~block_type { 0 });
     if (size_type const r = bit_size_ % bits_per_block; r != 0) {
-      std::fill_n(blocks, n - 1, all_ones);
+      fill_blocks_unchecked_(blocks, n - 1, all_ones);
       blocks[n - 1] = low_bits_mask_(r);
     } else {
-      std::fill_n(blocks, n, all_ones);
+      fill_blocks_unchecked_(blocks, n, all_ones);
     }
     return *this;
   }
@@ -1625,20 +1701,16 @@ public:
     if (pos > bit_size_ || len > bit_size_ - pos) throw_out_of_range_();
 
     if (value) {
-      apply_range_unchecked_(pos, len, [](block_type &block, block_type mask) constexpr noexcept {
-        block |= mask;
-      });
+      apply_range_unchecked_<range_op::set_bits>(pos, len);
     } else {
-      apply_range_unchecked_(pos, len, [](block_type &block, block_type mask) constexpr noexcept {
-        block &= static_cast<block_type>(~mask);
-      });
+      apply_range_unchecked_<range_op::clear_bits>(pos, len);
     }
     return *this;
   }
 
   constexpr inlined_bitset &reset() noexcept
   {
-    std::fill_n(data(), block_count(), block_type { 0 });
+    fill_blocks_unchecked_(data(), block_count(), block_type { 0 });
     return *this;
   }
 
@@ -1652,9 +1724,7 @@ public:
   constexpr inlined_bitset &reset(size_type pos, size_type len)
   {
     if (pos > bit_size_ || len > bit_size_ - pos) throw_out_of_range_();
-    apply_range_unchecked_(pos, len, [](block_type &block, block_type mask) constexpr noexcept {
-      block &= static_cast<block_type>(~mask);
-    });
+    apply_range_unchecked_<range_op::clear_bits>(pos, len);
     return *this;
   }
 
@@ -1684,9 +1754,7 @@ public:
   constexpr inlined_bitset &flip(size_type pos, size_type len)
   {
     if (pos > bit_size_ || len > bit_size_ - pos) throw_out_of_range_();
-    apply_range_unchecked_(pos, len, [](block_type &block, block_type mask) constexpr noexcept {
-      block ^= mask;
-    });
+    apply_range_unchecked_<range_op::flip_bits>(pos, len);
     return *this;
   }
 
@@ -1823,9 +1891,24 @@ public:
     if constexpr (std::forward_iterator<InIt>) {
       auto const count = static_cast<size_type>(std::ranges::distance(first, last));
       if (count > max_size() - old_size) [[unlikely]] throw_length_error_();
+      if (!std::is_constant_evaluated()) {
+        // Block-level fast path: grow once, shift the [pos, old) tail right by
+        // `count` (word-granular via shift_bits_right_), then pack the source
+        // into the vacated gap. Replaces per-bit push_back + bit-wise rotate.
+        if (count == 0) [[unlikely]] return iterator(data(), pos);
+        size_type const new_bits   = old_size + count;
+        size_type const new_blocks = blocks_for_bits_(new_bits);
+        base::resize(new_blocks, block_type { 0 });
+        if (pos < old_size) {
+          shift_bits_right_(data(), pos, old_size, new_blocks, count);
+        }
+        bit_size_ = new_bits;
+        write_bits_unchecked_(pos, first, count);
+        clear_tail_bits_(new_bits, new_blocks);
+        return iterator(data(), pos);
+      }
     }
-    // Append-then-rotate (the insert_uncounted_range_ shape): push_back grows
-    // (reallocation included); iterators are taken fresh afterwards.
+    // Fallback (input iterators, or constant evaluation): append-then-rotate.
     for (; first != last; ++first) {
       push_back(static_cast<bool>(*first));
     }
@@ -1873,6 +1956,15 @@ public:
     if constexpr (std::forward_iterator<InIt>) {
       nbits = static_cast<size_type>(std::ranges::distance(first, last));
       if (nbits > max_size()) [[unlikely]] throw_length_error_();
+      if (!std::is_constant_evaluated()) {
+        // Block-level fast path: resize once, then pack the whole source in.
+        size_type const new_blocks = blocks_for_bits_(nbits);
+        base::resize(new_blocks, block_type { 0 });
+        bit_size_ = nbits;
+        write_bits_unchecked_(size_type { 0 }, first, nbits);
+        clear_tail_bits_(nbits, new_blocks);
+        return;
+      }
     }
     iterator cur = begin();
     for (iterator const old_end = end(); first != last && cur != old_end; ++first, ++cur) {
@@ -1971,8 +2063,24 @@ public:
     if (count == 0) [[unlikely]] return make_block_iterator_(block_pos);
     size_type const old_count = this->block_count();
     if (count > max_size() / bits_per_block - old_count) [[unlikely]] throw_overflow_error_();
-    // Append-then-rotate (the insert_uncounted_range_ shape): resize fills the
-    // tail with value, rotate slides it into the gap.
+    size_type const tail = old_count - block_pos;
+    if constexpr (block_bitwise_ops_) {
+      if (!std::is_constant_evaluated()) {
+        // Shift the tail right by `count` blocks (memmove absorbs the overlap),
+        // then stamp the vacated gap. Equivalent to append-then-rotate, but a
+        // single bulk move instead of O(n) element swaps.
+        base::resize(old_count + count, block_type { 0 });
+        block_type *const blocks = data();
+        std::memmove(static_cast<void *>(blocks + block_pos + count),
+                     static_cast<void *>(blocks + block_pos),
+                     static_cast<std::size_t>(tail) * sizeof(block_type));
+        fill_blocks_unchecked_(blocks + block_pos, count, value);
+        bit_size_ += count * bits_per_block;
+        return make_block_iterator_(block_pos);
+      }
+    }
+    // Append-then-rotate fallback (constant evaluation, or a custom allocator):
+    // resize fills the tail with value, rotate slides it into the gap.
     base::resize(old_count + count, value);
     std::rotate(data() + block_pos, data() + old_count, data() + old_count + count);
     bit_size_ += count * bits_per_block;

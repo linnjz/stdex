@@ -1524,6 +1524,94 @@ void test_fuzz_insert_erase_blocks()
 }
 
 // ==================================================================
+// 17c. fuzz range insert / assign (bulk block fast paths)
+// ==================================================================
+void test_fuzz_range_insert_assign()
+{
+  SECTION("fuzz range insert / assign");
+  std::mt19937 rng(0x5EED1234u);
+  // Exercises the block-level fast path for insert(pos, first, last) and
+  // assign(first, last): contiguous and non-contiguous forward sources, plus
+  // large block-spanning ranges that touch a partial tail block.
+  auto run = [&rng]<class BS>(int const ops) {
+    BS bs;
+    std::vector<char> ref;
+    for (int i = 0; i < ops; ++i) {
+      unsigned const which = rng() % 3u;
+      if (which == 0) {
+        std::size_t const count = static_cast<std::size_t>(rng()) % 400u;
+        std::vector<char> src(count);
+        for (char &c : src) c = char(rng() & 1u);
+        std::size_t const pos = ref.empty() ? 0u : static_cast<std::size_t>(rng()) % (ref.size() + 1u);
+        bs.insert(pos, src.begin(), src.end());
+        ref.insert(ref.begin() + static_cast<std::ptrdiff_t>(pos), src.begin(), src.end());
+      } else if (which == 1) {
+        std::size_t const count = static_cast<std::size_t>(rng()) % 200u;
+        std::forward_list<char> fl;
+        for (std::size_t k = 0; k < count; ++k) fl.push_front(char(rng() & 1u));
+        std::vector<char> const src(fl.begin(), fl.end());
+        std::size_t const pos = ref.empty() ? 0u : static_cast<std::size_t>(rng()) % (ref.size() + 1u);
+        bs.insert(pos, fl.begin(), fl.end());
+        ref.insert(ref.begin() + static_cast<std::ptrdiff_t>(pos), src.begin(), src.end());
+      } else {
+        std::size_t const count = static_cast<std::size_t>(rng()) % 500u;
+        std::vector<char> src(count);
+        for (char &c : src) c = char(rng() & 1u);
+        bs.assign(src.begin(), src.end());
+        ref.assign(src.begin(), src.end());
+      }
+      CHECK_EQ(bs.size(), ref.size());
+      if ((i % 23) == 0) {
+        CHECK(equals_vec(bs, ref));
+        CHECK(tail_padding_zero(bs));
+      }
+    }
+    CHECK(equals_vec(bs, ref));
+    CHECK(tail_padding_zero(bs));
+  };
+  run.template operator()<BS64_0>(800);
+  run.template operator()<BS64_2>(800);
+  run.template operator()<BS32_4>(600);
+  run.template operator()<BS16_4>(600);
+  run.template operator()<BS8_8>(600);
+
+  {
+    // Large, block-spanning insert into a partial tail, then a large assign.
+    std::vector<char> initial(700, char(1));
+    initial.front() = char(0);
+    initial.back()  = char(0);
+    BS64_0 b        = make_from_vec<BS64_0>(initial);
+    std::vector<char> src(5000);
+    for (std::size_t i = 0; i < src.size(); ++i) src[i] = char((i * 13u + 5u) % 7u < 3u);
+    b.insert(513, src.begin(), src.end());
+    std::vector<char> expected = initial;
+    expected.insert(expected.begin() + 513, src.begin(), src.end());
+    CHECK(equals_vec(b, expected));
+    CHECK(tail_padding_zero(b));
+    b.assign(src.begin(), src.end());
+    CHECK(equals_vec(b, src));
+    CHECK(tail_padding_zero(b));
+  }
+  {
+    // std::vector<bool> proxy source through both bulk paths.
+    std::vector<bool> vb;
+    for (int i = 0; i < 777; ++i) vb.push_back(((i * 5u + 1u) % 3u) == 0u);
+    BS64_2 b(200, true);
+    b.insert(37, vb.begin(), vb.end());
+    bool ok = (b.size() == 200u + vb.size());
+    for (std::size_t i = 0; ok && i < vb.size(); ++i) ok = (static_cast<bool>(b[37 + i]) == vb[i]);
+    CHECK(ok);
+    CHECK(tail_padding_zero(b));
+    BS32_4 c;
+    c.assign(vb.begin(), vb.end());
+    ok = (c.size() == vb.size());
+    for (std::size_t i = 0; ok && i < vb.size(); ++i) ok = (static_cast<bool>(c[i]) == vb[i]);
+    CHECK(ok);
+    CHECK(tail_padding_zero(c));
+  }
+}
+
+// ==================================================================
 // 18. block mutators (from_blocks)
 // ==================================================================
 void test_block_mutators()
@@ -2534,6 +2622,7 @@ int main()
   test_insert_erase_bitwise();
   test_insert_erase_block_path();
   test_fuzz_insert_erase_blocks();
+  test_fuzz_range_insert_assign();
   test_block_mutators();
   test_assign_variants();
   test_conversions();
