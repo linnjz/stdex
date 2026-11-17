@@ -45,6 +45,29 @@
 
 namespace stdex
 {
+namespace inline_storage_detail
+{
+/// `synth-three-way`: use `<=>` when available, otherwise synthesize a
+/// `weak_ordering` from `<` (the standard algorithms' rule, also used by
+/// std::vector and std::inplace_vector). It lives beside inline_storage so any
+/// inline_storage-based container shares one definition instead of rolling its
+/// own; derived types reach it through `base::synth_three_way`.
+struct synth_three_way_fn
+{
+  template <class L, class R>
+  constexpr auto operator() (L const &lhs, R const &rhs) const
+  {
+    if constexpr (std::three_way_comparable_with<L, R>) {
+      return lhs <=> rhs;
+    } else {
+      if (lhs < rhs) return std::weak_ordering::less;
+      if (rhs < lhs) return std::weak_ordering::greater;
+      return std::weak_ordering::equivalent;
+    }
+  }
+};
+} // namespace inline_storage_detail
+
 struct stay_on_heap_t
 {
   explicit constexpr stay_on_heap_t() = default;
@@ -95,6 +118,12 @@ protected:
   static constexpr bool is_pocma_v        = allocator_traits::propagate_on_container_move_assignment::value;
   static constexpr bool is_pocs_v         = allocator_traits::propagate_on_container_swap::value;
   static constexpr bool is_always_equal_v = allocator_traits::is_always_equal::value;
+
+  /// Shared synth-three-way comparator (see inline_storage_detail above).
+  /// Derived containers call `base::synth_three_way(a, b)` or pass it as the
+  /// comparator to get std::vector-style ordering for element types that only
+  /// provide `<`.
+  static constexpr inline_storage_detail::synth_three_way_fn synth_three_way {};
 
   static constexpr bool allocators_equal_(allocator_type const &left, allocator_type const &right) noexcept
   {
