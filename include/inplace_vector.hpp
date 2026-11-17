@@ -344,14 +344,14 @@ public:
   using try_result_type = T *;
 #endif
   using value_type             = T;
-  using pointer                = T *;
-  using const_pointer          = T const *;
+  using pointer                = value_type *;
+  using const_pointer          = value_type const *;
   using reference              = value_type &;
   using const_reference        = value_type const &;
   using size_type              = std::size_t;
   using difference_type        = std::ptrdiff_t;
-  using iterator               = T *;
-  using const_iterator         = T const *;
+  using iterator               = value_type *;
+  using const_iterator         = value_type const *;
   using reverse_iterator       = std::reverse_iterator<iterator>;
   using const_reverse_iterator = std::reverse_iterator<const_iterator>;
 
@@ -388,13 +388,13 @@ public:
     append_range(std::ranges::subrange { std::move(first), std::move(last) });
   }
 
-  constexpr inplace_vector(std::initializer_list<T> ilist)
+  constexpr inplace_vector(std::initializer_list<value_type> ilist)
       : inplace_vector { ilist.begin(), ilist.end() }
   {
   }
 
 #ifdef __cpp_lib_containers_ranges
-  template <inplace_vector_detail::container_compatible_range<T> R>
+  template <inplace_vector_detail::container_compatible_range<value_type> R>
   constexpr inplace_vector(std::from_range_t, R &&rg)
       : inplace_vector {}
   {
@@ -402,7 +402,7 @@ public:
   }
 #endif
 
-  constexpr inplace_vector &operator=(std::initializer_list<T> ilist)
+  constexpr inplace_vector &operator= (std::initializer_list<value_type> ilist)
   {
     assign(ilist.begin(), ilist.end());
     return *this;
@@ -411,8 +411,8 @@ public:
 private:
   constexpr bool try_memset_fill_n_from_(size_type index, size_type count, const_reference value)
   {
-    constexpr bool memset_ok = uninitialized_detail::fill_memset_is_safe<decltype(data()), T>;
-    constexpr bool zero_ok   = uninitialized_detail::fill_zero_memset_is_safe<decltype(data()), T>;
+    constexpr bool memset_ok = uninitialized_detail::fill_memset_is_safe<decltype(data()), value_type>;
+    constexpr bool zero_ok   = uninitialized_detail::fill_zero_memset_is_safe<decltype(data()), value_type>;
 
     if constexpr (memset_ok) {
       if (!std::is_constant_evaluated()) {
@@ -437,8 +437,8 @@ private:
   }
 
   template <std::forward_iterator InputIt>
-  requires std::assignable_from<T &, std::iter_reference_t<InputIt>> &&
-           std::constructible_from<T, std::iter_reference_t<InputIt>>
+  requires std::assignable_from<value_type &, std::iter_reference_t<InputIt>> &&
+           std::constructible_from<value_type, std::iter_reference_t<InputIt>>
   constexpr void assign_forward_(InputIt first, size_type const count)
   {
     size_type const old    = size();
@@ -448,7 +448,7 @@ private:
     if (count > old) {
       std::ranges::advance(first, static_cast<std::iter_difference_t<InputIt>>(common));
 
-      if constexpr (uninitialized_detail::iter_copy_cat<InputIt, T *>::bitcopy_constructible) {
+      if constexpr (uninitialized_detail::iter_copy_cat<InputIt, value_type *>::bitcopy_constructible) {
         if (!std::is_constant_evaluated()) {
           (void) uninitialized_detail::invoke_memcpy(
               first, first + static_cast<std::iter_difference_t<InputIt>>(count - old),
@@ -467,8 +467,8 @@ private:
   }
 
   template <std::input_iterator InputIt, std::sentinel_for<InputIt> Sentinel>
-  requires std::assignable_from<T &, std::iter_reference_t<InputIt>> &&
-           std::constructible_from<T, std::iter_reference_t<InputIt>>
+  requires std::assignable_from<value_type &, std::iter_reference_t<InputIt>> &&
+           std::constructible_from<value_type, std::iter_reference_t<InputIt>>
   constexpr void assign_input_(InputIt first, Sentinel last)
   {
     size_type i { 0 };
@@ -484,10 +484,10 @@ private:
 public:
   // ---------- assign ----------
   template <std::input_iterator InputIt, std::sentinel_for<InputIt> Sentinel>
-  requires std::constructible_from<T, std::iter_reference_t<InputIt>>
+  requires std::constructible_from<value_type, std::iter_reference_t<InputIt>>
   constexpr void assign(InputIt first, Sentinel last)
   {
-    if constexpr (std::assignable_from<T &, std::iter_reference_t<InputIt>>) {
+    if constexpr (std::assignable_from<value_type &, std::iter_reference_t<InputIt>>) {
       if constexpr (std::forward_iterator<InputIt>) {
         size_type const count = static_cast<size_type>(std::ranges::distance(first, last));
         if (count > capacity()) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
@@ -508,7 +508,7 @@ public:
     }
   }
 
-  template <inplace_vector_detail::container_compatible_range<T> R>
+  template <inplace_vector_detail::container_compatible_range<value_type> R>
   constexpr void assign_range(R &&rg)
   {
     assign(std::ranges::begin(rg), std::ranges::end(rg));
@@ -518,28 +518,28 @@ public:
   {
     if (count > capacity()) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
 
-    if constexpr (std::is_assignable_v<T &, const_reference>) {
+    value_type const copy(value);
+    if constexpr (std::is_assignable_v<value_type &, const_reference>) {
       size_type const old    = size();
       size_type const common = count < old ? count : old;
 
-      (void) std::fill_n(data(), common, value);
-      
+      (void) std::fill(data(), data() + common, copy);
+
       if (count > old) {
-        if (try_memset_fill_n_from_(old, count, value)) {
+        if (try_memset_fill_n_from_(old, count, copy)) {
           storage_.set_size(count);
         } else {
-          for (size_type i = old; i < count; ++i) emplace_at_unchecked_(i, value);
+          for (size_type i = old; i < count; ++i) emplace_at_unchecked_(i, copy);
         }
       }
       if (count < old) storage_.destroy_from(count);
     } else {
-      T const copy(value); // value may alias an element destroyed by clear()
       clear();
       for (size_type i = 0; i < count; ++i) emplace_at_unchecked_(i, copy);
     }
   }
 
-  constexpr void assign(std::initializer_list<T> ilist) { assign(ilist.begin(), ilist.end()); }
+  constexpr void assign(std::initializer_list<value_type> ilist) { assign(ilist.begin(), ilist.end()); }
 
   // ---------- iterators ----------
   [[nodiscard]] constexpr iterator begin() noexcept { return data(); }
@@ -578,7 +578,7 @@ private:
 
 public:
   constexpr void resize(size_type const count)
-  requires std::default_initializable<T>
+  requires std::default_initializable<value_type>
   {
     size_type const old = resize_prepare_(count);
     if (count <= old) return;
@@ -645,18 +645,18 @@ public:
     return data()[size() - 1];
   }
 
-  [[nodiscard]] constexpr T *data() noexcept { return storage_.data(); }
-  [[nodiscard]] constexpr T const *data() const noexcept { return storage_.data(); }
+  [[nodiscard]] constexpr value_type *data() noexcept { return storage_.data(); }
+  [[nodiscard]] constexpr value_type const *data() const noexcept { return storage_.data(); }
 
   // ---------- modifiers ----------
   template <class... Args>
-  requires std::constructible_from<T, Args...>
+  requires std::constructible_from<value_type, Args...>
   constexpr reference unchecked_emplace_back(Args &&...args)
       noexcept(noexcept(storage_.emplace_at(size(), std::forward<Args>(args)...)))
   {
     size_type const index = size();
     assert(index < capacity());
-    T &element = storage_.emplace_at(index, std::forward<Args>(args)...);
+    value_type &element = storage_.emplace_at(index, std::forward<Args>(args)...);
     storage_.set_size(index + 1);
     return element;
   }
@@ -667,14 +667,14 @@ public:
     return unchecked_emplace_back(value);
   }
 
-  constexpr reference unchecked_push_back(T &&value) noexcept(noexcept(unchecked_emplace_back(std::move(value))))
+  constexpr reference unchecked_push_back(value_type &&value) noexcept(noexcept(unchecked_emplace_back(std::move(value))))
   {
     assert(size() < capacity());
     return unchecked_emplace_back(std::move(value));
   }
 
   template <class... Args>
-  requires std::constructible_from<T, Args...>
+  requires std::constructible_from<value_type, Args...>
   constexpr reference emplace_back(Args &&...args)
   {
     if (size() == capacity()) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
@@ -682,10 +682,10 @@ public:
   }
 
   constexpr reference push_back(const_reference value) { return emplace_back(value); }
-  constexpr reference push_back(T &&value) { return emplace_back(std::move(value)); }
+  constexpr reference push_back(value_type &&value) { return emplace_back(std::move(value)); }
 
   template <class... Args>
-  requires std::constructible_from<T, Args...>
+  requires std::constructible_from<value_type, Args...>
   [[nodiscard]] constexpr try_result_type try_emplace_back(Args &&...args)
       noexcept(noexcept(unchecked_emplace_back(std::forward<Args>(args)...)))
   {
@@ -710,13 +710,13 @@ public:
     return try_emplace_back(value);
   }
 
-  [[nodiscard]] constexpr try_result_type try_push_back(T &&value)
+  [[nodiscard]] constexpr try_result_type try_push_back(value_type &&value)
       noexcept(noexcept(try_emplace_back(std::move(value))))
   {
     return try_emplace_back(std::move(value));
   }
 
-  template <inplace_vector_detail::container_compatible_range<T> R>
+  template <inplace_vector_detail::container_compatible_range<value_type> R>
   constexpr void append_range(R &&rg)
   {
     if constexpr (std::ranges::sized_range<R> || std::ranges::forward_range<R>) {
@@ -724,7 +724,7 @@ public:
       size_type const old   = size();
       if (count > capacity() - old) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
 
-      if constexpr (uninitialized_detail::iter_copy_cat<std::ranges::iterator_t<R>, T *>::bitcopy_constructible) {
+      if constexpr (uninitialized_detail::iter_copy_cat<std::ranges::iterator_t<R>, value_type *>::bitcopy_constructible) {
         if (!std::is_constant_evaluated()) {
           if (count != 0) {
             auto const src = std::ranges::begin(rg);
@@ -749,19 +749,19 @@ public:
   }
 
   template <class... Args>
-  requires std::constructible_from<T, Args...> && std::movable<T>
+  requires std::constructible_from<value_type, Args...> && std::movable<value_type>
   constexpr iterator emplace(const_iterator position, Args &&...args)
   {
     size_type const old = size();
     if (old == capacity()) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
     size_type const index = static_cast<size_type>(position - cbegin());
 
-    if constexpr (uninitialized_detail::iter_move_cat<T *, T *>::bitcopy_constructible) {
+    if constexpr (uninitialized_detail::iter_move_cat<value_type *, value_type *>::bitcopy_constructible) {
       if (!std::is_constant_evaluated()) {
-        T temp(std::forward<Args>(args)...);
+        value_type temp(std::forward<Args>(args)...);
         std::memmove(static_cast<void *>(data() + index + 1),
                      static_cast<void const *>(data() + index),
-                     (old - index) * sizeof(T));
+                     (old - index) * sizeof(value_type));
         storage_.emplace_at(index, std::move(temp));
         storage_.set_size(old + 1);
         return begin() + index;
@@ -779,25 +779,25 @@ public:
     return emplace(position, value);
   }
 
-  constexpr iterator insert(const_iterator position, T &&value)
+  constexpr iterator insert(const_iterator position, value_type &&value)
   {
     return emplace(position, std::move(value));
   }
 
   constexpr iterator insert(const_iterator position, size_type const count, const_reference value)
-  requires std::movable<T>
+  requires std::movable<value_type>
   {
     size_type const old = size();
     if (count > capacity() - old) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
     size_type const index = static_cast<size_type>(position - cbegin());
     if (count == 0) [[unlikely]] return begin() + index;
 
-    if constexpr (uninitialized_detail::iter_move_cat<T *, T *>::bitcopy_constructible) {
+    if constexpr (uninitialized_detail::iter_move_cat<value_type *, value_type *>::bitcopy_constructible) {
       if (!std::is_constant_evaluated()) {
-        T const copy(value); // value may alias an element shifted by memmove
+        value_type const copy(value); // value may alias an element shifted by memmove
         std::memmove(static_cast<void *>(data() + index + count),
                      static_cast<void const *>(data() + index),
-                     (old - index) * sizeof(T));
+                     (old - index) * sizeof(value_type));
         if (!try_memset_fill_n_from_(index, count, copy)) {
           storage_.uninitialized_fill_n_at(index, count, copy);
         }
@@ -812,7 +812,7 @@ public:
   }
 
   template <std::input_iterator InputIt, std::sentinel_for<InputIt> Sentinel>
-  requires std::constructible_from<T, std::iter_reference_t<InputIt>> && std::movable<T>
+  requires std::constructible_from<value_type, std::iter_reference_t<InputIt>> && std::movable<value_type>
   constexpr iterator insert(const_iterator position, InputIt first, Sentinel last)
   {
     size_type const old   = size();
@@ -823,15 +823,15 @@ public:
       if (count > capacity() - old) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
       if (count == 0) [[unlikely]] return begin() + index;
 
-      constexpr bool can_relocate = uninitialized_detail::iter_move_cat<T *, T *>::bitcopy_constructible;
-      constexpr bool can_copy_in  = uninitialized_detail::iter_copy_cat<InputIt, T *>::bitcopy_constructible;
+      constexpr bool can_relocate = uninitialized_detail::iter_move_cat<value_type *, value_type *>::bitcopy_constructible;
+      constexpr bool can_copy_in  = uninitialized_detail::iter_copy_cat<InputIt, value_type *>::bitcopy_constructible;
 
       if constexpr (can_relocate && can_copy_in) {
         if (!std::is_constant_evaluated()) {
           std::memmove(static_cast<void *>(data() + index + count),
                        static_cast<void const *>(data() + index),
-                       (old - index) * sizeof(T));
-          std::memcpy(static_cast<void *>(data() + index), std::to_address(first), count * sizeof(T));
+                       (old - index) * sizeof(value_type));
+          std::memcpy(static_cast<void *>(data() + index), std::to_address(first), count * sizeof(value_type));
           storage_.set_size(old + count);
           return begin() + index;
         }
@@ -844,27 +844,27 @@ public:
     return begin() + index;
   }
 
-  template <inplace_vector_detail::container_compatible_range<T> R>
-  requires std::movable<T>
+  template <inplace_vector_detail::container_compatible_range<value_type> R>
+  requires std::movable<value_type>
   constexpr iterator insert_range(const_iterator position, R &&rg)
   {
     return insert(position, std::ranges::begin(rg), std::ranges::end(rg));
   }
 
-  constexpr iterator insert(const_iterator position, std::initializer_list<T> ilist)
-  requires std::movable<T>
+  constexpr iterator insert(const_iterator position, std::initializer_list<value_type> ilist)
+  requires std::movable<value_type>
   {
     return insert(position, ilist.begin(), ilist.end());
   }
 
-  constexpr iterator erase(const_iterator position) noexcept(std::is_nothrow_move_assignable_v<T>)
-  requires std::movable<T>
+  constexpr iterator erase(const_iterator position) noexcept(std::is_nothrow_move_assignable_v<value_type>)
+  requires std::movable<value_type>
   {
     return erase(position, position + 1);
   }
 
-  constexpr iterator erase(const_iterator first, const_iterator last) noexcept(std::is_nothrow_move_assignable_v<T>)
-  requires std::movable<T>
+  constexpr iterator erase(const_iterator first, const_iterator last) noexcept(std::is_nothrow_move_assignable_v<value_type>)
+  requires std::movable<value_type>
   {
     size_type const old   = size();
     size_type const index = static_cast<size_type>(first - cbegin());
@@ -879,8 +879,8 @@ public:
 
   constexpr void clear() noexcept { storage_.destroy_from(0); }
 
-  constexpr void swap(inplace_vector &other) noexcept(std::is_nothrow_swappable_v<T> && std::is_nothrow_move_constructible_v<T>)
-  requires std::swappable<T>
+  constexpr void swap(inplace_vector &other) noexcept(std::is_nothrow_swappable_v<value_type> && std::is_nothrow_move_constructible_v<value_type>)
+  requires std::swappable<value_type>
   {
     if (this == std::addressof(other)) return;
 
@@ -891,7 +891,7 @@ public:
 
     std::swap_ranges(smaller->data(), smaller->data() + common, bigger->data());
 
-    if constexpr (uninitialized_detail::iter_move_cat<T *, T *>::bitcopy_constructible) {
+    if constexpr (uninitialized_detail::iter_move_cat<value_type *, value_type *>::bitcopy_constructible) {
       if (!std::is_constant_evaluated()) {
         (void) uninitialized_detail::invoke_memcpy(bigger->data() + common, bigger->data() + extra,
                                                    smaller->data() + common, smaller->data() + extra);
@@ -915,13 +915,13 @@ public:
 
   // ---------- comparison ----------
   friend constexpr bool operator==(inplace_vector const &lhs, inplace_vector const &rhs)
-  requires std::equality_comparable<T>
+  requires std::equality_comparable<value_type>
   {
     return lhs.size() == rhs.size() && std::equal(lhs.begin(), lhs.end(), rhs.begin());
   }
 
   friend constexpr auto operator<=>(inplace_vector const &lhs, inplace_vector const &rhs)
-  requires requires(T const &lhs_value, T const &rhs_value) {
+  requires requires(value_type const &lhs_value, value_type const &rhs_value) {
     inplace_vector_detail::synth_three_way(lhs_value, rhs_value);
   }
   {
@@ -930,30 +930,30 @@ public:
   }
 
 private:
-  inplace_vector_detail::storage_for_t<T, N> storage_ {};
+  inplace_vector_detail::storage_for_t<value_type, N> storage_ {};
 };
 
-/// Zero-capacity specialization: empty for every `T`, trivially copyable, and
+/// Zero-capacity specialization: empty for every `value_type`, trivially copyable, and
 /// every operation that would add an element throws `std::bad_alloc`.
 template <class T>
 class inplace_vector<T, 0>
 {
 public:
   using value_type             = T;
-  using pointer                = T *;
-  using const_pointer          = T const *;
+  using pointer                = value_type *;
+  using const_pointer          = value_type const *;
   using reference              = value_type &;
   using const_reference        = value_type const &;
   using size_type              = std::size_t;
   using difference_type        = std::ptrdiff_t;
-  using iterator               = T *;
-  using const_iterator         = T const *;
+  using iterator               = value_type *;
+  using const_iterator         = value_type const *;
   using reverse_iterator       = std::reverse_iterator<iterator>;
   using const_reverse_iterator = std::reverse_iterator<const_iterator>;
 #if __cplusplus >= 202603L
-  using try_result_type = std::optional<T &>;
+  using try_result_type = std::optional<value_type &>;
 #else
-  using try_result_type = T *;
+  using try_result_type = value_type *;
 #endif
 
   constexpr inplace_vector() noexcept = default;
@@ -979,20 +979,20 @@ public:
     if (first != last) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
   }
 
-  constexpr inplace_vector(std::initializer_list<T> ilist)
+  constexpr inplace_vector(std::initializer_list<value_type> ilist)
   {
     if (ilist.size() != 0) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
   }
 
 #ifdef __cpp_lib_containers_ranges
-  template <inplace_vector_detail::container_compatible_range<T> R>
+  template <inplace_vector_detail::container_compatible_range<value_type> R>
   constexpr inplace_vector(std::from_range_t, R &&rg)
   {
     if (std::ranges::begin(rg) != std::ranges::end(rg)) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
   }
 #endif
 
-  constexpr inplace_vector &operator=(std::initializer_list<T> ilist)
+  constexpr inplace_vector &operator=(std::initializer_list<value_type> ilist)
   {
     if (ilist.size() != 0) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
     return *this;
@@ -1004,7 +1004,7 @@ public:
     if (first != last) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
   }
 
-  template <inplace_vector_detail::container_compatible_range<T> R>
+  template <inplace_vector_detail::container_compatible_range<value_type> R>
   constexpr void assign_range(R &&rg)
   {
     if (std::ranges::begin(rg) != std::ranges::end(rg)) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
@@ -1015,7 +1015,7 @@ public:
     if (count != 0) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
   }
 
-  constexpr void assign(std::initializer_list<T> ilist)
+  constexpr void assign(std::initializer_list<value_type> ilist)
   {
     if (ilist.size() != 0) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
   }
@@ -1057,13 +1057,13 @@ public:
   [[nodiscard]] constexpr reference operator[](size_type) noexcept
   {
     assert(false && "inplace_vector<T, 0>::operator[] is out of range");
-    return *static_cast<T *>(nullptr);
+    return *static_cast<value_type *>(nullptr);
   }
 
   [[nodiscard]] constexpr const_reference operator[](size_type) const noexcept
   {
     assert(false && "inplace_vector<T, 0>::operator[] is out of range");
-    return *static_cast<T const *>(nullptr);
+    return *static_cast<value_type const *>(nullptr);
   }
 
   [[nodiscard]] constexpr reference at(size_type) { inplace_vector_detail::throw_out_of_range_(); }
@@ -1071,31 +1071,31 @@ public:
   [[nodiscard]] constexpr reference front() noexcept
   {
     assert(false && "inplace_vector<T, 0>::front on empty");
-    return *static_cast<T *>(nullptr);
+    return *static_cast<value_type *>(nullptr);
   }
   [[nodiscard]] constexpr const_reference front() const noexcept
   {
     assert(false && "inplace_vector<T, 0>::front on empty");
-    return *static_cast<T const *>(nullptr);
+    return *static_cast<value_type const *>(nullptr);
   }
   [[nodiscard]] constexpr reference back() noexcept
   {
     assert(false && "inplace_vector<T, 0>::back on empty");
-    return *static_cast<T *>(nullptr);
+    return *static_cast<value_type *>(nullptr);
   }
   [[nodiscard]] constexpr const_reference back() const noexcept
   {
     assert(false && "inplace_vector<T, 0>::back on empty");
-    return *static_cast<T const *>(nullptr);
+    return *static_cast<value_type const *>(nullptr);
   }
 
-  [[nodiscard]] constexpr T *data() noexcept { return nullptr; }
-  [[nodiscard]] constexpr T const *data() const noexcept { return nullptr; }
+  [[nodiscard]] constexpr value_type *data() noexcept { return nullptr; }
+  [[nodiscard]] constexpr value_type const *data() const noexcept { return nullptr; }
 
   template <class... Args>
   constexpr reference emplace_back(Args &&...) { inplace_vector_detail::throw_bad_alloc_(); }
   constexpr reference push_back(const_reference) { inplace_vector_detail::throw_bad_alloc_(); }
-  constexpr reference push_back(T &&) { inplace_vector_detail::throw_bad_alloc_(); }
+  constexpr reference push_back(value_type &&) { inplace_vector_detail::throw_bad_alloc_(); }
   template <class... Args>
   [[nodiscard]] constexpr try_result_type try_emplace_back(Args &&...)
   {
@@ -1113,7 +1113,7 @@ public:
     return nullptr;
 #endif
   }
-  [[nodiscard]] constexpr try_result_type try_push_back(T &&)
+  [[nodiscard]] constexpr try_result_type try_push_back(value_type &&)
   {
 #if __cplusplus >= 202603L
     return std::nullopt;
@@ -1122,7 +1122,7 @@ public:
 #endif
   }
 
-  template <inplace_vector_detail::container_compatible_range<T> R>
+  template <inplace_vector_detail::container_compatible_range<value_type> R>
   constexpr void append_range(R &&rg)
   {
     if (std::ranges::begin(rg) != std::ranges::end(rg)) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
@@ -1133,7 +1133,7 @@ public:
   template <class... Args>
   constexpr iterator emplace(const_iterator, Args &&...) { inplace_vector_detail::throw_bad_alloc_(); }
   constexpr iterator insert(const_iterator, const_reference) { inplace_vector_detail::throw_bad_alloc_(); }
-  constexpr iterator insert(const_iterator, T &&) { inplace_vector_detail::throw_bad_alloc_(); }
+  constexpr iterator insert(const_iterator, value_type &&) { inplace_vector_detail::throw_bad_alloc_(); }
   constexpr iterator insert(const_iterator, size_type const count, const_reference)
   {
     if (count != 0) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
@@ -1145,13 +1145,13 @@ public:
     if (first != last) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
     return nullptr;
   }
-  template <inplace_vector_detail::container_compatible_range<T> R>
+  template <inplace_vector_detail::container_compatible_range<value_type> R>
   constexpr iterator insert_range(const_iterator, R &&rg)
   {
     if (std::ranges::begin(rg) != std::ranges::end(rg)) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
     return nullptr;
   }
-  constexpr iterator insert(const_iterator, std::initializer_list<T> ilist)
+  constexpr iterator insert(const_iterator, std::initializer_list<value_type> ilist)
   {
     if (ilist.size() != 0) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
     return nullptr;
