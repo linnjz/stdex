@@ -97,7 +97,7 @@ struct mode_traits<hash_nano_t>
   static constexpr bool is_nano           = true;
 };
 
-inline constexpr auto default_secret = std::to_array<std::uint64_t>({
+inline constexpr auto kDefaultSecret = std::to_array<std::uint64_t>({
     0x2D'35'8D'CC'AA'6C'78'A5ULL,
     0x8B'B8'4B'93'96'2E'AC'C9ULL,
     0x4B'33'A6'2E'D4'33'D4'A3ULL,
@@ -108,7 +108,7 @@ inline constexpr auto default_secret = std::to_array<std::uint64_t>({
     0xAA'AA'AA'AA'AA'AA'AA'AAULL,
 });
 
-static_assert(default_secret.size() == 8);
+static_assert(kDefaultSecret.size() == 8);
 
 template <typename T>
 concept scalar_hashable = std::integral<std::remove_cvref_t<T>> ||
@@ -260,7 +260,7 @@ template <byte_like Byte, hash_mode Mode>
 template <byte_like Byte, hash_mode Mode = hash_standard_t>
 [[nodiscard]] constexpr std::uint64_t hash_bytes(std::span<Byte const> const input, std::uint64_t const seed = 0) noexcept
 {
-  return hash_detail::hash_bytes_impl(Mode {}, input, seed, hash_detail::default_secret);
+  return hash_detail::hash_bytes_impl(Mode {}, input, seed, hash_detail::kDefaultSecret);
 }
 
 template <byte_like Byte, hash_mode Mode = hash_standard_t>

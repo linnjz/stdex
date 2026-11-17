@@ -258,7 +258,7 @@ struct inline_storage : public Traits
 
   [[nodiscard]] constexpr hasher hash_function() const noexcept { return hasher_; }
   [[nodiscard]] constexpr key_equal key_eq() const noexcept { return key_eq_; }
-  [[nodiscard]] constexpr allocator_type get_allocator() const noexcept { return alloc_; }
+  [[nodiscard]] constexpr allocator_type get_allocator() const noexcept(std::is_nothrow_copy_constructible_v<allocator_type>) { return alloc_; }
 
   [[nodiscard]] constexpr bool is_heap() const noexcept { return inline_capacity == 0 || storage_mode_ == storage_mode::heap; }
   [[nodiscard]] constexpr bool is_stack() const noexcept { return !is_heap(); }

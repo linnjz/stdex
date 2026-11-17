@@ -716,12 +716,12 @@ constexpr decltype(auto) at_index(Self &&self, F &&f)
 
 /// Cartesian visit (std::visit alignment). A single variant dispatches through
 /// at_index<size()>. For two variants the N×M product is flattened: when
-/// K = N·M <= MV_FLAT_LIMIT a single stamped switch over flat = I*M + J is
-/// used (fastest per the r04 probe); when K > MV_FLAT_LIMIT two at_index
+/// K = N·M <= kMvFlatLimit a single stamped switch over flat = I*M + J is
+/// used (fastest per the r04 probe); when K > kMvFlatLimit two at_index
 /// dispatches are nested (faster than any function-pointer table at that size).
 /// Three or more variants dispatch the leading variant, wrap the visitor to
 /// record its value, and recurse over the remaining variants.
-inline constexpr std::size_t MV_FLAT_LIMIT = 256;
+inline constexpr std::size_t kMvFlatLimit = 256;
 
 /// Proxy whose index() returns the flattened pair index I*M + J.
 struct flat_self
@@ -738,7 +738,7 @@ constexpr decltype(auto) visit_2(Visitor &&vis, A &&a, B &&b)
   constexpr std::size_t NA = std::remove_cvref_t<A>::size();
   constexpr std::size_t NB = std::remove_cvref_t<B>::size();
   constexpr std::size_t K  = NA * NB;
-  if constexpr (K <= MV_FLAT_LIMIT) {
+  if constexpr (K <= kMvFlatLimit) {
     return at_index<K>(flat_self { a.index() * NB + b.index() }, [&]<std::size_t n>(std::integral_constant<std::size_t, n>) -> decltype(auto)
     {
       return vis(std::forward_like<A>(a).template get<n / NB>(), std::forward_like<B>(b).template get<n % NB>());
