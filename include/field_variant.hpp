@@ -123,27 +123,10 @@ struct storage_meta
   /// - Value members are stored without cv-qualifiers, because
   ///   std::construct_at does not accept const T*; const semantics are
   ///   preserved at the member_type API layer.
-  template <class M>
-  struct storage_of
-  {
-    using type = std::remove_cv_t<M>;
-  };
-
-  template <class M>
-  struct storage_of<M &>
-  {
-    using type = std::remove_reference_t<M> *;
-  };
-
-  template <class M>
-  struct storage_of<M &&>
-  {
-    using type = std::remove_reference_t<M> *;
-  };
-
-  template <std::size_t I>
-  using storage_type = typename storage_of<member_type<I>>::type;
-
+  template <class M> struct storage_of       { using type = std::remove_cv_t<M>; };
+  template <class M> struct storage_of<M &>  { using type = std::remove_reference_t<M> *; };
+  template <class M> struct storage_of<M &&> { using type = std::remove_reference_t<M> *; };
+  template <std::size_t I> using storage_type = typename storage_of<member_type<I>>::type;
 
   static constexpr auto metadata = [] consteval noexcept
   {
@@ -232,13 +215,7 @@ struct storage_meta
         m.are_all_mems_compare_nothrow      = false;
       } else if constexpr (!std::is_empty_v<member_plain_t>) {
         m.are_all_mems_three_way_comparable &= std::three_way_comparable<member_plain_t>;
-        m.are_all_mems_compare_nothrow &= std::three_way_comparable<member_plain_t> &&
-        requires (member_plain_t const &a, member_plain_t const &b)
-        {
-          {
-            a <=> b
-          } noexcept;
-        };
+        m.are_all_mems_compare_nothrow &= std::three_way_comparable<member_plain_t> && requires (member_plain_t const &a, member_plain_t const &b) { { a <=> b } noexcept; };
       }
 
       if constexpr (std::is_same_v<storage_t, bool>) {
@@ -314,8 +291,7 @@ struct storage_base<T> : storage_meta<T>
       std::array<std::meta::info, member_count> members;
       template for (constexpr auto I : std::views::iota(0zu, member_count))
       {
-        members[I] = std::meta::data_member_spec(^^storage_type<I>, {
-                                                                        .name = std::meta::identifier_of(nonstatic_data_members[I]) });
+        members[I] = std::meta::data_member_spec(^^storage_type<I>, { .name = std::meta::identifier_of(nonstatic_data_members[I]) });
       }
       return members;
     }());
@@ -371,14 +347,16 @@ struct storage_base<T> : storage_meta<T>
       (std::is_array_v<storage_type<I>>
            ? (sizeof...(Args) == 0 ||
               (std::is_nothrow_constructible_v<std::remove_extent_t<storage_type<I>>, Args> && ...))
-           : std::is_nothrow_constructible_v<storage_type<I>, Args...>) )
+           : std::is_nothrow_constructible_v<storage_type<I>, Args...>))
   {
     static_assert(I < member_count, "Index out of range");
     assert(!has_value() && "construct: storage already engaged");
     using storage_t = storage_type<I>;
     if constexpr (std::is_reference_v<member_type<I>>) {
-      static_assert(sizeof...(Args) == 1 && (std::is_lvalue_reference_v<Args> && ...), "construct for a reference member requires exactly one lvalue argument");
-      static_assert(!(std::reference_constructs_from_temporary_v<member_type<I>, Args> && ...), "construct for a reference member would bind to a temporary");
+      static_assert(sizeof...(Args) == 1 && (std::is_lvalue_reference_v<Args> && ...),
+                    "construct for a reference member requires exactly one lvalue argument");
+      static_assert(!(std::reference_constructs_from_temporary_v<member_type<I>, Args> && ...),
+                    "construct for a reference member would bind to a temporary");
 #ifdef P2996R13_meta_reflection_define_aggregate
       std::construct_at(std::addressof(u_.[:member_refl<I>():]), std::addressof(std::forward<Args>(args)...));
 #else
@@ -388,7 +366,8 @@ struct storage_base<T> : storage_meta<T>
       /// [specialized.construct]/2 (N5032) forbids construct_at with arguments
       /// for array types, so arrays are initialized via braced placement new:
       /// each argument value-initializes one element in place.
-      static_assert(sizeof...(Args) == 0 || sizeof...(Args) == std::extent_v<storage_t>, "array member: pass exactly one initializer per element, or none for value-initialization");
+      static_assert(sizeof...(Args) == 0 || sizeof...(Args) == std::extent_v<storage_t>,
+                    "array member: pass exactly one initializer per element, or none for value-initialization");
 #ifdef P2996R13_meta_reflection_define_aggregate
       ::new (static_cast<void *>(std::addressof(u_.[:member_refl<I>():]))) storage_t { std::forward<Args>(args)... };
 #else
@@ -472,9 +451,12 @@ struct storage_base<T> : storage_meta<T>
   {
     static_assert(I < member_count, "Index out of range");
     assert(!has_value() && "construct: storage already engaged");
-    static_assert((std::is_same_v<std::remove_cvref_t<Args>, std::remove_cvref_t<member_type<I>>> && ...), "argument type must match the reference member type");
-    static_assert(sizeof...(Args) == 1 && (std::is_lvalue_reference_v<Args> && ...), "construct for a reference member requires exactly one lvalue argument");
-    static_assert(!(std::reference_constructs_from_temporary_v<member_type<I>, Args> && ...), "construct for a reference member would bind to a temporary");
+    static_assert((std::is_same_v<std::remove_cvref_t<Args>, std::remove_cvref_t<member_type<I>>> && ...),
+                  "argument type must match the reference member type");
+    static_assert(sizeof...(Args) == 1 && (std::is_lvalue_reference_v<Args> && ...),
+                  "construct for a reference member requires exactly one lvalue argument");
+    static_assert(!(std::reference_constructs_from_temporary_v<member_type<I>, Args> && ...),
+                  "construct for a reference member would bind to a temporary");
     auto addr = reinterpret_cast<std::uintptr_t>(std::addressof(std::forward<Args>(args)...));
     assert((addr & metadata.ref_tag_mask) == 0); ///< Alignment guarantee (defensive check).
     slot = addr | I;
@@ -553,7 +535,9 @@ struct storage_base<T> : storage_meta<T>
     if constexpr (I == metadata.bool_type_index) {
       std::construct_at(&u_.bool_value, std::forward<Args>(args)...);
     } else {
-      static_assert(sizeof...(Args) == 0 || (sizeof...(Args) == 1 && (std::is_same_v<std::remove_cvref_t<Args>, std::remove_cv_t<member_type<I>>> && ...)), "construct for an empty member requires no arguments");
+      static_assert(sizeof...(Args) == 0 || (sizeof...(Args) == 1 &&
+                    (std::is_same_v<std::remove_cvref_t<Args>, std::remove_cv_t<member_type<I>>> && ...)),
+                    "construct for an empty member requires no arguments");
       std::construct_at(&u_.state_code, code_of_member(I));
     }
     return (*this).template get<I>();
@@ -776,12 +760,10 @@ constexpr decltype(auto) visit_impl(Visitor &&vis, V &&v, W &&w, Rest &&...rest)
     using VV = std::remove_cvref_t<V>;
     return at_index<VV::size()>(v, [&]<std::size_t I>(std::integral_constant<std::size_t, I>) -> decltype(auto)
     {
-      return visit_impl(
-          [&](auto &&...vals) -> decltype(auto)
+      return visit_impl([&](auto &&...vals) -> decltype(auto)
       {
         return vis(std::forward_like<V>(v).template get<I>(), std::forward<decltype(vals)>(vals)...);
-      },
-          w, rest...);
+      }, w, rest...);
     });
   }
 }
@@ -836,19 +818,18 @@ class field_variant
   using storage_base = field_variant_detail::storage_base<U>;
 
   using meta = storage_meta<T>;
-  static_assert(meta::member_count > 0 && []<std::size_t... Is>(std::index_sequence<Is...>) constexpr noexcept -> bool
-  {
-    return (std::is_destructible_v<std::tuple_element_t<Is, typename meta::member_types>> && ...);
-  }(std::make_index_sequence<meta::member_count> {}),
-                "variant_builder<T>: all non-static data members of T must satisfy Cpp17Destructible "
+  static_assert(meta::member_count > 0 &&
+                []<std::size_t... Is>(std::index_sequence<Is...>) constexpr noexcept -> bool
+                {
+                  return (std::is_destructible_v<std::tuple_element_t<Is, typename meta::member_types>> && ...);
+                }(std::make_index_sequence<meta::member_count> {}),
+                "field_variant<T>: all non-static data members of T must satisfy Cpp17Destructible "
                 "requirements (N4950 [variant.variant.general]/2).");
 
 public:
   using member_types = typename meta::member_types;
-  template <std::size_t I>
-  using member_type = typename meta::template member_type<I>;
-  template <std::size_t I>
-  using storage_type = typename meta::template storage_type<I>;
+  template <std::size_t I> using member_type = typename meta::template member_type<I>;
+  template <std::size_t I> using storage_type = typename meta::template storage_type<I>;
 
   constexpr field_variant() = default;
 
@@ -1054,8 +1035,7 @@ public:
   /// std::variant comparison semantics: engaged members compare by value when
   /// the index matches, otherwise indices compare first; the disengaged state
   /// behaves like valueless_by_exception (less than any engaged value).
-  constexpr auto operator<=> (field_variant const &other) const
-      noexcept(meta::metadata.are_all_mems_compare_nothrow)
+  constexpr auto operator<=> (field_variant const &other) const noexcept(meta::metadata.are_all_mems_compare_nothrow)
   requires (meta::metadata.are_all_mems_three_way_comparable)
   {
     using cmp_t = typename field_variant_detail::compare_cat_of<typename meta::member_types>::type;
@@ -1083,8 +1063,7 @@ public:
   /// operator== candidates (and != is rewritten from ==). std::variant's
   /// equality is therefore provided explicitly, defined in terms of the
   /// same ordering semantics as operator<=>.
-  constexpr bool operator== (field_variant const &other) const
-      noexcept(meta::metadata.are_all_mems_compare_nothrow)
+  constexpr bool operator== (field_variant const &other) const noexcept(meta::metadata.are_all_mems_compare_nothrow)
   requires (meta::metadata.are_all_mems_three_way_comparable)
   {
     return (*this <=> other) == 0;

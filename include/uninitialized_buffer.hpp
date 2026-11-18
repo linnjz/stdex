@@ -101,6 +101,22 @@ public:
               std::is_copy_constructible_v<allocator_type>))
   = delete;
 
+  template <class Al = allocator_type>
+  requires (std::is_trivially_copyable_v<T> && std::is_copy_constructible_v<T> &&
+            std::constructible_from<allocator_type, Al>)
+  constexpr uninitialized_buffer(uninitialized_buffer const &other, Al &&allocator)
+      : allocator_(std::forward<Al>(allocator))
+      , count_(other.count_)
+  {
+    if (count_ != 0) {
+      data_ = allocator_traits::allocate(allocator_, count_);
+      allocation_guard guard { data_, count_, allocator_ };
+      ::stdex::uninitialized_copy_n(other.data(), static_cast<std::iter_difference_t<T *>>(count_),
+                                    data(), data() + count_, allocator_);
+      guard.dismiss();
+    }
+  }
+
   constexpr uninitialized_buffer &operator= (uninitialized_buffer const &other)
   requires (std::is_trivially_copyable_v<T> && std::is_copy_constructible_v<T> &&
             std::is_copy_assignable_v<T> && std::is_copy_assignable_v<allocator_type>)
@@ -146,6 +162,16 @@ public:
 
   constexpr uninitialized_buffer(uninitialized_buffer &&other) noexcept(std::is_nothrow_move_constructible_v<allocator_type>)
       : allocator_(std::move(other.allocator_))
+      , data_(std::exchange(other.data_, pointer {}))
+      , count_(std::exchange(other.count_, 0))
+  {
+  }
+
+  template <class Al = allocator_type>
+  requires std::constructible_from<allocator_type, Al>
+  constexpr uninitialized_buffer(uninitialized_buffer &&other, Al &&allocator)
+      noexcept(std::is_nothrow_constructible_v<allocator_type, Al>)
+      : allocator_(std::forward<Al>(allocator))
       , data_(std::exchange(other.data_, pointer {}))
       , count_(std::exchange(other.count_, 0))
   {
