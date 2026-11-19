@@ -169,6 +169,141 @@ private:
   std::array<block_type, block_count> blocks_ {};
 };
 
+[[nodiscard]] constexpr std::uint32_t load_u32(std::uint8_t const *const bytes) noexcept
+{
+  return std::bit_cast<std::uint32_t>(std::array<std::uint8_t, 4> { bytes[0], bytes[1], bytes[2], bytes[3] });
+}
+
+constexpr void store_u32(std::uint8_t *const bytes, std::uint32_t const value) noexcept
+{
+  auto const raw = std::bit_cast<std::array<std::uint8_t, 4>>(value);
+  bytes[0]       = raw[0];
+  bytes[1]       = raw[1];
+  bytes[2]       = raw[2];
+  bytes[3]       = raw[3];
+}
+
+/**
+ * @brief Single-allocation backing for the one-byte pilot table and the optional
+ *        @c uint32 remap table.
+ *
+ * @details Both tables are fixed after the build and are only ever read during
+ * queries. Packing them into one @c std::vector<std::uint8_t> means @c ptr_hash
+ * stores one allocator copy (inside this vector) instead of one per vector plus a
+ * redundant member copy, and performs a single allocation for both. The remap
+ * words are moved through a four-byte @c std::array and @c std::bit_cast, so no
+ * @c reinterpret_cast or union punning is required and both compile-time and
+ * runtime use one code path (bit_cast is constexpr and lowers to a single
+ * unaligned load/store).
+ * @c remap_offset_ equals the pilot count and separates the two regions.
+ */
+template <class Allocator>
+class heap_index_table
+{
+public:
+  using allocator_type = typename std::allocator_traits<Allocator>::template rebind_alloc<std::uint8_t>;
+
+  constexpr heap_index_table() = default;
+
+  constexpr explicit heap_index_table(Allocator const &allocator)
+      : bytes_ { allocator_type { allocator } }
+  {
+  }
+
+  constexpr heap_index_table(heap_index_table const &other, Allocator const &allocator)
+      : remap_offset_ { other.remap_offset_ }
+      , bytes_ { other.bytes_, allocator_type { allocator } }
+  {
+  }
+
+  constexpr heap_index_table(heap_index_table &&other, Allocator const &allocator)
+      : remap_offset_ { other.remap_offset_ }
+      , bytes_ { std::move(other.bytes_), allocator_type { allocator } }
+  {
+    other.remap_offset_ = 0;
+  }
+
+  constexpr void clear()
+  {
+    remap_offset_ = 0;
+    bytes_.clear();
+  }
+
+  /// Resize to @p bucket_count pilot bytes followed by @p remap_count uint32 words,
+  /// zero-initialized. Called once per build (the counts depend only on key_count).
+  constexpr void prepare(std::uint32_t const bucket_count, std::uint32_t const remap_count)
+  {
+    remap_offset_ = bucket_count;
+    bytes_.assign(static_cast<std::size_t>(bucket_count) + 4ULL * remap_count, std::uint8_t { 0 });
+  }
+
+  [[nodiscard]] constexpr std::uint8_t pilot(std::uint32_t const bucket) const noexcept { return bytes_[bucket]; }
+  constexpr void set_pilot(std::uint32_t const bucket, std::uint8_t const value) noexcept { bytes_[bucket] = value; }
+
+  constexpr void clear_pilots(std::uint32_t const bucket_count) noexcept
+  {
+    std::fill_n(bytes_.data(), bucket_count, std::uint8_t { 0 });
+  }
+
+  [[nodiscard]] constexpr std::uint32_t remap(std::uint32_t const index) const noexcept
+  {
+    return load_u32(bytes_.data() + remap_offset_ + 4ULL * index);
+  }
+
+  constexpr void set_remap(std::uint32_t const index, std::uint32_t const value) noexcept
+  {
+    store_u32(bytes_.data() + remap_offset_ + 4ULL * index, value);
+  }
+
+  constexpr void fill_remap(std::uint32_t const remap_count, std::uint32_t const value) noexcept
+  {
+    for (std::uint32_t i = 0; i < remap_count; ++i) set_remap(i, value);
+  }
+
+  [[nodiscard]] constexpr allocator_type get_allocator() const noexcept { return bytes_.get_allocator(); }
+
+private:
+  std::uint32_t remap_offset_ {};
+  std::vector<std::uint8_t, allocator_type> bytes_;
+};
+
+/// Inline twin of @c heap_index_table. Stack storage never allocates, so this is
+/// two fixed byte arrays with the same accessor surface; no allocator is stored.
+template <std::uint32_t MaxSlotCount, std::uint32_t MaxBucketCount>
+class stack_index_table
+{
+public:
+  constexpr void clear() noexcept {}
+  constexpr void prepare(std::uint32_t const, std::uint32_t const) noexcept {}
+
+  [[nodiscard]] constexpr std::uint8_t pilot(std::uint32_t const bucket) const noexcept { return pilot_bytes_[bucket]; }
+  constexpr void set_pilot(std::uint32_t const bucket, std::uint8_t const value) noexcept { pilot_bytes_[bucket] = value; }
+
+  constexpr void clear_pilots(std::uint32_t const bucket_count) noexcept
+  {
+    std::fill_n(pilot_bytes_.data(), bucket_count, 0);
+  }
+
+  [[nodiscard]] constexpr std::uint32_t remap(std::uint32_t const index) const noexcept
+  {
+    return load_u32(remap_bytes_.data() + 4ULL * index);
+  }
+
+  constexpr void set_remap(std::uint32_t const index, std::uint32_t const value) noexcept
+  {
+    store_u32(remap_bytes_.data() + 4ULL * index, value);
+  }
+
+  constexpr void fill_remap(std::uint32_t const remap_count, std::uint32_t const value) noexcept
+  {
+    for (std::uint32_t i = 0; i < remap_count; ++i) set_remap(i, value);
+  }
+
+private:
+  std::array<std::uint8_t, MaxBucketCount> pilot_bytes_ {};
+  std::array<std::uint8_t, static_cast<std::size_t>(MaxSlotCount) * 4U> remap_bytes_ {};
+};
+
 template <standard_allocator Allocator>
 struct heap_storage
 {
@@ -183,8 +318,8 @@ struct heap_storage
   using bucket_length_type = std::uint32_t; // A bucket may hold up to key_count keys, so it cannot be uint8_t.
   using offset_type        = std::uint32_t;
 
-  using pilot_table_type          = std::vector<pilot_value_type, rebind_alloc_t<pilot_value_type>>;
-  using remap_table_type          = std::vector<remap_value_type, rebind_alloc_t<remap_value_type>>;
+  // Single backing store for the pilot + remap tables; owns the one allocator copy.
+  using index_table_type          = heap_index_table<Allocator>;
 
   // eviction heap: (bucket_length, bucket_index_type)
   using eviction_heap_type        = std::vector<
@@ -212,6 +347,8 @@ struct stack_storage
 
   using pilot_table_type          = std::array<pilot_value_type, max_bucket_count>;
   using remap_table_type          = std::array<remap_value_type, max_slot_count>;
+
+  using index_table_type          = stack_index_table<max_slot_count, max_bucket_count>;
 
   using eviction_heap_type        = std::vector<std::pair<bucket_length_type, bucket_index_type>>;
   using bucket_length_prefix_type = std::vector<offset_type>;
@@ -397,8 +534,7 @@ private:
   using bucket_length_type = typename storage_type::bucket_length_type;
   using offset_type        = typename storage_type::offset_type;
 
-  using pilot_table_type          = typename storage_type::pilot_table_type;
-  using remap_table_type          = typename storage_type::remap_table_type;
+  using index_table_type          = typename storage_type::index_table_type;
   using eviction_heap_type        = typename storage_type::eviction_heap_type;
   using bucket_length_prefix_type = typename storage_type::bucket_length_prefix_type;
   using bucket_offsets_type       = typename storage_type::bucket_offsets_type;
@@ -456,10 +592,8 @@ private:
   template <std::forward_iterator Iterator, std::sentinel_for<Iterator> Sentinel>
   requires (storage_policy == ptr_hash_storage_policy::heap)
   constexpr ptr_hash(build_tag, Iterator first, Sentinel last, hasher hasher_arg, allocator_type const &allocator)
-      : pilots_ { rebind_alloc_t<pilot_value_type> { allocator } }
-      , remap_ { rebind_alloc_t<remap_value_type> { allocator } }
+      : index_table_ { allocator }
       , hasher_ { std::move(hasher_arg) }
-      , allocator_ { allocator }
   {
     if (!try_build_impl_(first, last)) [[unlikely]] {
       throw_runtime_error_("construction failure");
@@ -476,37 +610,31 @@ public:
 
   constexpr explicit ptr_hash(allocator_type const &allocator)
   requires (storage_policy == ptr_hash_storage_policy::heap)
-      : pilots_ { rebind_alloc_t<pilot_value_type> { allocator } }
-      , remap_ { rebind_alloc_t<remap_value_type> { allocator } }
-      , allocator_ { allocator }
+      : index_table_ { allocator }
   {
   }
 
   constexpr ptr_hash(ptr_hash const &other, allocator_type const &allocator)
   requires (storage_policy == ptr_hash_storage_policy::heap)
-      : pilots_ { other.pilots_, rebind_alloc_t<pilot_value_type> { allocator } }
-      , remap_ { other.remap_, rebind_alloc_t<remap_value_type> { allocator } }
+      : index_table_ { other.index_table_, allocator }
       , key_count_ { other.key_count_ }
       , slot_count_ { other.slot_count_ }
       , bucket_count_ { other.bucket_count_ }
       , slot_reciprocal_ { other.slot_reciprocal_ }
       , hash_seed_ { other.hash_seed_ }
       , hasher_ { other.hasher_ }
-      , allocator_ { allocator }
   {
   }
 
   constexpr ptr_hash(ptr_hash &&other, allocator_type const &allocator)
   requires (storage_policy == ptr_hash_storage_policy::heap)
-      : pilots_ { std::move(other.pilots_), rebind_alloc_t<pilot_value_type> { allocator } }
-      , remap_ { std::move(other.remap_), rebind_alloc_t<remap_value_type> { allocator } }
+      : index_table_ { std::move(other.index_table_), allocator }
       , key_count_ { std::exchange(other.key_count_, std::uint32_t { 0 }) }
       , slot_count_ { std::exchange(other.slot_count_, std::uint32_t { 0 }) }
       , bucket_count_ { std::exchange(other.bucket_count_, std::uint32_t { 0 }) }
       , slot_reciprocal_ { std::exchange(other.slot_reciprocal_, std::uint64_t { 0 }) }
       , hash_seed_ { std::exchange(other.hash_seed_, std::uint64_t { 0 }) }
       , hasher_ { std::move(other.hasher_) }
-      , allocator_ { allocator }
   {
   }
 
@@ -573,10 +701,7 @@ public:
 private:
   constexpr void reset_build_state_() noexcept
   {
-    if constexpr (storage_policy == ptr_hash_storage_policy::heap) {
-      pilots_.clear();
-      remap_.clear();
-    }
+    index_table_.clear();
     key_count_       = {};
     slot_count_      = {};
     bucket_count_    = {};
@@ -584,41 +709,20 @@ private:
     hash_seed_       = {};
   }
 
-  constexpr void prepare_pilots_(std::uint32_t const bucket_count)
-  {
-    if constexpr (storage_policy == ptr_hash_storage_policy::heap) {
-      pilots_.assign(bucket_count, pilot_value_type { 0 });
-    } else {
-      std::fill_n(pilots_.data(), bucket_count, pilot_value_type { 0 });
-    }
-  }
+  constexpr void prepare_pilots_(std::uint32_t const bucket_count) { index_table_.clear_pilots(bucket_count); }
 
-  constexpr void clear_remap_()
+  /// Size the single index allocation to hold @p bucket_count pilot bytes plus
+  /// @p remap_count uint32 words. Fixed for a given key_count, so it is done once
+  /// per build attempt loop rather than re-grown on every seed retry.
+  constexpr void prepare_index_(std::uint32_t const bucket_count, std::uint32_t const remap_count)
   {
-    if constexpr (storage_policy == ptr_hash_storage_policy::heap) {
-      remap_.clear();
-      remap_.shrink_to_fit();
-    }
-  }
-
-  constexpr void prepare_remap_(std::uint32_t const count, remap_value_type const fallback)
-  {
-    if constexpr (storage_policy == ptr_hash_storage_policy::heap) {
-      remap_.assign(count, fallback);
-    } else {
-      std::fill_n(remap_.data(), count, fallback);
-    }
-  }
-
-  constexpr void shrink_remap_()
-  {
-    if constexpr (storage_policy == ptr_hash_storage_policy::heap) remap_.shrink_to_fit();
+    index_table_.prepare(bucket_count, remap_count);
   }
 
   [[nodiscard]] constexpr bucket_offsets_type make_bucket_offsets_(std::uint32_t const count) const
   {
     if constexpr (storage_policy == ptr_hash_storage_policy::heap) {
-      return bucket_offsets_type(count, offset_type { 0 }, rebind_alloc_t<offset_type> { allocator_ });
+      return bucket_offsets_type(count, offset_type { 0 }, rebind_alloc_t<offset_type> { index_table_.get_allocator() });
     } else {
       return bucket_offsets_type(count, offset_type { 0 });
     }
@@ -627,7 +731,7 @@ private:
   [[nodiscard]] constexpr bucket_length_prefix_type make_bucket_length_prefix_(std::uint32_t const count) const
   {
     if constexpr (storage_policy == ptr_hash_storage_policy::heap) {
-      return bucket_length_prefix_type(count, offset_type { 0 }, rebind_alloc_t<offset_type> { allocator_ });
+      return bucket_length_prefix_type(count, offset_type { 0 }, rebind_alloc_t<offset_type> { index_table_.get_allocator() });
     } else {
       return bucket_length_prefix_type(count, offset_type { 0 });
     }
@@ -636,7 +740,7 @@ private:
   [[nodiscard]] constexpr bucket_order_type make_bucket_order_(std::uint32_t const count) const
   {
     if constexpr (storage_policy == ptr_hash_storage_policy::heap) {
-      return bucket_order_type(count, rebind_alloc_t<bucket_index_type> { allocator_ });
+      return bucket_order_type(count, rebind_alloc_t<bucket_index_type> { index_table_.get_allocator() });
     } else {
       return bucket_order_type(count);
     }
@@ -645,7 +749,7 @@ private:
   [[nodiscard]] constexpr slot_owner_buffer_type make_slot_owners_(std::uint32_t const count) const
   {
     if constexpr (storage_policy == ptr_hash_storage_policy::heap) {
-      return slot_owner_buffer_type(count, rebind_alloc_t<bucket_index_type> { allocator_ });
+      return slot_owner_buffer_type(count, rebind_alloc_t<bucket_index_type> { index_table_.get_allocator() });
     } else {
       return slot_owner_buffer_type(count);
     }
@@ -654,7 +758,7 @@ private:
   [[nodiscard]] constexpr hash_buffer_type make_hash_buffer_(std::uint32_t const count) const
   {
     if constexpr (storage_policy == ptr_hash_storage_policy::heap) {
-      return hash_buffer_type(count, rebind_alloc_t<std::uint64_t> { allocator_ });
+      return hash_buffer_type(count, rebind_alloc_t<std::uint64_t> { index_table_.get_allocator() });
     } else {
       return hash_buffer_type(count);
     }
@@ -663,7 +767,7 @@ private:
   [[nodiscard]] constexpr slot_scratch_type make_slot_scratch_(std::uint32_t const count) const
   {
     if constexpr (storage_policy == ptr_hash_storage_policy::heap) {
-      return slot_scratch_type(count, rebind_alloc_t<slot_index_type> { allocator_ });
+      return slot_scratch_type(count, rebind_alloc_t<slot_index_type> { index_table_.get_allocator() });
     } else {
       return slot_scratch_type(count);
     }
@@ -672,7 +776,7 @@ private:
   [[nodiscard]] constexpr occupied_slots_type make_occupied_slots_(std::uint32_t const bit_count) const
   {
     if constexpr (storage_policy == ptr_hash_storage_policy::heap) {
-      return occupied_slots_type(bit_count, rebind_alloc_t<std::uint64_t> { allocator_ });
+      return occupied_slots_type(bit_count, rebind_alloc_t<std::uint64_t> { index_table_.get_allocator() });
     } else {
       (void) bit_count;
       return occupied_slots_type {};
@@ -682,7 +786,7 @@ private:
   [[nodiscard]] constexpr eviction_heap_type make_eviction_heap_() const
   {
     if constexpr (storage_policy == ptr_hash_storage_policy::heap) {
-      return eviction_heap_type(rebind_alloc_t<std::pair<bucket_length_type, bucket_index_type>> { allocator_ });
+      return eviction_heap_type(rebind_alloc_t<eviction_heap_type> { index_table_.get_allocator() });
     } else {
       return eviction_heap_type {};
     }
@@ -700,19 +804,16 @@ private:
 
   constexpr void build_remap_(occupied_slots_type const &occupied_slots)
   {
-    if constexpr (options_value.hash_scheme == ptr_hash_scheme::perfect) {
-      clear_remap_();
-    } else {
+    if constexpr (options_value.hash_scheme == ptr_hash_scheme::minimal_perfect) {
       std::uint32_t const remapped_slot_count = slot_count_ - key_count_;
       if (remapped_slot_count == 0) [[unlikely]] {
-        clear_remap_();
         return;
       }
 
       // Entries for free high slots are never observed by a query, but keeping
       // them in range preserves the `index() < size()` guarantee for every input.
       remap_value_type const fallback = key_count_ == 0 ? 0 : static_cast<remap_value_type>(key_count_ - 1);
-      prepare_remap_(remapped_slot_count, fallback);
+      index_table_.fill_remap(remapped_slot_count, fallback);
 
       // Free low slots and occupied high slots are equinumerous, so the two
       // cursors meet exactly once per occupied high slot without extra storage.
@@ -725,10 +826,9 @@ private:
         }
         assert(next_high_slot < slot_count_ && "free/occupied slot counts diverged");
         if (next_high_slot >= slot_count_) [[unlikely]] break;
-        remap_[next_high_slot - key_count_] = static_cast<remap_value_type>(low_slot);
+        index_table_.set_remap(next_high_slot - key_count_, static_cast<remap_value_type>(low_slot));
         ++next_high_slot;
       }
-      shrink_remap_();
     }
   }
 
@@ -758,7 +858,7 @@ private:
         if (!distinct) [[unlikely]] continue;
       }
 
-      pilots_[bucket] = static_cast<pilot_value_type>(pilot);
+      index_table_.set_pilot(bucket, static_cast<pilot_value_type>(pilot));
       for (std::uint32_t i = 0; i < BucketSize; ++i) {
         context.occupied_slots[slots[i]] = true;
         context.slot_owners[slots[i]]    = bucket;
@@ -811,7 +911,7 @@ private:
         context.occupied_slots[slot] = true;
       }
       if (distinct) [[likely]] {
-        pilots_[bucket] = static_cast<pilot_value_type>(pilot);
+        index_table_.set_pilot(bucket, static_cast<pilot_value_type>(pilot));
         for (std::uint32_t i = 0; i < bucket_size; ++i) {
           context.slot_owners[context.slot_scratch[i]] = bucket;
         }
@@ -883,7 +983,7 @@ private:
 
     if (best_collision_score == (std::numeric_limits<std::uint64_t>::max)()) [[unlikely]] return false;
 
-    pilots_[bucket]                = static_cast<pilot_value_type>(best_pilot);
+    index_table_.set_pilot(bucket, static_cast<pilot_value_type>(best_pilot));
     std::uint64_t const pilot_hash = pilot_hash_value_(static_cast<pilot_value_type>(best_pilot));
 
     for (std::uint64_t const hash : bucket_hashes) {
@@ -895,7 +995,7 @@ private:
         std::push_heap(context.eviction_heap.begin(), context.eviction_heap.end());
 
         std::span<std::uint64_t const> const owner_hashes = context.bucket_hashes(owner);
-        std::uint64_t const owner_pilot_hash              = pilot_hash_value_(pilots_[owner]);
+        std::uint64_t const owner_pilot_hash              = pilot_hash_value_(index_table_.pilot(owner));
         for (std::uint64_t const owner_hash : owner_hashes) {
           slot_index_type const owner_slot   = slot_index_(owner_hash, owner_pilot_hash);
           context.occupied_slots[owner_slot] = false;
@@ -1049,6 +1149,14 @@ private:
     slot_reciprocal_ = slot_count_ == 0 ? 0 : static_cast<std::uint64_t>((std::numeric_limits<std::uint64_t>::max)() / slot_count_ + 1U);
     bucket_count_    = static_cast<std::uint32_t>(bucket_count64);
 
+    // The pilot and remap tables have fixed sizes for a given key_count, so the
+    // single backing allocation is sized once here and reused across seed retries.
+    std::uint32_t const remap_count =
+        (options_value.hash_scheme == ptr_hash_scheme::minimal_perfect && slot_count_ > key_count_)
+            ? static_cast<std::uint32_t>(slot_count_ - key_count_)
+            : std::uint32_t { 0 };
+    prepare_index_(bucket_count_, remap_count);
+
     hash_buffer_type hashes = make_hash_buffer_(key_count_);
     // Fixed-capacity storage has no allocator-backed fallback, so it always
     // provides the explicit radix buffer instead of letting the sorter allocate.
@@ -1071,7 +1179,7 @@ private:
             std::span<std::uint64_t> { radix_sort_buffer.data(), radix_sort_buffer.size() });
       } else {
         if constexpr (storage_policy == ptr_hash_storage_policy::heap) {
-          stable_radix_sort<radix_sort_options {}>(hashes.data(), hashes.data() + key_count_, rebind_alloc_t<std::uint64_t> { allocator_ });
+          stable_radix_sort<radix_sort_options {}>(hashes.data(), hashes.data() + key_count_, rebind_alloc_t<std::uint64_t> { index_table_.get_allocator() });
         } else {
           stable_radix_sort<radix_sort_options {}>(hashes.data(), hashes.data() + key_count_);
         }
@@ -1113,7 +1221,7 @@ public:
   [[nodiscard]] constexpr allocator_type get_allocator() const noexcept(std::is_nothrow_copy_constructible_v<allocator_type>)
   requires (storage_policy == ptr_hash_storage_policy::heap)
   {
-    return allocator_;
+    return index_table_.get_allocator();
   }
 
 private:
@@ -1155,10 +1263,10 @@ public:
   [[nodiscard]] constexpr size_type index_from_hash(std::uint64_t const hash) const noexcept
   {
     assert(!empty() && "stdex::ptr_hash::index_from_hash called on an empty table");
-    pilot_value_type const pilot_value = pilots_[bucket_index_(hash)];
+    pilot_value_type const pilot_value = index_table_.pilot(bucket_index_(hash));
     slot_index_type const slot_index   = slot_index_(hash, pilot_hash_value_(pilot_value));
     if constexpr (options_value.hash_scheme == ptr_hash_scheme::minimal_perfect) {
-      return static_cast<size_type>(slot_index < key_count_ ? slot_index : remap_[slot_index - key_count_]);
+      return static_cast<size_type>(slot_index < key_count_ ? slot_index : index_table_.remap(slot_index - key_count_));
     } else {
       return static_cast<size_type>(slot_index);
     }
@@ -1248,14 +1356,12 @@ private:
   }
 
 private:
-  pilot_table_type pilots_;
-  remap_table_type remap_;
+  index_table_type index_table_;
   std::uint32_t key_count_ {};
   std::uint32_t slot_count_ {};
   std::uint32_t bucket_count_ {};
   std::uint64_t slot_reciprocal_ {};
   std::uint64_t hash_seed_ {};
   [[no_unique_address]] hasher hasher_ {};
-  [[no_unique_address]] allocator_type allocator_ {};
 };
 } // namespace stdex

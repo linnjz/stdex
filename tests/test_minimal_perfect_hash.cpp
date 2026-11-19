@@ -20,6 +20,7 @@
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#include <memory>
 #if __cplusplus >= 202603L
 #include <optional>
 #endif
@@ -65,6 +66,33 @@ std::vector<std::uint64_t> make_random_keys(std::size_t count, std::uint64_t see
   for (auto &key : keys) key = next_rand(state);
   return keys;
 }
+
+// A genuinely stateful allocator: the `tag` makes two copies distinct, which is
+// what exposes duplicated per-buffer allocator copies in the container layout.
+template <class T>
+struct tagged_allocator
+{
+  using value_type = T;
+  using pointer    = T *;
+  using size_type  = std::size_t;
+
+  int tag = 0;
+
+  constexpr tagged_allocator() = default;
+  constexpr explicit tagged_allocator(int t) : tag(t) {}
+  template <class U>
+  constexpr tagged_allocator(tagged_allocator<U> const &other) : tag(other.tag)
+  {
+  }
+
+  constexpr T *allocate(std::size_t n) { return std::allocator<T>{}.allocate(n); }
+  constexpr void deallocate(T *p, std::size_t n) { std::allocator<T>{}.deallocate(p, n); }
+
+  template <class U>
+  friend constexpr bool operator==(tagged_allocator const &a, tagged_allocator<U> const &b) noexcept { return a.tag == b.tag; }
+  template <class U>
+  friend constexpr bool operator!=(tagged_allocator const &a, tagged_allocator<U> const &b) noexcept { return !(a == b); }
+};
 
 void test_empty()
 {
@@ -491,6 +519,64 @@ void test_lookup()
 }
 #endif
 
+void test_stateful_allocator()
+{
+  std::printf("\n=== minimal_perfect_hash: stateful allocator ===\n");
+
+  using map_alloc = tagged_allocator<std::pair<std::uint64_t, std::uint64_t>>;
+  using set_alloc = tagged_allocator<std::uint64_t>;
+  using map_type  = stdex::minimal_perfect_hash_map<
+      std::uint64_t, std::uint64_t, stdex::hash<std::uint64_t>, std::equal_to<std::uint64_t>,
+      stdex::ptr_hash_heap_options<map_alloc>::profile_default()>;
+  using set_type = stdex::minimal_perfect_hash_set<
+      std::uint64_t, stdex::hash<std::uint64_t>, std::equal_to<std::uint64_t>,
+      stdex::ptr_hash_heap_options<set_alloc>::profile_default()>;
+
+  // The whole point of the layout: a stateful allocator adds exactly one copy
+  // (inside the ptr_hash index), not one per value/fingerprint buffer.
+  using default_map_type = stdex::minimal_perfect_hash_map<std::uint64_t, std::uint64_t>;
+  // A single stored copy: the stateful container must not be larger than the
+  // stateless one plus a couple of alignment-rounded allocator copies.
+  CHECK(sizeof(map_type) <= sizeof(default_map_type) + 2 * sizeof(map_alloc));
+
+  std::vector<std::pair<std::uint64_t, std::uint64_t>> entries;
+  for (std::uint64_t i = 0; i < 4000; ++i) entries.emplace_back(i * 2654435761u + 17u, i);
+  std::vector<std::uint64_t> keys;
+  keys.reserve(entries.size());
+  for (auto const &e : entries) keys.push_back(e.first);
+
+  map_type map(entries.begin(), entries.end(), stdex::hash<std::uint64_t>{}, std::equal_to<std::uint64_t>{}, map_alloc{ 7 });
+  CHECK(map.get_allocator().tag == 7);
+  CHECK(map.size() == entries.size());
+  for (auto const &[key, mapped] : entries) {
+    CHECK(map.contains(key));
+    CHECK(map.at(key) == mapped);
+  }
+
+  map_type copy = map;
+  CHECK(copy.get_allocator().tag == 7);
+  CHECK(copy.size() == map.size());
+  for (auto const &[key, mapped] : entries) CHECK(copy.at(key) == mapped);
+
+  map_type moved = std::move(copy);
+  CHECK(moved.get_allocator().tag == 7);
+  for (auto const &[key, mapped] : entries) CHECK(moved.at(key) == mapped);
+
+  map_type assigned;
+  assigned = map;
+  CHECK(assigned.size() == map.size());
+  for (auto const &[key, mapped] : entries) CHECK(assigned.at(key) == mapped);
+
+  auto assigned_move = map_type{};
+  assigned_move       = std::move(assigned);
+  for (auto const &[key, mapped] : entries) CHECK(assigned_move.at(key) == mapped);
+
+  set_type set(keys.begin(), keys.end(),
+               stdex::hash<std::uint64_t>{}, std::equal_to<std::uint64_t>{}, set_alloc{ 9 });
+  CHECK(set.get_allocator().tag == 9);
+  CHECK(set.size() == entries.size());
+}
+
 void test_stress_sizes()
 {
   std::printf("\n=== minimal_perfect_hash: stress sizes ===\n");
@@ -513,6 +599,7 @@ int main()
   test_string_keys();
   test_initializer_list();
   test_copy_move();
+  test_stateful_allocator();
   test_interface();
   test_ctad();
   test_heterogeneous_lookup();
