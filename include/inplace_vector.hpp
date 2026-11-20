@@ -334,6 +334,7 @@ template <class T, std::size_t N>
 class inplace_vector
 {
   static_assert(N > 0, "inplace_vector<T, 0> is handled by the empty specialization");
+  static_assert(std::is_object_v<T>, "containers require object value types ([container.requirements])");
   using storage_type = inplace_vector_detail::storage_for_t<T, N>;
 public:
   /// C++26 returns `optional<T&>`; earlier modes use a null pointer to spell
@@ -938,6 +939,7 @@ private:
 template <class T>
 class inplace_vector<T, 0>
 {
+  static_assert(std::is_object_v<T>, "containers require object value types ([container.requirements])");
 public:
   using value_type             = T;
   using pointer                = value_type *;

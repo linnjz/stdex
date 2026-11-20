@@ -38,6 +38,17 @@ class minimal_perfect_hash_set
   using traits = minimal_perfect_hash_detail::mphset_traits<KeyType>;
   using base   = minimal_perfect_hash_detail::hash_table<traits, Hasher, KeyEqual, Options>;
 
+  static_assert(std::is_object_v<KeyType>, "containers require object key types ([container.requirements])");
+  // Only the heap build allocates through the option set's allocator; stack options
+  // carry a placeholder allocator and never allocate. base::allocator_type is already
+  // rebound to value_type, so validate the option set's allocator instead -- that is
+  // what actually catches a user allocator whose value_type differs from value_type.
+  static_assert(base::storage_policy == ptr_hash_storage_policy::stack ||
+                std::is_same_v<
+                    typename std::allocator_traits<typename base::options_type::storage_traits::allocator_type>::value_type,
+                    typename base::value_type>,
+                "allocator value_type must match the container value_type");
+
 public:
   using typename base::allocator_type;
   using typename base::const_iterator;

@@ -40,9 +40,10 @@ public:
 private:
   using allocator_traits = std::allocator_traits<allocator_type>;
 
-  static_assert(std::is_same_v<typename allocator_traits::value_type, T>,
+  static_assert(std::is_object_v<value_type>, "uninitialized_buffer requires an object value_type");
+  static_assert(std::is_same_v<typename allocator_traits::value_type, value_type>,
                 "uninitialized_buffer requires an allocator whose rebound value_type is T");
-  static_assert(std::is_trivially_default_constructible_v<T> && std::is_trivially_destructible_v<T>,
+  static_assert(std::is_trivially_default_constructible_v<value_type> && std::is_trivially_destructible_v<value_type>,
                 "uninitialized_buffer requires a trivially default-constructible type");
 
   struct allocation_guard

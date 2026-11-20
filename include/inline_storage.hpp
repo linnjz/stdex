@@ -110,8 +110,8 @@ public:
   static_assert(std::is_unsigned_v<size_type>, "size_type must be an unsigned integer type");
   static_assert(std::is_object_v<value_type>, "inline_storage requires an object value_type");
   static_assert(std::is_nothrow_destructible_v<value_type>, "value_type destructors must not throw");
-  static_assert(std::is_same_v<typename allocator_traits::value_type, value_type>,
-                "rebound allocator value_type must match T");
+  static_assert(std::is_same_v<typename Allocator::value_type, value_type>,
+                "allocator value_type must match the container value_type");
 
 protected:
   static constexpr bool is_pocca_v        = allocator_traits::propagate_on_container_copy_assignment::value;

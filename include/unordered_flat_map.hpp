@@ -27,18 +27,22 @@
 
 namespace stdex
 {
-template <class KeyType, class ValueType, std::size_t N = 0,
+template <class KeyType, class MappedType, std::size_t N = 0,
           class Hasher = stdex::hash<KeyType>,
           class KeyEqual = std::equal_to<KeyType>,
-          class Allocator = std::allocator<std::pair<KeyType, ValueType>>>
-class unordered_flat_map : public unordered_flat_detail::hash_table<unordered_flat_detail::ufmap_traits<KeyType, ValueType, N>,
+          class Allocator = std::allocator<std::pair<KeyType, MappedType>>>
+class unordered_flat_map : public unordered_flat_detail::hash_table<unordered_flat_detail::ufmap_traits<KeyType, MappedType, N>,
                                                                     Hasher,
                                                                     KeyEqual,
                                                                     Allocator>
 {
-  using traits = unordered_flat_detail::ufmap_traits<KeyType, ValueType, N>;
+  using traits = unordered_flat_detail::ufmap_traits<KeyType, MappedType, N>;
   using base = unordered_flat_detail::hash_table<traits, Hasher, KeyEqual, Allocator>;
 
+  static_assert(std::is_object_v<KeyType>, "containers require object key types ([container.requirements])");
+  static_assert(std::is_object_v<MappedType>, "containers require object value types ([container.requirements])");
+  static_assert(std::is_same_v<typename Allocator::value_type, typename base::value_type>,
+                "allocator value_type must match the container value_type");
 public:
   // ---------- exported member types ----------
   using typename base::hasher;
@@ -617,20 +621,20 @@ unordered_flat_map<unordered_flat_detail::range_key_t<Rng>, unordered_flat_detai
 #endif // __cpp_lib_containers_ranges
 
 // ---------- non-member swap ----------
-template <class KeyType, class ValueType, std::size_t N, class Hasher, class KeyEqual, class Allocator>
-constexpr void swap(unordered_flat_map<KeyType, ValueType, N, Hasher, KeyEqual, Allocator> &a,
-                    unordered_flat_map<KeyType, ValueType, N, Hasher, KeyEqual, Allocator> &b)
+template <class KeyType, class MappedType, std::size_t N, class Hasher, class KeyEqual, class Allocator>
+constexpr void swap(unordered_flat_map<KeyType, MappedType, N, Hasher, KeyEqual, Allocator> &a,
+                    unordered_flat_map<KeyType, MappedType, N, Hasher, KeyEqual, Allocator> &b)
     noexcept(noexcept(a.swap(b)))
 {
   a.swap(b);
 }
 
 // ---------- erase_if ----------
-template <class KeyType, class ValueType, std::size_t N, class Hasher, class KeyEqual, class Allocator, class Pred>
-typename unordered_flat_map<KeyType, ValueType, N, Hasher, KeyEqual, Allocator>::size_type
-erase_if(unordered_flat_map<KeyType, ValueType, N, Hasher, KeyEqual, Allocator> &c, Pred pred)
+template <class KeyType, class MappedType, std::size_t N, class Hasher, class KeyEqual, class Allocator, class Pred>
+typename unordered_flat_map<KeyType, MappedType, N, Hasher, KeyEqual, Allocator>::size_type
+erase_if(unordered_flat_map<KeyType, MappedType, N, Hasher, KeyEqual, Allocator> &c, Pred pred)
 {
-  using map_t = unordered_flat_map<KeyType, ValueType, N, Hasher, KeyEqual, Allocator>;
+  using map_t = unordered_flat_map<KeyType, MappedType, N, Hasher, KeyEqual, Allocator>;
   auto const old_size = c.size();
   for (auto it = c.begin(); it != c.end(); ) {
     if (pred(*it)) it = c.erase(it);   // lazy_iterator → iterator
@@ -644,13 +648,13 @@ erase_if(unordered_flat_map<KeyType, ValueType, N, Hasher, KeyEqual, Allocator> 
 #include <memory_resource>
 namespace stdex::pmr
 {
-template <class KeyType, class ValueType, std::size_t N = 0, class Hasher = stdex::hash<KeyType>, class KeyEqual = std::equal_to<KeyType>>
+template <class KeyType, class MappedType, std::size_t N = 0, class Hasher = stdex::hash<KeyType>, class KeyEqual = std::equal_to<KeyType>>
 using unordered_flat_map = stdex::unordered_flat_map<
     KeyType,
-    ValueType,
+    MappedType,
     N,
     Hasher,
     KeyEqual,
-    std::pmr::polymorphic_allocator<std::pair<KeyType, ValueType>>>;
+    std::pmr::polymorphic_allocator<std::pair<KeyType, MappedType>>>;
 
 } // namespace stdex::pmr

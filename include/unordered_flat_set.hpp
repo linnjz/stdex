@@ -36,6 +36,10 @@ class unordered_flat_set : public unordered_flat_detail::hash_table<unordered_fl
   using traits = unordered_flat_detail::ufset_traits<KeyType, N>;
   using base   = unordered_flat_detail::hash_table<traits, Hasher, KeyEqual, Allocator>;
 
+  static_assert(std::is_object_v<KeyType>, "containers require object key types ([container.requirements])");
+  static_assert(std::is_same_v<typename Allocator::value_type, typename base::value_type>,
+                "allocator value_type must match the container value_type");
+
 public:
   using typename base::allocator_type;
   using typename base::hasher;
