@@ -443,7 +443,7 @@ public:
   {
   }
 
-  [[nodiscard]] constexpr pointer allocate(size_type const count)
+  [[nodiscard]] constexpr pointer allocate([[maybe_unused]] size_type const count)
   {
     assert(count <= size_);
     return data_;

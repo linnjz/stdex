@@ -863,6 +863,8 @@ public:
   constexpr iterator erase(const_iterator first, const_iterator last) noexcept
   {
     assert(first == last && "erase range on empty inplace_vector");
+    (void) first;
+    (void) last;
     return nullptr;
   }
 

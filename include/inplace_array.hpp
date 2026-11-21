@@ -60,7 +60,7 @@ public:
   requires std::default_initializable<value_type>
       : base {}
   {
-    ::stdex::uninitialized_value_construct_n(data(), size());
+    ::stdex::uninitialized_value_construct_n(data(), static_cast<difference_type>(size()));
   }
 
   /// Leaves all N slots uninitialized. Precondition: the caller constructs

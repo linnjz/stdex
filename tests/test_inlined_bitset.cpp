@@ -1537,7 +1537,7 @@ void test_fuzz_range_insert_assign()
     BS bs;
     std::vector<char> ref;
     for (int i = 0; i < ops; ++i) {
-      unsigned const which = rng() % 3u;
+      unsigned const which = static_cast<unsigned>(rng() % 3u);
       if (which == 0) {
         std::size_t const count = static_cast<std::size_t>(rng()) % 400u;
         std::vector<char> src(count);
@@ -1595,7 +1595,7 @@ void test_fuzz_range_insert_assign()
   {
     // std::vector<bool> proxy source through both bulk paths.
     std::vector<bool> vb;
-    for (int i = 0; i < 777; ++i) vb.push_back(((i * 5u + 1u) % 3u) == 0u);
+    for (int i = 0; i < 777; ++i) vb.push_back(((static_cast<unsigned>(i) * 5u + 1u) % 3u) == 0u);
     BS64_2 b(200, true);
     b.insert(37, vb.begin(), vb.end());
     bool ok = (b.size() == 200u + vb.size());

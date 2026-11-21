@@ -288,11 +288,23 @@ void default_construct_in_place(T &obj) noexcept(std::is_nothrow_default_constru
 template <class T, class... Args>
 constexpr void construct_in_place(T &obj, Args &&...args) noexcept(std::is_nothrow_constructible_v<T, Args...>)
 {
+#if defined(__clang__)
+#  pragma clang diagnostic push
+#  pragma clang diagnostic ignored "-Wsign-conversion"
+#elif defined(__GNUC__)
+#  pragma GCC diagnostic push
+#  pragma GCC diagnostic ignored "-Wsign-conversion"
+#endif
   if (std::is_constant_evaluated()) {
     std::construct_at(std::addressof(obj), std::forward<Args>(args)...);
   } else {
     ::new (static_cast<void *>(std::addressof(obj))) T(std::forward<Args>(args)...);
   }
+#if defined(__clang__)
+#  pragma clang diagnostic pop
+#elif defined(__GNUC__)
+#  pragma GCC diagnostic pop
+#endif
 }
 
 template <class NoThrowForwardIt>

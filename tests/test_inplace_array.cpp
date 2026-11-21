@@ -707,9 +707,11 @@ void test_fast_path_and_conversions()
     stdex::inplace_array<int, 4> b = ca; // copy via uninitialized_copy fast path
     CHECK(b[2] == 3);
 
+#ifdef __cpp_lib_containers_ranges
     std::vector<int> v { 5, 6, 7, 8 };
     stdex::inplace_array<int, 4> c(std::from_range, v);
     CHECK(c[0] == 5 && c[3] == 8);
+#endif
   }
 
   // Cross value-type range must convert element-wise, not raw-memcpy a
@@ -1065,11 +1067,15 @@ namespace constexpr_checks
 
   if (!(c < b)) return false;
 
-  // multi-argument in_place construction of a non-trivial literal type
+  // multi-argument in_place construction of a non-trivial literal type.
+  // Before C++26 the union storage cannot be constant-evaluated for non-trivial
+  // types (no std::start_lifetime), so this is only a compile-time check then.
+#if defined(__cpp_lib_start_lifetime) && __cpp_lib_start_lifetime >= 202603L
   {
     stdex::inplace_array<TwoInts, 3> t(std::in_place, 1, 2);
     if (t[0].a != 1 || t[2].b != 2) return false;
   }
+#endif
 
   // comparison surface at compile time
   {
@@ -1103,9 +1109,9 @@ namespace constexpr_checks
 }
 } // namespace constexpr_checks
 
-// Trivial element types use a plain array member before C++26 (and a union +
-// std::start_lifetime from C++26), so constant evaluation works on every
-// conforming compiler -- no MSVC/C++26 escape hatch needed.
+// Trivial element types use a plain array member before C++26, so constant
+// evaluation works there on every conforming compiler; non-trivial elements
+// (the TwoInts case) are only constant-evaluable from C++26 via start_lifetime.
 static_assert(constexpr_checks::drive(), "inplace_array<int,4> must be usable in constant evaluation");
 
 } // namespace

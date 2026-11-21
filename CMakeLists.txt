@@ -36,6 +36,19 @@ include(OutputLayout)
 include(TargetUtils)
 include(CompilerOptions)
 
+# The scaffold's Release flags include GCC-only switches (e.g. -fmerge-constants).
+# clang ignores them with a warning, which -Werror would turn into an error, so
+# downgrade that specific diagnostic for pure-clang (non clang-cl) builds.
+# clang-cl does not support the standard [[no_unique_address]] attribute under the
+# MSVC ABI; silence the resulting benign unknown-attribute warnings.
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    if(CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+        add_compile_options(-Wno-unknown-attributes)
+    else()
+        add_compile_options(-Wno-error=ignored-optimization-argument)
+    endif()
+endif()
+
 if(NOT TARGET stdex)
     add_library(stdex INTERFACE)
     target_include_directories(stdex INTERFACE
