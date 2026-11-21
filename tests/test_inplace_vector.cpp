@@ -924,7 +924,7 @@ void fuzz(std::uint32_t seed, int iters)
 // ===========================================================================
 namespace constexpr_checks
 {
-constexpr bool drive()
+[[maybe_unused]] constexpr bool drive()
 {
   using IV = stdex::inplace_vector<int, 16>;
   IV v;
@@ -1000,7 +1000,87 @@ constexpr bool drive()
 }
 } // namespace constexpr_checks
 
+// Constant evaluation of the union-backed inplace_storage requires either a
+// compiler that starts the union member's lifetime implicitly in constant
+// expressions (MSVC) or C++26 std::start_lifetime; strict compilers reject it
+// without the latter.
+#if (defined(_MSC_VER) && !defined(__clang__)) || (defined(__cpp_lib_start_lifetime) && __cpp_lib_start_lifetime >= 202603L)
 static_assert(constexpr_checks::drive(), "inplace_vector<int,16> must be fully usable in constant evaluation");
+#endif
+
+// ---------------------------------------------------------------------------
+// P1 regression: every container path that ends element lifetimes must stay
+// usable in constant evaluation for a trivially destructible T.
+//
+// The elements of inplace_vector<int, N> are sub-objects of a std::array; the
+// array's own destructor already "destroys" them, so the container must NOT call
+// std::destroy/std::destroy_at on them. MSVC's std::destroy(&[first,last)) ends
+// the sub-object lifetimes even for trivial T while constant-evaluating, and the
+// later std::array destruction then trips "destroying an object that has already
+// been destroyed" (C2131). Routing every destroy site through
+// `if constexpr (!is_trivially_destructible_v<T>)` fixed it; these asserts fail
+// to compile if any site regresses to an unconditional std::destroy.
+// ---------------------------------------------------------------------------
+#if (defined(_MSC_VER) && !defined(__clang__)) || (defined(__cpp_lib_start_lifetime) && __cpp_lib_start_lifetime >= 202603L)
+namespace constexpr_destroy_checks
+{
+constexpr bool drive()
+{
+  using IV = stdex::inplace_vector<int, 8>;
+
+  { // clear() -> destroy(data(), data()+size())
+    IV v;
+    for (int i = 0; i < 5; ++i) v.push_back(i);
+    v.clear();
+    if (!v.empty()) return false;
+  }
+  { // pop_back() -> destroy_at(last)
+    IV v;
+    for (int i = 0; i < 5; ++i) v.emplace_back(i);
+    v.pop_back();
+    if (v.size() != 4 || v[3] != 3) return false;
+  }
+  { // erase(pos) / erase(first,last) -> destroy(tail)
+    IV v;
+    for (int i = 0; i < 6; ++i) v.push_back(i);
+    v.erase(v.begin() + 1);
+    if (v.size() != 5 || v[1] != 2) return false;
+    v.erase(v.begin() + 1, v.begin() + 3);
+    if (v.size() != 3 || v[1] != 4) return false;
+  }
+  { // resize(smaller) -> destroy(tail)
+    IV v;
+    for (int i = 0; i < 6; ++i) v.push_back(i);
+    v.resize(2);
+    if (v.size() != 2) return false;
+  }
+  { // assign(count, value) shrinking -> destroy(tail)
+    IV v;
+    for (int i = 0; i < 6; ++i) v.push_back(i);
+    v.assign(std::size_t(2), 9);
+    if (v.size() != 2 || v[1] != 9) return false;
+  }
+  { // assign(first, last) shrinking (forward) -> destroy(tail)
+    IV v;
+    for (int i = 0; i < 6; ++i) v.push_back(i);
+    int src[3] = { 7, 8, 9 };
+    v.assign(src, src + 3);
+    if (v.size() != 3 || v[2] != 9) return false;
+  }
+  { // swap of unequal sizes -> destroy(tail of the larger)
+    IV a;
+    for (int i = 0; i < 4; ++i) a.push_back(i);
+    IV b;
+    b.push_back(9);
+    a.swap(b);
+    if (a.size() != 1 || a[0] != 9 || b.size() != 4 || b[3] != 3) return false;
+  }
+  return true;
+}
+} // namespace constexpr_destroy_checks
+static_assert(constexpr_destroy_checks::drive(), "destroy paths must be usable in constant evaluation for trivial T (P1)");
+#endif
+
 
 // ---------------------------------------------------------------------------
 // Reserved: non-POD constexpr usage (C++26).
@@ -1068,15 +1148,115 @@ static_assert(noexcept(std::declval<IVint &>().erase(std::declval<IVint::const_i
 static_assert(noexcept(std::declval<IVint &>().pop_back()));
 static_assert(noexcept(std::declval<IVint &>().clear()));
 
-// NOTE(spec [inplace.vector.overview]/5.3): for a T that is trivially
-// destructible but not trivially copyable (e.g. Relocatable), the standard
-// requires IV to have a trivial destructor / trivial move constructor. The
-// current implementation routes such T through `nontrivial_storage` (which has
-// a user-provided destructor), so those particular triviality guarantees do NOT
-// hold today. Kept as a comment (an active assertion would not compile); see
-// the accompanying report.
-// static_assert(std::is_trivially_destructible_v<stdex::inplace_vector<Relocatable, 4>>);
-// static_assert(std::is_trivially_move_constructible_v<stdex::inplace_vector<Relocatable, 4>>);
+// NOTE(spec [inplace.vector.overview]/5.2, /5.3): for a T that is trivially
+// move constructible and trivially destructible (but not trivially copyable),
+// such as Relocatable, IV must expose a trivial move constructor and a trivial
+// destructor. The storage layer declares its copy/move SMFs explicitly so the
+// implicit move constructor is not suppressed by the destructor declation.
+static_assert(std::is_trivially_destructible_v<stdex::inplace_vector<Relocatable, 4>>);
+static_assert(std::is_trivially_move_constructible_v<stdex::inplace_vector<Relocatable, 4>>);
+
+// Runtime counterpart of the P1 constexpr checks above: prove that the
+// `if constexpr (!is_trivially_destructible_v<T>)` guards do NOT skip real
+// destruction for a non-trivially-destructible element type (Counted tracks
+// live objects). After each shrink operation `Counted::live` must equal the
+// number of elements still owned.
+void test_destroy_paths()
+{
+  using V = stdex::inplace_vector<Counted, 16>;
+  Counted::live   = 0;
+  Counted::budget = -1;
+
+  { // clear()
+    V v;
+    for (int i = 0; i < 6; ++i) v.emplace_back(i);
+    CHECK(Counted::live == 6);
+    v.clear();
+    CHECK(v.empty() && Counted::live == 0);
+  }
+  CHECK(Counted::live == 0);
+
+  { // pop_back()
+    V v;
+    for (int i = 0; i < 5; ++i) v.emplace_back(i);
+    v.pop_back();
+    CHECK(v.size() == 4 && Counted::live == 4);
+  }
+  CHECK(Counted::live == 0);
+
+  { // erase(pos) / erase(first,last)
+    V v;
+    for (int i = 0; i < 6; ++i) v.emplace_back(i);
+    v.erase(v.begin() + 1);
+    CHECK(v.size() == 5 && Counted::live == 5 && v[1].v == 2);
+    v.erase(v.begin() + 1, v.begin() + 3);
+    CHECK(v.size() == 3 && Counted::live == 3 && v[1].v == 4);
+  }
+  CHECK(Counted::live == 0);
+
+  { // resize(smaller)
+    V v;
+    for (int i = 0; i < 6; ++i) v.emplace_back(i);
+    v.resize(2);
+    CHECK(v.size() == 2 && Counted::live == 2);
+  }
+  CHECK(Counted::live == 0);
+
+  { // assign(count, value) shrinking
+    V v;
+    for (int i = 0; i < 6; ++i) v.emplace_back(i);
+    Counted c(99);
+    v.assign(std::size_t(3), c);
+    CHECK(v.size() == 3 && Counted::live == 4); // 3 in v + c
+    CHECK(v[0].v == 99 && v[2].v == 99);
+  }
+  CHECK(Counted::live == 0);
+
+  { // assign(first, last) shrinking (forward iterators -> assign_forward_)
+    V v;
+    for (int i = 0; i < 6; ++i) v.emplace_back(i);
+    Counted src[3] = { Counted(7), Counted(8), Counted(9) };
+    CHECK(Counted::live == 9);
+    v.assign(src, src + 3);
+    CHECK(v.size() == 3 && Counted::live == 6); // 3 in v + 3 in src
+    CHECK(v[0].v == 7 && v[2].v == 9);
+  }
+  CHECK(Counted::live == 0);
+
+  { // copy assignment shrinking
+    V a;
+    for (int i = 0; i < 6; ++i) a.emplace_back(i);
+    V b;
+    b.emplace_back(1);
+    b.emplace_back(2);
+    CHECK(Counted::live == 8);
+    a = b;
+    CHECK(a.size() == 2 && Counted::live == 4); // 2 in a + 2 in b
+  }
+  CHECK(Counted::live == 0);
+
+  { // move assignment shrinking
+    V a;
+    for (int i = 0; i < 6; ++i) a.emplace_back(i);
+    V b;
+    b.emplace_back(5);
+    CHECK(Counted::live == 7);
+    a = std::move(b);
+    CHECK(a.size() == 1 && Counted::live == 2); // 1 in a + 1 moved-from in b
+  }
+  CHECK(Counted::live == 0);
+
+  { // swap of unequal sizes (non-bitcopy path: construct + destroy)
+    V a;
+    for (int i = 0; i < 4; ++i) a.emplace_back(i);
+    V b;
+    b.emplace_back(9);
+    CHECK(Counted::live == 5);
+    a.swap(b);
+    CHECK(a.size() == 1 && b.size() == 4 && Counted::live == 5 && a[0].v == 9);
+  }
+  CHECK(Counted::live == 0);
+}
 
 } // namespace
 
@@ -1107,6 +1287,9 @@ int main()
   test_move_only();
   test_exception_safety();
   test_fast_path_and_conversions();
+
+  std::printf("\n=== inplace_vector: destroy paths (P1) ===\n");
+  test_destroy_paths();
 
   std::printf("\n=== inplace_vector: fuzz ===\n");
   fuzz<int, 8>(0xC0FFEEu, 3000);

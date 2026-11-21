@@ -18,301 +18,29 @@
 
 #include <algorithm>        // std::copy_n, std::equal, std::fill_n, std::move, std::remove,
                             // std::remove_if, std::rotate, std::swap
-#include <array>            // std::array
 #include <cassert>          // assert
-#include <compare>          // std::weak_ordering, std::strong_ordering, std::lexicographical_compare_three_way
-#include <concepts>         // std::constructible_from, std::convertible_to, std::default_initializable,
+#include <compare>          // std::lexicographical_compare_three_way
+#include <concepts>         // std::constructible_from, std::default_initializable,
                             // std::input_iterator, std::sentinel_for, std::forward_iterator,
-                            // std::movable, std::swappable, std::equality_comparable,
-                            // std::is_nothrow_constructible_v
+                            // std::movable, std::swappable, std::equality_comparable
 #include <cstddef>          // std::size_t, std::ptrdiff_t
-#include <cstdlib>          // std::abort
 #include <cstring>          // std::memcpy, std::memmove, std::memset
 #include <initializer_list> // std::initializer_list
 #include <iterator>         // std::reverse_iterator, std::iter_reference_t
-#include <memory>           // std::construct_at, std::destroy_at, std::destroy, std::addressof,
-                            // std::to_address
-#include <new>              // std::bad_alloc
-#if __cplusplus >= 202603L
+#include <memory>           // std::destroy, std::addressof, std::to_address
+#if defined(__cpp_lib_optional) && __cpp_lib_optional >= 202406L
 #  include <optional>       // std::optional<T&> for the try_* results
 #endif
-#include <ranges>           // std::ranges::input_range, std::ranges::distance, std::ranges::begin,
-                            // std::ranges::end, std::ranges::range_reference_t, std::ranges::sized_range,
-                            // std::ranges::forward_range
-#include <stdexcept>        // std::out_of_range
+#include <ranges>           
 #include <type_traits>      // std::is_nothrow_move_constructible_v
 #include <utility>          // std::forward, std::move, std::swap
-#include <version>          // __cpp_lib_containers_ranges, __cpp_lib_start_lifetime
+#include <version>          // __cpp_lib_containers_ranges
 
+#include "inplace_storage.hpp"
 #include "uninitialized_algorithms.hpp"
 
 namespace stdex
 {
-namespace inplace_vector_detail
-{
-/// Trivially-copyable, trivially default-constructible, trivially destructible.
-/// Only such values may be used in constant expressions before C++26.
-template <class T>
-concept trivial_value = std::is_trivially_copyable_v<T> &&
-                        std::is_trivially_default_constructible_v<T> &&
-                        std::is_trivially_destructible_v<T>;
-
-template <class R, class T>
-concept container_compatible_range = std::ranges::input_range<R> && std::convertible_to<std::ranges::range_reference_t<R>, T>;
-
-/// `synth-three-way`: use `<=>` when available, otherwise synthesize a
-/// `weak_ordering` from `<` (as the standard algorithms do).
-struct synth_three_way_fn
-{
-  template <class T, class U>
-  constexpr auto operator()(T const &lhs, U const &rhs) const
-  {
-    if constexpr (std::three_way_comparable_with<T, U>) {
-      return lhs <=> rhs;
-    } else {
-      if (lhs < rhs) return std::weak_ordering::less;
-      if (rhs < lhs) return std::weak_ordering::greater;
-      return std::weak_ordering::equivalent;
-    }
-  }
-};
-
-inline constexpr synth_three_way_fn synth_three_way {};
-
-[[noreturn]] constexpr void throw_bad_alloc_()
-{
-#if defined(_CPPUNWIND) || defined(__EXCEPTIONS)
-  throw std::bad_alloc();
-#else
-  std::abort();
-#endif
-}
-
-[[noreturn]] constexpr void throw_out_of_range_()
-{
-#if defined(_CPPUNWIND) || defined(__EXCEPTIONS)
-  throw std::out_of_range("inplace_vector::at: index out of range");
-#else
-  std::abort();
-#endif
-}
-
-constexpr void start_storage_lifetime_(auto &storage) noexcept
-{
-  if (std::is_constant_evaluated()) {
-#if defined(__cpp_lib_start_lifetime) && __cpp_lib_start_lifetime >= 202603L
-    std::start_lifetime(storage);
-#else
-    (void) storage;
-#endif
-  }
-}
-
-/// Shared size bookkeeping for the storage variants.
-struct storage_size_base
-{
-  std::size_t size_ = 0;
-
-  [[nodiscard]] constexpr std::size_t size() const noexcept { return size_; }
-  constexpr void set_size(std::size_t const count) noexcept { size_ = count; }
-};
-
-/// Storage for trivial values before C++26. Elements live for the whole object
-/// lifetime; the logical size only selects the active prefix.
-template <class T, std::size_t N>
-struct array_storage : storage_size_base
-{
-  std::array<T, N> elements_ {};
-
-  [[nodiscard]] constexpr T *data() noexcept { return elements_.data(); }
-  [[nodiscard]] constexpr T const *data() const noexcept { return elements_.data(); }
-
-  // The array value-initializes all slots, so placement-new would end an
-  // already-live element's lifetime (rejected by constant evaluation); assign
-  // instead, which is a transparent replacement for a trivial value.
-  template <class... Args>
-  constexpr T &emplace_at(std::size_t const index, Args &&...args)
-  {
-    elements_[index] = T(std::forward<Args>(args)...);
-    return elements_[index];
-  }
-
-  template <class U>
-  constexpr void uninitialized_fill_n_at(std::size_t const index, std::size_t const count, U const &value)
-  {
-    (void) std::fill_n(elements_.data() + index, count, value);
-  }
-
-  constexpr void uninitialized_value_construct_n(std::size_t count)
-  {
-    (void) std::fill_n(elements_.data(), count, T {});
-  }
-
-  constexpr void destroy_from(std::size_t const from) noexcept { size_ = from; }
-};
-
-/// Union storage for trivial values under C++26 (start_lifetime path). The
-/// implicit copy/move/destructor stay trivial, so the container is trivially
-/// copyable exactly when `T` is.
-template <class T, std::size_t N>
-struct trivial_union_storage : storage_size_base
-{
-  union { T elements_[N]; };
-
-  constexpr trivial_union_storage() noexcept { start_storage_lifetime_(elements_); }
-
-  [[nodiscard]] constexpr T *data() noexcept { return elements_; }
-  [[nodiscard]] constexpr T const *data() const noexcept { return elements_; }
-
-  template <class... Args>
-  constexpr T &emplace_at(std::size_t const index, Args &&...args)
-  {
-    return *std::construct_at(elements_ + index, std::forward<Args>(args)...);
-  }
-
-  template <class U>
-  constexpr void uninitialized_fill_n_at(std::size_t const index, std::size_t const count, U const &value)
-  {
-    (void) ::stdex::uninitialized_fill_n(elements_ + index, static_cast<std::ptrdiff_t>(count), value);
-  }
-
-  constexpr void uninitialized_value_construct_n(std::size_t count)
-  {
-    (void) ::stdex::uninitialized_value_construct_n(elements_, static_cast<std::ptrdiff_t>(count));
-  }
-
-  constexpr void destroy_from(std::size_t const from) noexcept { size_ = from; }
-};
-
-/// Union storage for non-trivial values. The union keeps elements unconstructed
-/// until placed; element lifetime is managed explicitly, so `T` need not be
-/// default-constructible. No allocation is ever performed.
-template <class T, std::size_t N>
-struct nontrivial_storage : storage_size_base
-{
-  union { T elements_[N]; };
-
-  constexpr nontrivial_storage() noexcept { start_storage_lifetime_(elements_); }
-
-  constexpr nontrivial_storage(nontrivial_storage const &other)
-  {
-    start_storage_lifetime_(elements_);
-    (void) ::stdex::uninitialized_copy_n(other.elements_, static_cast<std::ptrdiff_t>(other.size_),
-                                         elements_, elements_ + other.size_);
-    size_ = other.size_;
-  }
-
-  constexpr nontrivial_storage(nontrivial_storage &&other) noexcept(std::is_nothrow_move_constructible_v<T>)
-  {
-    start_storage_lifetime_(elements_);
-    (void) ::stdex::uninitialized_move_n(other.elements_, static_cast<std::ptrdiff_t>(other.size_),
-                                         elements_, elements_ + other.size_);
-    size_ = other.size_;
-  }
-
-  constexpr nontrivial_storage &operator=(nontrivial_storage const &other)
-  {
-    if (this == std::addressof(other)) return *this;
-
-    if constexpr (std::is_copy_assignable_v<T>) {
-      size_t const old_n  = size_;
-      size_t const new_n  = other.size_;
-      size_t const common = new_n < old_n ? new_n : old_n;
-
-      if (common != 0) [[likely]] std::copy_n(other.elements_, common, elements_);
-
-      if (new_n > old_n) {
-        (void) ::stdex::uninitialized_copy_n(other.elements_ + common, static_cast<std::ptrdiff_t>(new_n - common),
-                                             elements_ + common, elements_ + new_n);
-      } else if (old_n > new_n) {
-        std::destroy(elements_ + new_n, elements_ + old_n);
-      }
-      size_ = new_n;
-    } else {
-      destroy_all_();
-      size_ = 0;
-      (void) ::stdex::uninitialized_copy_n(other.elements_, static_cast<std::ptrdiff_t>(other.size_),
-                                           elements_, elements_ + other.size_);
-      size_ = other.size_;
-    }
-    return *this;
-  }
-
-  constexpr nontrivial_storage &operator= (nontrivial_storage &&other) noexcept(
-    std::is_nothrow_move_constructible_v<T> && (!std::is_move_assignable_v<T> || std::is_nothrow_move_assignable_v<T>) )
-  {
-    if (this == std::addressof(other)) [[unlikely]] return *this;
-
-    if constexpr (std::is_move_assignable_v<T>) {
-      size_t const old_n  = size_;
-      size_t const new_n  = other.size_;
-      size_t const common = new_n < old_n ? new_n : old_n;
-
-      if (common != 0) [[likely]] std::move(other.elements_, other.elements_ + common, elements_);
-
-      if (new_n > old_n) {
-        (void) ::stdex::uninitialized_move_n(other.elements_ + common, static_cast<std::ptrdiff_t>(new_n - common),
-                                             elements_ + common, elements_ + new_n);
-      } else if (old_n > new_n) {
-        std::destroy(elements_ + new_n, elements_ + old_n);
-      }
-      size_ = new_n;
-    } else {
-      destroy_all_();
-      size_ = 0;
-      (void) ::stdex::uninitialized_move_n(other.elements_, static_cast<std::ptrdiff_t>(other.size_),
-                                           elements_, elements_ + other.size_);
-      size_ = other.size_;
-    }
-
-    return *this;
-  }
-
-  constexpr ~nontrivial_storage() { destroy_all_(); }
-
-  [[nodiscard]] constexpr T *data() noexcept { return elements_; }
-  [[nodiscard]] constexpr T const *data() const noexcept { return elements_; }
-
-  template <class... Args>
-  constexpr T &emplace_at(std::size_t const index, Args &&...args)
-      noexcept(std::is_nothrow_constructible_v<T, Args...>)
-  {
-    return *std::construct_at(elements_ + index, std::forward<Args>(args)...);
-  }
-
-  template <class U>
-  constexpr void uninitialized_fill_n_at(std::size_t const index, std::size_t const count, U const &value)
-  {
-    (void) ::stdex::uninitialized_fill_n(elements_ + index, static_cast<std::ptrdiff_t>(count), value);
-  }
-
-  constexpr void uninitialized_value_construct_n(std::size_t count)
-  {
-    (void) ::stdex::uninitialized_value_construct_n(elements_, static_cast<std::ptrdiff_t>(count));
-  }
-
-  constexpr void destroy_from(std::size_t const from) noexcept
-  {
-    std::destroy(elements_ + from, elements_ + size_);
-    size_ = from;
-  }
-
-private:
-  constexpr void destroy_all_() noexcept { std::destroy(elements_, elements_ + size_); }
-};
-
-template <class T, std::size_t N>
-using union_storage = std::conditional_t<trivial_value<T>, trivial_union_storage<T, N>, nontrivial_storage<T, N>>;
-
-#if defined(__cpp_lib_start_lifetime) && __cpp_lib_start_lifetime >= 202603L
-template <class T, std::size_t N>
-using storage_for_t = union_storage<T, N>;
-#else
-template <class T, std::size_t N>
-using storage_for_t = std::conditional_t<trivial_value<T>, array_storage<T, N>, union_storage<T, N>>;
-#endif
-} // namespace inplace_vector_detail
-
 /**
  * @brief Fixed-capacity, dynamically-resizable contiguous container (P0843).
  * 
@@ -331,55 +59,95 @@ using storage_for_t = std::conditional_t<trivial_value<T>, array_storage<T, N>, 
  * @tparam N Maximum number of elements the container can hold.
  */
 template <class T, std::size_t N>
-class inplace_vector
+class inplace_vector : private inplace_storage<inplace_storage_detail::storage_size_base, T, N>
 {
-  static_assert(N > 0, "inplace_vector<T, 0> is handled by the empty specialization");
   static_assert(std::is_object_v<T>, "containers require object value types ([container.requirements])");
-  using storage_type = inplace_vector_detail::storage_for_t<T, N>;
-public:
-  /// C++26 returns `optional<T&>`; earlier modes use a null pointer to spell
-  /// "no element" (an inplace vector lives in an array, so &value is available).
-#if __cplusplus >= 202603L
-  using try_result_type = std::optional<T &>;
-#else
-  using try_result_type = T *;
-#endif
-  using value_type             = T;
-  using pointer                = value_type *;
-  using const_pointer          = value_type const *;
-  using reference              = value_type &;
-  using const_reference        = value_type const &;
-  using size_type              = std::size_t;
-  using difference_type        = std::ptrdiff_t;
-  using iterator               = value_type *;
-  using const_iterator         = value_type const *;
-  using reverse_iterator       = std::reverse_iterator<iterator>;
-  using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+  using base = inplace_storage<inplace_storage_detail::storage_size_base, T, N>;
 
-  // clang-format off
-  // ---------- construct / copy / destroy ----------
-  constexpr inplace_vector() noexcept = default;
-  constexpr inplace_vector(inplace_vector const &) = default;
-  constexpr inplace_vector(inplace_vector &&) noexcept(std::is_nothrow_move_constructible_v<storage_type>) = default;
-  constexpr ~inplace_vector() = default;
-  constexpr inplace_vector &operator= (inplace_vector const &) = default;
-  constexpr inplace_vector &operator= (inplace_vector &&) noexcept(std::is_nothrow_move_assignable_v<storage_type>) = default;
-  // clang-format on
+public:
+  using value_type             = base::value_type;
+  using pointer                = base::pointer;
+  using const_pointer          = base::const_pointer;
+  using reference              = base::reference;
+  using const_reference        = base::const_reference;
+  using size_type              = base::size_type;
+  using difference_type        = base::difference_type;
+  using iterator               = base::iterator;
+  using const_iterator         = base::const_iterator;
+  using reverse_iterator       = base::reverse_iterator;
+  using const_reverse_iterator = base::const_reverse_iterator;
+#if defined(__cpp_lib_optional) && __cpp_lib_optional >= 202406L
+  using try_result_type = std::optional<value_type &>;
+#else
+  using try_result_type = value_type *;
+#endif
+
+  constexpr inplace_vector() noexcept
+      : base {}
+  {
+  }
+
+  // ---------- rule of five ----------
+  constexpr ~inplace_vector() requires std::is_trivially_destructible_v<T> = default;
+  constexpr ~inplace_vector() noexcept
+  requires (!std::is_trivially_destructible_v<T>)
+  {
+    std::destroy_n(data(), size());
+  }
+
+  constexpr inplace_vector(inplace_vector const &)             requires std::is_trivially_copy_constructible_v<T> = default;
+  constexpr inplace_vector(inplace_vector &&)                  requires std::is_trivially_move_constructible_v<T> = default;
+  constexpr inplace_vector &operator= (inplace_vector const &) requires std::is_trivially_copy_assignable_v<T>    = default;
+  constexpr inplace_vector &operator= (inplace_vector &&)      requires std::is_trivially_move_assignable_v<T>    = default;
+
+  constexpr inplace_vector(inplace_vector const &other)
+      noexcept(std::is_nothrow_copy_constructible_v<value_type>)
+  requires (!std::is_trivially_copy_constructible_v<T>)
+      : base {}
+  {
+    (void) ::stdex::uninitialized_copy(other.begin(), other.end(), data(), data() + other.size());
+    this->size_ = other.size();
+  }
+
+  constexpr inplace_vector(inplace_vector &&other)
+      noexcept(std::is_nothrow_move_constructible_v<value_type>)
+  requires (!std::is_trivially_move_constructible_v<T>)
+      : base {}
+  {
+    (void) ::stdex::uninitialized_move(other.begin(), other.end(), data(), data() + other.size());
+    this->size_ = other.size();
+  }
+
+  constexpr inplace_vector &operator= (inplace_vector const &other)
+      noexcept(std::is_nothrow_copy_assignable_v<value_type> && std::is_nothrow_copy_constructible_v<value_type>)
+  requires (!std::is_trivially_copy_assignable_v<T>)
+  {
+    if (this != std::addressof(other)) assign(other.begin(), other.end());
+    return *this;
+  }
+
+  constexpr inplace_vector &operator= (inplace_vector &&other)
+      noexcept(std::is_nothrow_move_assignable_v<value_type> && std::is_nothrow_move_constructible_v<value_type>)
+  requires (!std::is_trivially_move_assignable_v<T>)
+  {
+    if (this != std::addressof(other)) assign(std::make_move_iterator(other.begin()), std::make_move_iterator(other.end()));
+    return *this;
+  }
 
   constexpr explicit inplace_vector(size_type const count)
       : inplace_vector {}
   {
-    if (count > capacity()) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
-    storage_.uninitialized_value_construct_n(count);
-    storage_.set_size(count);
+    if (count > capacity()) [[unlikely]] inplace_storage_detail::throw_bad_alloc();
+    (void) ::stdex::uninitialized_value_construct_n(data(), static_cast<difference_type>(count));
+    this->size_ = count;
   }
 
   constexpr inplace_vector(size_type const count, const_reference value)
       : inplace_vector {}
   {
-    if (count > capacity()) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
-    storage_.uninitialized_fill_n_at(size_type { 0 }, count, value);
-    storage_.set_size(count);
+    if (count > capacity()) [[unlikely]] inplace_storage_detail::throw_bad_alloc();
+    (void) ::stdex::uninitialized_fill_n(data(), static_cast<difference_type>(count), value);
+    this->size_ = count;
   }
 
   template <std::input_iterator InputIt, std::sentinel_for<InputIt> Sentinel>
@@ -395,7 +163,7 @@ public:
   }
 
 #ifdef __cpp_lib_containers_ranges
-  template <inplace_vector_detail::container_compatible_range<value_type> R>
+  template <inplace_storage_detail::container_compatible_range<value_type> R>
   constexpr inplace_vector(std::from_range_t, R &&rg)
       : inplace_vector {}
   {
@@ -409,7 +177,61 @@ public:
     return *this;
   }
 
+  // ---------- element access ----------
+  using base::operator[];
+  using base::at;
+  using base::front;
+  using base::back;
+  using base::data;
+
+  // ---------- capacity ----------
+  using base::empty;
+  using base::max_size;
+  using base::size;
+  [[nodiscard]] static constexpr size_type capacity() noexcept { return N; }
+  static constexpr void shrink_to_fit() noexcept { }
+  static constexpr void reserve(size_type const count)
+  {
+    if (count > N) [[unlikely]] inplace_storage_detail::throw_bad_alloc();
+  }
+
+  // ---------- iterators ----------
+  using base::begin;
+  using base::end;
+  using base::rbegin;
+  using base::rend;
+  using base::cbegin;
+  using base::cend;
+  using base::crbegin;
+  using base::crend;
+
 private:
+  /// @brief Destroys the element tail [new_size, size()) and sets size() to @p new_size.
+  ///
+  /// @details
+  /// The `if constexpr` guard is not merely an optimization.
+  /// For trivially destructible T, elements are sub-objects of the backing `std::array<T, N>`.
+  /// The array’s trivial destructor already ends element lifetimes, so explicit destruction is redundant.
+  ///
+  /// Critically, MSVC’s constant evaluator (cl.exe) considers `std::destroy`/`std::destroy_at` on
+  /// these sub-objects to terminate their lifetimes. Subsequent destruction of the parent `std::array`
+  /// then produces C2131: "destroying an object that has already been destroyed".
+  ///
+  /// This guard makes constexpr usage (clear, erase, shrink resize, shrink assign, swap) compile on MSVC.
+  /// GCC and Clang accept redundant destroy calls, but the guard is kept for MSVC compatibility;
+  /// it also avoids unnecessary destructor loops for POD types.
+  ///
+  /// @param new_size The size after destruction; must be <= size().
+
+  constexpr void destroy_from_(size_type const new_size) noexcept
+  {
+    assert(new_size <= size());
+    if constexpr (!std::is_trivially_destructible_v<value_type>) {
+      std::destroy(data() + static_cast<difference_type>(new_size), data() + static_cast<difference_type>(size()));
+    }
+    this->size_ = new_size;
+  }
+
   constexpr bool try_memset_fill_n_from_(size_type index, size_type count, const_reference value)
   {
     constexpr bool memset_ok = uninitialized_detail::fill_memset_is_safe<decltype(data()), value_type>;
@@ -417,12 +239,12 @@ private:
 
     if constexpr (memset_ok) {
       if (!std::is_constant_evaluated()) {
-        uninitialized_detail::invoke_memset(data() + index, value, count);
+        uninitialized_detail::invoke_memset(data() + static_cast<difference_type>(index), value, count);
         return true;
       }
     } else if constexpr (zero_ok) {
       if (!std::is_constant_evaluated() && ::stdex::is_all_bits_zero(value)) {
-        uninitialized_detail::invoke_zero_memset(data() + index, count);
+        uninitialized_detail::invoke_zero_memset(data() + static_cast<difference_type>(index), count);
         return true;
       }
     }
@@ -430,11 +252,10 @@ private:
   }
 
   template <class... Args>
-  constexpr void emplace_at_unchecked_(size_type i, Args &&...args)
-      noexcept(noexcept(storage_.emplace_at(i, std::forward<Args>(args)...)))
+  constexpr void emplace_at_unchecked_(size_type i, Args &&...args) noexcept(std::is_nothrow_constructible_v<value_type, Args...>)
   {
-    (void) storage_.emplace_at(i, std::forward<Args>(args)...);
-    storage_.set_size(i + 1);
+    std::construct_at(data() + static_cast<difference_type>(i), std::forward<Args>(args)...);
+    this->size_ = i + 1;
   }
 
   template <std::forward_iterator InputIt>
@@ -445,16 +266,16 @@ private:
     size_type const old    = size();
     size_type const common = count < old ? count : old;
 
-    (void) std::copy_n(first, static_cast<std::iter_difference_t<InputIt>>(common), data());
+    (void) std::copy_n(first, static_cast<difference_type>(common), data());
     if (count > old) {
-      std::ranges::advance(first, static_cast<std::iter_difference_t<InputIt>>(common));
+      std::ranges::advance(first, static_cast<difference_type>(common));
 
       if constexpr (uninitialized_detail::iter_copy_cat<InputIt, value_type *>::bitcopy_constructible) {
         if (!std::is_constant_evaluated()) {
           (void) uninitialized_detail::invoke_memcpy(
-              first, first + static_cast<std::iter_difference_t<InputIt>>(count - old),
-              data() + old, data() + count);
-          storage_.set_size(count);
+              first, first + static_cast<difference_type>(count - old),
+              data() + static_cast<difference_type>(old), data() + static_cast<difference_type>(count));
+          this->size_ = count;
           return;
         }
       }
@@ -463,7 +284,7 @@ private:
         emplace_at_unchecked_(i, *first);
       }
     } else if (count < old) {
-      storage_.destroy_from(count);
+      destroy_from_(count);
     }
   }
 
@@ -478,7 +299,7 @@ private:
     if (i == old) {
       for (; first != last; ++first) emplace_back(*first); // capacity-checked, size tracked
     } else {
-      storage_.destroy_from(i);
+      destroy_from_(i);
     }
   }
 
@@ -491,7 +312,7 @@ public:
     if constexpr (std::assignable_from<value_type &, std::iter_reference_t<InputIt>>) {
       if constexpr (std::forward_iterator<InputIt>) {
         size_type const count = static_cast<size_type>(std::ranges::distance(first, last));
-        if (count > capacity()) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
+        if (count > capacity()) [[unlikely]] inplace_storage_detail::throw_bad_alloc();
         assign_forward_(first, count);
       } else {
         assign_input_(first, last);
@@ -499,7 +320,7 @@ public:
     } else {
       if constexpr (std::forward_iterator<InputIt>) {
         size_type const count = static_cast<size_type>(std::ranges::distance(first, last));
-        if (count > capacity()) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
+        if (count > capacity()) [[unlikely]] inplace_storage_detail::throw_bad_alloc();
         clear();
         for (; first != last; ++first) (void) unchecked_emplace_back(*first); // capacity pre-checked
       } else {
@@ -509,7 +330,7 @@ public:
     }
   }
 
-  template <inplace_vector_detail::container_compatible_range<value_type> R>
+  template <inplace_storage_detail::container_compatible_range<value_type> R>
   constexpr void assign_range(R &&rg)
   {
     assign(std::ranges::begin(rg), std::ranges::end(rg));
@@ -517,23 +338,25 @@ public:
 
   constexpr void assign(size_type const count, const_reference value)
   {
-    if (count > capacity()) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
+    if (count > capacity()) [[unlikely]] inplace_storage_detail::throw_bad_alloc();
 
     value_type const copy(value);
     if constexpr (std::is_assignable_v<value_type &, const_reference>) {
       size_type const old    = size();
       size_type const common = count < old ? count : old;
 
-      (void) std::fill(data(), data() + common, copy);
+      (void) std::fill_n(data(), static_cast<difference_type>(common), copy);
 
       if (count > old) {
-        if (try_memset_fill_n_from_(old, count, copy)) {
-          storage_.set_size(count);
+        if (try_memset_fill_n_from_(old, count - old, copy)) {
+          this->size_ = count;
         } else {
           for (size_type i = old; i < count; ++i) emplace_at_unchecked_(i, copy);
         }
       }
-      if (count < old) storage_.destroy_from(count);
+      if (count < old) {
+        destroy_from_(count);
+      }
     } else {
       clear();
       for (size_type i = 0; i < count; ++i) emplace_at_unchecked_(i, copy);
@@ -542,38 +365,14 @@ public:
 
   constexpr void assign(std::initializer_list<value_type> ilist) { assign(ilist.begin(), ilist.end()); }
 
-  // ---------- iterators ----------
-  [[nodiscard]] constexpr iterator begin() noexcept { return data(); }
-  [[nodiscard]] constexpr const_iterator begin() const noexcept { return data(); }
-  [[nodiscard]] constexpr iterator end() noexcept { return data() + size(); }
-  [[nodiscard]] constexpr const_iterator end() const noexcept { return data() + size(); }
-  [[nodiscard]] constexpr reverse_iterator rbegin() noexcept { return reverse_iterator(end()); }
-  [[nodiscard]] constexpr const_reverse_iterator rbegin() const noexcept { return const_reverse_iterator(end()); }
-  [[nodiscard]] constexpr reverse_iterator rend() noexcept { return reverse_iterator(begin()); }
-  [[nodiscard]] constexpr const_reverse_iterator rend() const noexcept { return const_reverse_iterator(begin()); }
-  [[nodiscard]] constexpr const_iterator cbegin() const noexcept { return begin(); }
-  [[nodiscard]] constexpr const_iterator cend() const noexcept { return end(); }
-  [[nodiscard]] constexpr const_reverse_iterator crbegin() const noexcept { return rbegin(); }
-  [[nodiscard]] constexpr const_reverse_iterator crend() const noexcept { return rend(); }
-
-  // ---------- capacity ----------
-  constexpr bool empty() const noexcept { return size() == 0; }
-  [[nodiscard]] constexpr size_type size() const noexcept { return storage_.size(); }
-  [[nodiscard]] static constexpr size_type max_size() noexcept { return N; }
-  [[nodiscard]] static constexpr size_type capacity() noexcept { return N; }
-  static constexpr void shrink_to_fit() noexcept {}
-
-  static constexpr void reserve(size_type const count)
-  {
-    if (count > N) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
-  }
-
 private:
   constexpr size_type resize_prepare_(size_type const count)
   {
-    if (count > capacity()) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
+    if (count > capacity()) [[unlikely]] inplace_storage_detail::throw_bad_alloc();
     size_type const old = size();
-    if (count < old) storage_.destroy_from(count);
+    if (count < old) {
+      destroy_from_(count);
+    }
     return old;
   }
 
@@ -585,80 +384,29 @@ public:
     if (count <= old) return;
     // Strong guarantee: uninitialized_value_construct_n rolls back (backout) on throw,
     // and still takes the zero-memset fast path for scalars internally.
-    (void) ::stdex::uninitialized_value_construct_n(data() + old, static_cast<std::ptrdiff_t>(count - old));
-    storage_.set_size(count);
+    (void) ::stdex::uninitialized_value_construct_n(data() + static_cast<difference_type>(old),
+                                                    static_cast<difference_type>(count - old));
+    this->size_ = count;
   }
 
   constexpr void resize(size_type const count, const_reference value)
   {
     size_type const old = resize_prepare_(count);
     if (count <= old) return;
-    (void) ::stdex::uninitialized_fill_n(data() + old, static_cast<std::ptrdiff_t>(count - old), value);
-    storage_.set_size(count);
+    (void) ::stdex::uninitialized_fill_n(data() + static_cast<difference_type>(old),
+                                         static_cast<difference_type>(count - old), value);
+    this->size_ = count;
   }
-
-  // ---------- element access ----------
-  [[nodiscard]] constexpr reference operator[](size_type const index) noexcept
-  {
-    assert(index < size());
-    return data()[index];
-  }
-
-  [[nodiscard]] constexpr const_reference operator[](size_type const index) const noexcept
-  {
-    assert(index < size());
-    return data()[index];
-  }
-
-  [[nodiscard]] constexpr reference at(size_type const index)
-  {
-    if (index >= size()) [[unlikely]] inplace_vector_detail::throw_out_of_range_();
-    return data()[index];
-  }
-
-  [[nodiscard]] constexpr const_reference at(size_type const index) const
-  {
-    if (index >= size()) [[unlikely]] inplace_vector_detail::throw_out_of_range_();
-    return data()[index];
-  }
-
-  [[nodiscard]] constexpr reference front() noexcept
-  {
-    assert(!empty());
-    return data()[0];
-  }
-
-  [[nodiscard]] constexpr const_reference front() const noexcept
-  {
-    assert(!empty());
-    return data()[0];
-  }
-
-  [[nodiscard]] constexpr reference back() noexcept
-  {
-    assert(!empty());
-    return data()[size() - 1];
-  }
-
-  [[nodiscard]] constexpr const_reference back() const noexcept
-  {
-    assert(!empty());
-    return data()[size() - 1];
-  }
-
-  [[nodiscard]] constexpr value_type *data() noexcept { return storage_.data(); }
-  [[nodiscard]] constexpr value_type const *data() const noexcept { return storage_.data(); }
 
   // ---------- modifiers ----------
   template <class... Args>
   requires std::constructible_from<value_type, Args...>
-  constexpr reference unchecked_emplace_back(Args &&...args)
-      noexcept(noexcept(storage_.emplace_at(size(), std::forward<Args>(args)...)))
+  constexpr reference unchecked_emplace_back(Args &&...args) noexcept(std::is_nothrow_constructible_v<value_type, Args...>)
   {
     size_type const index = size();
     assert(index < capacity());
-    value_type &element = storage_.emplace_at(index, std::forward<Args>(args)...);
-    storage_.set_size(index + 1);
+    value_type &element = *std::construct_at(data() + static_cast<difference_type>(index), std::forward<Args>(args)...);
+    this->size_ = index + 1;
     return element;
   }
 
@@ -678,62 +426,60 @@ public:
   requires std::constructible_from<value_type, Args...>
   constexpr reference emplace_back(Args &&...args)
   {
-    if (size() == capacity()) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
+    if (size() == capacity()) [[unlikely]] inplace_storage_detail::throw_bad_alloc();
     return unchecked_emplace_back(std::forward<Args>(args)...);
   }
 
   constexpr reference push_back(const_reference value) { return emplace_back(value); }
+
   constexpr reference push_back(value_type &&value) { return emplace_back(std::move(value)); }
 
   template <class... Args>
   requires std::constructible_from<value_type, Args...>
-  [[nodiscard]] constexpr try_result_type try_emplace_back(Args &&...args)
-      noexcept(noexcept(unchecked_emplace_back(std::forward<Args>(args)...)))
+  [[nodiscard]] constexpr try_result_type try_emplace_back(Args &&...args) noexcept(noexcept(unchecked_emplace_back(std::forward<Args>(args)...)))
   {
     if (size() == capacity()) {
-#if __cplusplus >= 202603L
+#if defined(__cpp_lib_optional) && __cpp_lib_optional >= 202406L
       return std::nullopt;
 #else
       return nullptr;
 #endif
     }
     reference element = unchecked_emplace_back(std::forward<Args>(args)...);
-#if __cplusplus >= 202603L
+#if defined(__cpp_lib_optional) && __cpp_lib_optional >= 202406L
     return element;
 #else
     return std::addressof(element);
 #endif
   }
 
-  [[nodiscard]] constexpr try_result_type try_push_back(const_reference value)
-      noexcept(noexcept(try_emplace_back(value)))
+  [[nodiscard]] constexpr try_result_type try_push_back(const_reference value) noexcept(noexcept(try_emplace_back(value)))
   {
     return try_emplace_back(value);
   }
 
-  [[nodiscard]] constexpr try_result_type try_push_back(value_type &&value)
-      noexcept(noexcept(try_emplace_back(std::move(value))))
+  [[nodiscard]] constexpr try_result_type try_push_back(value_type &&value) noexcept(noexcept(try_emplace_back(std::move(value))))
   {
     return try_emplace_back(std::move(value));
   }
 
-  template <inplace_vector_detail::container_compatible_range<value_type> R>
+  template <inplace_storage_detail::container_compatible_range<value_type> R>
   constexpr void append_range(R &&rg)
   {
     if constexpr (std::ranges::sized_range<R> || std::ranges::forward_range<R>) {
       size_type const count = static_cast<size_type>(std::ranges::distance(rg));
       size_type const old   = size();
-      if (count > capacity() - old) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
+      if (count > capacity() - old) [[unlikely]] inplace_storage_detail::throw_bad_alloc();
 
       if constexpr (uninitialized_detail::iter_copy_cat<std::ranges::iterator_t<R>, value_type *>::bitcopy_constructible) {
         if (!std::is_constant_evaluated()) {
           if (count != 0) {
             auto const src = std::ranges::begin(rg);
             (void) uninitialized_detail::invoke_memcpy(
-                src, src + static_cast<std::ranges::range_difference_t<R>>(count),
-                data() + old, data() + old + count);
+                src, src + static_cast<difference_type>(count),
+                data() + static_cast<difference_type>(old), data() + static_cast<difference_type>(old + count));
           }
-          storage_.set_size(old + count);
+          this->size_ = old + count;
           return;
         }
       }
@@ -746,7 +492,7 @@ public:
   constexpr void pop_back() noexcept
   {
     assert(!empty());
-    storage_.destroy_from(size() - 1);
+    destroy_from_(size() - 1);
   }
 
   template <class... Args>
@@ -754,23 +500,22 @@ public:
   constexpr iterator emplace(const_iterator position, Args &&...args)
   {
     size_type const old = size();
-    if (old == capacity()) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
+    if (old == capacity()) [[unlikely]] inplace_storage_detail::throw_bad_alloc();
     size_type const index = static_cast<size_type>(position - cbegin());
 
-    if constexpr (uninitialized_detail::iter_move_cat<value_type *, value_type *>::bitcopy_constructible) {
+    if constexpr (uninitialized_detail::iter_move_cat<value_type *, value_type *>::bitcopy_constructible && std::is_trivially_destructible_v<value_type>) {
       if (!std::is_constant_evaluated()) {
         value_type temp(std::forward<Args>(args)...);
         std::memmove(static_cast<void *>(data() + index + 1),
-                     static_cast<void const *>(data() + index),
-                     (old - index) * sizeof(value_type));
-        storage_.emplace_at(index, std::move(temp));
-        storage_.set_size(old + 1);
+                     static_cast<void const *>(data() + index), (old - index) * sizeof(value_type));
+        (void) std::construct_at(data() + static_cast<difference_type>(index), std::move(temp));
+        this->size_ = old + 1;
         return begin() + index;
       }
     }
 
     (void) unchecked_emplace_back(std::forward<Args>(args)...);
-    iterator const inserted = begin() + index;
+    iterator const inserted = begin() + static_cast<difference_type>(index);
     std::rotate(inserted, end() - 1, end());
     return inserted;
   }
@@ -789,27 +534,27 @@ public:
   requires std::movable<value_type>
   {
     size_type const old = size();
-    if (count > capacity() - old) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
+    if (count > capacity() - old) [[unlikely]] inplace_storage_detail::throw_bad_alloc();
     size_type const index = static_cast<size_type>(position - cbegin());
-    if (count == 0) [[unlikely]] return begin() + index;
+    if (count == 0) [[unlikely]] return begin() + static_cast<difference_type>(index);
 
-    if constexpr (uninitialized_detail::iter_move_cat<value_type *, value_type *>::bitcopy_constructible) {
+    if constexpr (uninitialized_detail::iter_move_cat<value_type *, value_type *>::bitcopy_constructible && std::is_trivially_destructible_v<value_type>) {
       if (!std::is_constant_evaluated()) {
         value_type const copy(value); // value may alias an element shifted by memmove
         std::memmove(static_cast<void *>(data() + index + count),
-                     static_cast<void const *>(data() + index),
-                     (old - index) * sizeof(value_type));
+                     static_cast<void const *>(data() + index), (old - index) * sizeof(value_type));
         if (!try_memset_fill_n_from_(index, count, copy)) {
-          storage_.uninitialized_fill_n_at(index, count, copy);
+          (void) ::stdex::uninitialized_fill_n(data() + static_cast<difference_type>(index),
+                                               static_cast<difference_type>(count), copy);
         }
-        storage_.set_size(old + count);
+        this->size_ = old + count;
         return begin() + index;
       }
     }
 
     for (size_type i = 0; i < count; ++i) (void) unchecked_emplace_back(value);
-    std::rotate(begin() + index, end() - count, end());
-    return begin() + index;
+    std::rotate(begin() + static_cast<difference_type>(index), end() - static_cast<difference_type>(count), end());
+    return begin() + static_cast<difference_type>(index);
   }
 
   template <std::input_iterator InputIt, std::sentinel_for<InputIt> Sentinel>
@@ -821,31 +566,30 @@ public:
 
     if constexpr (std::forward_iterator<InputIt>) {
       size_type const count = static_cast<size_type>(std::ranges::distance(first, last));
-      if (count > capacity() - old) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
-      if (count == 0) [[unlikely]] return begin() + index;
+      if (count > capacity() - old) [[unlikely]] inplace_storage_detail::throw_bad_alloc();
+      if (count == 0) [[unlikely]] return begin() + static_cast<difference_type>(index);
 
-      constexpr bool can_relocate = uninitialized_detail::iter_move_cat<value_type *, value_type *>::bitcopy_constructible;
+      constexpr bool can_relocate = uninitialized_detail::iter_move_cat<value_type *, value_type *>::bitcopy_constructible && std::is_trivially_destructible_v<value_type>;
       constexpr bool can_copy_in  = uninitialized_detail::iter_copy_cat<InputIt, value_type *>::bitcopy_constructible;
 
       if constexpr (can_relocate && can_copy_in) {
         if (!std::is_constant_evaluated()) {
           std::memmove(static_cast<void *>(data() + index + count),
-                       static_cast<void const *>(data() + index),
-                       (old - index) * sizeof(value_type));
+                       static_cast<void const *>(data() + index), (old - index) * sizeof(value_type));
           std::memcpy(static_cast<void *>(data() + index), std::to_address(first), count * sizeof(value_type));
-          storage_.set_size(old + count);
-          return begin() + index;
+          this->size_ = old + count;
+          return begin() + static_cast<difference_type>(index);
         }
       }
       for (; first != last; ++first) (void) unchecked_emplace_back(*first);
     } else {
       for (; first != last; ++first) (void) emplace_back(*first);
     }
-    std::rotate(begin() + index, begin() + old, end());
-    return begin() + index;
+    std::rotate(begin() + static_cast<difference_type>(index), begin() + static_cast<difference_type>(old), end());
+    return begin() + static_cast<difference_type>(index);
   }
 
-  template <inplace_vector_detail::container_compatible_range<value_type> R>
+  template <inplace_storage_detail::container_compatible_range<value_type> R>
   requires std::movable<value_type>
   constexpr iterator insert_range(const_iterator position, R &&rg)
   {
@@ -872,13 +616,12 @@ public:
     size_type const count = static_cast<size_type>(last - first);
     if (count == 0) [[unlikely]] return begin() + static_cast<difference_type>(index);
     std::move(data() + static_cast<difference_type>(index + count),
-              data() + static_cast<difference_type>(old),
-              data() + static_cast<difference_type>(index));
-    storage_.destroy_from(old - count);
+              data() + static_cast<difference_type>(old), data() + static_cast<difference_type>(index));
+    destroy_from_(old - count);
     return begin() + static_cast<difference_type>(index);
   }
 
-  constexpr void clear() noexcept { storage_.destroy_from(0); }
+  constexpr void clear() noexcept { destroy_from_(0); }
 
   constexpr void swap(inplace_vector &other) noexcept(std::is_nothrow_swappable_v<value_type> && std::is_nothrow_move_constructible_v<value_type>)
   requires std::swappable<value_type>
@@ -887,26 +630,26 @@ public:
 
     inplace_vector *const smaller = other.size() < size() ? std::addressof(other) : this;
     inplace_vector *const bigger  = other.size() < size() ? this : std::addressof(other);
-    size_type const common = smaller->size();
-    size_type const extra  = bigger->size();
+    size_type const common        = smaller->size();
+    size_type const extra         = bigger->size();
 
     std::swap_ranges(smaller->data(), smaller->data() + common, bigger->data());
 
-    if constexpr (uninitialized_detail::iter_move_cat<value_type *, value_type *>::bitcopy_constructible) {
+    if constexpr (uninitialized_detail::iter_move_cat<value_type *, value_type *>::bitcopy_constructible && std::is_trivially_destructible_v<value_type>) {
       if (!std::is_constant_evaluated()) {
         (void) uninitialized_detail::invoke_memcpy(bigger->data() + common, bigger->data() + extra,
                                                    smaller->data() + common, smaller->data() + extra);
-        smaller->storage_.set_size(extra);
-        bigger->storage_.destroy_from(common);
+        smaller->size_ = extra;
+        bigger->destroy_from_(common);
         return;
       }
     }
 
     for (size_type i = common; i < extra; ++i) {
-      smaller->storage_.emplace_at(i, std::move((*bigger)[i]));
-      smaller->storage_.set_size(i + 1);
+      (void) std::construct_at(smaller->data() + i, std::move((*bigger)[i]));
+      smaller->size_ = i + 1;
     }
-    bigger->storage_.destroy_from(common);
+    bigger->destroy_from_(common);
   }
 
   friend constexpr void swap(inplace_vector &lhs, inplace_vector &rhs) noexcept(noexcept(lhs.swap(rhs)))
@@ -915,247 +658,204 @@ public:
   }
 
   // ---------- comparison ----------
-  friend constexpr bool operator==(inplace_vector const &lhs, inplace_vector const &rhs)
+  friend constexpr bool operator== (inplace_vector const &lhs, inplace_vector const &rhs)
   requires std::equality_comparable<value_type>
   {
     return lhs.size() == rhs.size() && std::equal(lhs.begin(), lhs.end(), rhs.begin());
   }
 
-  friend constexpr auto operator<=>(inplace_vector const &lhs, inplace_vector const &rhs)
-  requires requires(value_type const &lhs_value, value_type const &rhs_value) {
-    inplace_vector_detail::synth_three_way(lhs_value, rhs_value);
+  friend constexpr auto operator<=> (inplace_vector const &lhs, inplace_vector const &rhs)
+  requires requires (value_type const &lhs_value, value_type const &rhs_value) {
+    inplace_storage_detail::synth_three_way(lhs_value, rhs_value);
   }
   {
-    return std::lexicographical_compare_three_way(lhs.begin(), lhs.end(), rhs.begin(), rhs.end(),
-                                                  inplace_vector_detail::synth_three_way);
+    return std::lexicographical_compare_three_way(lhs.begin(), lhs.end(), rhs.begin(), rhs.end(), inplace_storage_detail::synth_three_way);
   }
-
-private:
-  inplace_vector_detail::storage_for_t<value_type, N> storage_ {};
 };
 
-/// Zero-capacity specialization: empty for every `value_type`, trivially copyable, and
-/// every operation that would add an element throws `std::bad_alloc`.
 template <class T>
-class inplace_vector<T, 0>
+class inplace_vector<T, 0> : private inplace_storage<inplace_storage_detail::storage_no_size_base, T, 0>
 {
   static_assert(std::is_object_v<T>, "containers require object value types ([container.requirements])");
+  using base = inplace_storage<inplace_storage_detail::storage_no_size_base, T, 0>;
+
 public:
-  using value_type             = T;
-  using pointer                = value_type *;
-  using const_pointer          = value_type const *;
-  using reference              = value_type &;
-  using const_reference        = value_type const &;
-  using size_type              = std::size_t;
-  using difference_type        = std::ptrdiff_t;
-  using iterator               = value_type *;
-  using const_iterator         = value_type const *;
-  using reverse_iterator       = std::reverse_iterator<iterator>;
-  using const_reverse_iterator = std::reverse_iterator<const_iterator>;
-#if __cplusplus >= 202603L
+  using typename base::value_type;
+  using typename base::pointer;
+  using typename base::const_pointer;
+  using typename base::reference;
+  using typename base::const_reference;
+  using typename base::size_type;
+  using typename base::difference_type;
+  using typename base::iterator;
+  using typename base::const_iterator;
+  using typename base::reverse_iterator;
+  using typename base::const_reverse_iterator;
+
+#if defined(__cpp_lib_optional) && __cpp_lib_optional >= 202406L
   using try_result_type = std::optional<value_type &>;
 #else
   using try_result_type = value_type *;
 #endif
 
-  constexpr inplace_vector() noexcept = default;
-  constexpr inplace_vector(inplace_vector const &) = default;
-  constexpr inplace_vector(inplace_vector &&) = default;
-  constexpr ~inplace_vector() = default;
-  constexpr inplace_vector &operator=(inplace_vector const &) = default;
-  constexpr inplace_vector &operator=(inplace_vector &&) = default;
+  // element access / capacity / iterators: reuse the empty versions from the base
+  using base::operator[];
+  using base::at;
+  using base::front;
+  using base::back;
+  using base::data;
+  using base::empty;
+  using base::max_size;
+  using base::size;
+  using base::begin;
+  using base::end;
+  using base::rbegin;
+  using base::rend;
+  using base::cbegin;
+  using base::cend;
+  using base::crbegin;
+  using base::crend;
+
+  constexpr inplace_vector() noexcept                          = default;
+  constexpr ~inplace_vector()                                  = default;
+  constexpr inplace_vector(inplace_vector const &)             = default;
+  constexpr inplace_vector(inplace_vector &&)                  = default;
+  constexpr inplace_vector &operator= (inplace_vector const &) = default;
+  constexpr inplace_vector &operator= (inplace_vector &&)      = default;
 
   constexpr explicit inplace_vector(size_type const count)
   {
-    if (count != 0) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
+    if (count != 0) [[unlikely]] inplace_storage_detail::throw_bad_alloc();
   }
 
   constexpr inplace_vector(size_type const count, const_reference)
   {
-    if (count != 0) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
+    if (count != 0) [[unlikely]] inplace_storage_detail::throw_bad_alloc();
   }
 
   template <std::input_iterator InputIt, std::sentinel_for<InputIt> Sentinel>
   constexpr inplace_vector(InputIt first, Sentinel last)
   {
-    if (first != last) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
+    if (first != last) [[unlikely]] inplace_storage_detail::throw_bad_alloc();
   }
 
   constexpr inplace_vector(std::initializer_list<value_type> ilist)
   {
-    if (ilist.size() != 0) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
+    if (ilist.size() != 0) [[unlikely]] inplace_storage_detail::throw_bad_alloc();
   }
 
 #ifdef __cpp_lib_containers_ranges
-  template <inplace_vector_detail::container_compatible_range<value_type> R>
+  template <inplace_storage_detail::container_compatible_range<value_type> R>
   constexpr inplace_vector(std::from_range_t, R &&rg)
   {
-    if (std::ranges::begin(rg) != std::ranges::end(rg)) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
+    if (std::ranges::begin(rg) != std::ranges::end(rg)) [[unlikely]] inplace_storage_detail::throw_bad_alloc();
   }
 #endif
 
   constexpr inplace_vector &operator=(std::initializer_list<value_type> ilist)
   {
-    if (ilist.size() != 0) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
+    if (ilist.size() != 0) [[unlikely]] inplace_storage_detail::throw_bad_alloc();
     return *this;
   }
 
   template <std::input_iterator InputIt, std::sentinel_for<InputIt> Sentinel>
   constexpr void assign(InputIt first, Sentinel last)
   {
-    if (first != last) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
+    if (first != last) [[unlikely]] inplace_storage_detail::throw_bad_alloc();
   }
 
-  template <inplace_vector_detail::container_compatible_range<value_type> R>
+  template <inplace_storage_detail::container_compatible_range<value_type> R>
   constexpr void assign_range(R &&rg)
   {
-    if (std::ranges::begin(rg) != std::ranges::end(rg)) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
+    if (std::ranges::begin(rg) != std::ranges::end(rg)) [[unlikely]] inplace_storage_detail::throw_bad_alloc();
   }
 
   constexpr void assign(size_type const count, const_reference)
   {
-    if (count != 0) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
+    if (count != 0) [[unlikely]] inplace_storage_detail::throw_bad_alloc();
   }
 
   constexpr void assign(std::initializer_list<value_type> ilist)
   {
-    if (ilist.size() != 0) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
+    if (ilist.size() != 0) [[unlikely]] inplace_storage_detail::throw_bad_alloc();
   }
 
-  [[nodiscard]] constexpr iterator begin() noexcept { return nullptr; }
-  [[nodiscard]] constexpr const_iterator begin() const noexcept { return nullptr; }
-  [[nodiscard]] constexpr iterator end() noexcept { return nullptr; }
-  [[nodiscard]] constexpr const_iterator end() const noexcept { return nullptr; }
-  [[nodiscard]] constexpr reverse_iterator rbegin() noexcept { return reverse_iterator(end()); }
-  [[nodiscard]] constexpr const_reverse_iterator rbegin() const noexcept { return const_reverse_iterator(end()); }
-  [[nodiscard]] constexpr reverse_iterator rend() noexcept { return reverse_iterator(begin()); }
-  [[nodiscard]] constexpr const_reverse_iterator rend() const noexcept { return const_reverse_iterator(begin()); }
-  [[nodiscard]] constexpr const_iterator cbegin() const noexcept { return nullptr; }
-  [[nodiscard]] constexpr const_iterator cend() const noexcept { return nullptr; }
-  [[nodiscard]] constexpr const_reverse_iterator crbegin() const noexcept { return rbegin(); }
-  [[nodiscard]] constexpr const_reverse_iterator crend() const noexcept { return rend(); }
-
-  constexpr bool empty() const noexcept { return true; }
-  [[nodiscard]] constexpr size_type size() const noexcept { return 0; }
-  [[nodiscard]] static constexpr size_type max_size() noexcept { return 0; }
   [[nodiscard]] static constexpr size_type capacity() noexcept { return 0; }
   static constexpr void shrink_to_fit() noexcept {}
 
   static constexpr void reserve(size_type const count)
   {
-    if (count != 0) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
+    if (count != 0) [[unlikely]] inplace_storage_detail::throw_bad_alloc();
   }
 
   constexpr void resize(size_type const count)
   {
-    if (count != 0) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
+    if (count != 0) [[unlikely]] inplace_storage_detail::throw_bad_alloc();
   }
 
   constexpr void resize(size_type const count, const_reference)
   {
-    if (count != 0) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
+    if (count != 0) [[unlikely]] inplace_storage_detail::throw_bad_alloc();
   }
-
-  [[nodiscard]] constexpr reference operator[](size_type) noexcept
-  {
-    assert(false && "inplace_vector<T, 0>::operator[] is out of range");
-    return *static_cast<value_type *>(nullptr);
-  }
-
-  [[nodiscard]] constexpr const_reference operator[](size_type) const noexcept
-  {
-    assert(false && "inplace_vector<T, 0>::operator[] is out of range");
-    return *static_cast<value_type const *>(nullptr);
-  }
-
-  [[nodiscard]] constexpr reference at(size_type) { inplace_vector_detail::throw_out_of_range_(); }
-  [[nodiscard]] constexpr const_reference at(size_type) const { inplace_vector_detail::throw_out_of_range_(); }
-  [[nodiscard]] constexpr reference front() noexcept
-  {
-    assert(false && "inplace_vector<T, 0>::front on empty");
-    return *static_cast<value_type *>(nullptr);
-  }
-  [[nodiscard]] constexpr const_reference front() const noexcept
-  {
-    assert(false && "inplace_vector<T, 0>::front on empty");
-    return *static_cast<value_type const *>(nullptr);
-  }
-  [[nodiscard]] constexpr reference back() noexcept
-  {
-    assert(false && "inplace_vector<T, 0>::back on empty");
-    return *static_cast<value_type *>(nullptr);
-  }
-  [[nodiscard]] constexpr const_reference back() const noexcept
-  {
-    assert(false && "inplace_vector<T, 0>::back on empty");
-    return *static_cast<value_type const *>(nullptr);
-  }
-
-  [[nodiscard]] constexpr value_type *data() noexcept { return nullptr; }
-  [[nodiscard]] constexpr value_type const *data() const noexcept { return nullptr; }
 
   template <class... Args>
-  constexpr reference emplace_back(Args &&...) { inplace_vector_detail::throw_bad_alloc_(); }
-  constexpr reference push_back(const_reference) { inplace_vector_detail::throw_bad_alloc_(); }
-  constexpr reference push_back(value_type &&) { inplace_vector_detail::throw_bad_alloc_(); }
+  constexpr reference emplace_back(Args &&...) { inplace_storage_detail::throw_bad_alloc(); }
+  constexpr reference push_back(const_reference) { inplace_storage_detail::throw_bad_alloc(); }
+
+  constexpr reference push_back(value_type &&) { inplace_storage_detail::throw_bad_alloc(); }
+
   template <class... Args>
-  [[nodiscard]] constexpr try_result_type try_emplace_back(Args &&...)
+  [[nodiscard]] constexpr try_result_type try_emplace_back(Args &&...) noexcept
   {
-#if __cplusplus >= 202603L
-    return std::nullopt;
-#else
-    return nullptr;
-#endif
-  }
-  [[nodiscard]] constexpr try_result_type try_push_back(const_reference)
-  {
-#if __cplusplus >= 202603L
-    return std::nullopt;
-#else
-    return nullptr;
-#endif
-  }
-  [[nodiscard]] constexpr try_result_type try_push_back(value_type &&)
-  {
-#if __cplusplus >= 202603L
+#if defined(__cpp_lib_optional) && __cpp_lib_optional >= 202406L
     return std::nullopt;
 #else
     return nullptr;
 #endif
   }
 
-  template <inplace_vector_detail::container_compatible_range<value_type> R>
+  [[nodiscard]] constexpr try_result_type try_push_back(const_reference) noexcept
+  {
+    return try_emplace_back();
+  }
+
+  [[nodiscard]] constexpr try_result_type try_push_back(value_type &&) noexcept
+  {
+    return try_emplace_back();
+  }
+
+  template <inplace_storage_detail::container_compatible_range<value_type> R>
   constexpr void append_range(R &&rg)
   {
-    if (std::ranges::begin(rg) != std::ranges::end(rg)) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
+    if (std::ranges::begin(rg) != std::ranges::end(rg)) [[unlikely]] inplace_storage_detail::throw_bad_alloc();
   }
 
   constexpr void pop_back() noexcept { assert(false && "inplace_vector<T, 0>::pop_back on empty"); }
 
   template <class... Args>
-  constexpr iterator emplace(const_iterator, Args &&...) { inplace_vector_detail::throw_bad_alloc_(); }
-  constexpr iterator insert(const_iterator, const_reference) { inplace_vector_detail::throw_bad_alloc_(); }
-  constexpr iterator insert(const_iterator, value_type &&) { inplace_vector_detail::throw_bad_alloc_(); }
+  constexpr iterator emplace(const_iterator, Args &&...) { inplace_storage_detail::throw_bad_alloc(); }
+  constexpr iterator insert(const_iterator, const_reference) { inplace_storage_detail::throw_bad_alloc(); }
+  constexpr iterator insert(const_iterator, value_type &&) { inplace_storage_detail::throw_bad_alloc(); }
   constexpr iterator insert(const_iterator, size_type const count, const_reference)
   {
-    if (count != 0) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
+    if (count != 0) [[unlikely]] inplace_storage_detail::throw_bad_alloc();
     return nullptr;
   }
   template <std::input_iterator InputIt, std::sentinel_for<InputIt> Sentinel>
   constexpr iterator insert(const_iterator, InputIt first, Sentinel last)
   {
-    if (first != last) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
+    if (first != last) [[unlikely]] inplace_storage_detail::throw_bad_alloc();
     return nullptr;
   }
-  template <inplace_vector_detail::container_compatible_range<value_type> R>
+  template <inplace_storage_detail::container_compatible_range<value_type> R>
   constexpr iterator insert_range(const_iterator, R &&rg)
   {
-    if (std::ranges::begin(rg) != std::ranges::end(rg)) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
+    if (std::ranges::begin(rg) != std::ranges::end(rg)) [[unlikely]] inplace_storage_detail::throw_bad_alloc();
     return nullptr;
   }
   constexpr iterator insert(const_iterator, std::initializer_list<value_type> ilist)
   {
-    if (ilist.size() != 0) [[unlikely]] inplace_vector_detail::throw_bad_alloc_();
+    if (ilist.size() != 0) [[unlikely]] inplace_storage_detail::throw_bad_alloc();
     return nullptr;
   }
 
