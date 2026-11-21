@@ -20,6 +20,7 @@
 // (include/ptrhash.hpp). Deterministic SplitMix64 key streams keep the test free
 // of flakiness.
 #include <array>
+#include <concepts>
 #include <cstdint>
 #include <cstdio>
 #include <memory>
@@ -87,8 +88,11 @@ bool check_absent_keys(Table const &table, std::size_t count, std::size_t bound,
 {
   std::uint64_t state = seed;
   for (std::size_t i = 0; i < count; ++i) {
-    std::uint64_t const key = next_rand(state);
-    CHECK(table.index(key) < bound);
+    std::uint64_t const key   = next_rand(state);
+    std::size_t const    index = table.index(key);
+    // With a fingerprint enabled an absent key may be rejected outright (npos);
+    // otherwise it lands on some slot (a possible index-level false positive).
+    CHECK(index == Table::npos || index < bound);
   }
   return true;
 }
@@ -204,6 +208,54 @@ struct counting_allocator
     return !(lhs == rhs);
   }
 };
+
+// Satisfies `standard_allocator` but is deliberately not default-constructible.
+// The allocator-less ptr_hash constructors default-construct their internal
+// vector's allocator, so they must be constrained out for such an allocator
+// instead of hard-erroring deep inside std::vector.
+template <class T>
+struct non_default_allocator
+{
+  using value_type = T;
+  using pointer    = T *;
+  using size_type  = std::size_t;
+
+  non_default_allocator() = delete;
+  constexpr non_default_allocator(non_default_allocator const &) noexcept = default;
+  constexpr non_default_allocator &operator= (non_default_allocator const &) noexcept = default;
+
+  template <class U>
+  constexpr non_default_allocator(non_default_allocator<U> const &) noexcept
+  {
+  }
+
+  constexpr T *allocate(std::size_t count) { return std::allocator<T> {}.allocate(count); }
+  constexpr void deallocate(T *ptr, std::size_t count) { std::allocator<T> {}.deallocate(ptr, count); }
+
+  template <class U>
+  friend constexpr bool operator== (non_default_allocator const &, non_default_allocator<U> const &) noexcept
+  {
+    return true;
+  }
+
+  template <class U>
+  friend constexpr bool operator!= (non_default_allocator const &, non_default_allocator<U> const &) noexcept
+  {
+    return false;
+  }
+};
+
+using non_default_table = stdex::ptr_hash<
+    std::uint64_t,
+    stdex::hash<std::uint64_t>,
+    stdex::ptr_hash_heap_options<non_default_allocator<std::uint64_t>>::profile_balanced()>;
+using iterator_type = std::vector<std::uint64_t>::iterator;
+
+static_assert(!std::default_initializable<non_default_allocator<std::uint64_t>>);
+static_assert(!std::constructible_from<non_default_table, iterator_type, iterator_type>,
+              "allocator-less iterator ctor must be disabled when the allocator is not default-constructible");
+static_assert(std::constructible_from<non_default_table, iterator_type, iterator_type, stdex::hash<std::uint64_t>, non_default_allocator<std::uint64_t>>,
+              "allocator-taking iterator ctor must stay available for a non-default-constructible allocator");
 
 void test_basic_construction()
 {
@@ -409,6 +461,43 @@ void test_copy_move_allocator()
     assigned = table;
     CHECK(assigned.size() == table.size());
     CHECK(check_indices(assigned, keys, assigned.size()));
+  }
+
+  CHECK(allocation_stats::allocations == allocation_stats::deallocations);
+}
+
+void test_allocatorless_constructor()
+{
+  std::printf("\n=== ptrhash: allocator-less constructor defaults the allocator ===\n");
+
+  using table_type = stdex::ptr_hash<std::uint64_t, stdex::hash<std::uint64_t>, stdex::ptr_hash_heap_options<counting_allocator<std::uint64_t>>::profile_balanced()>;
+
+  std::vector<std::uint64_t> const keys = make_random_keys(1500, 424242);
+  allocation_stats::allocations         = 0;
+  allocation_stats::deallocations       = 0;
+
+  {
+    // No allocator passed: the internal vector default-constructs its allocator,
+    // so get_allocator() reports the default tag (0) and every allocation remains
+    // paired with a deallocation.
+    table_type table(keys.begin(), keys.end());
+    CHECK(table.get_allocator().tag == 0);
+    CHECK(table.size() == keys.size());
+    CHECK(check_indices(table, keys, table.size()));
+    CHECK(check_absent_keys(table, 500, table.size(), 909090));
+
+    table_type with_hasher(keys.begin(), keys.end(), stdex::hash<std::uint64_t> {});
+    CHECK(with_hasher.get_allocator().tag == 0);
+    CHECK(with_hasher.size() == keys.size());
+    CHECK(check_indices(with_hasher, keys, with_hasher.size()));
+
+    table_type from_list { std::uint64_t { 1 }, std::uint64_t { 2 }, std::uint64_t { 3 } };
+    CHECK(from_list.get_allocator().tag == 0);
+    CHECK(from_list.size() == 3);
+
+    table_type empty;
+    CHECK(empty.get_allocator().tag == 0);
+    CHECK(empty.empty());
   }
 
   CHECK(allocation_stats::allocations == allocation_stats::deallocations);
@@ -674,6 +763,7 @@ int main()
   test_key_types();
   test_error_paths();
   test_copy_move_allocator();
+  test_allocatorless_constructor();
   test_initializer_list_and_ranges();
   test_fixed_capacity();
   test_stress();

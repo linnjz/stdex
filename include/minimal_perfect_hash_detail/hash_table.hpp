@@ -16,36 +16,30 @@
 
 #pragma once
 
-#include <algorithm>        // std::copy_n, std::fill_n
+#include <algorithm>        // std::fill_n
 #include <cassert>          // assert
 #include <concepts>         // std::constructible_from, std::same_as, std::derived_from
 #include <cstddef>          // std::size_t, std::ptrdiff_t
-#include <cstdint>          // std::uint8_t, std::uint32_t
+#include <cstdint>          // std::uint8_t
 #include <initializer_list> // std::initializer_list
-#include <iterator>         // std::input_iterator, std::sentinel_for, std::iter_reference_t
+#include <iterator>         // std::forward_iterator, std::sentinel_for, std::iter_reference_t
 #include <limits>           // std::numeric_limits
-#include <memory>           // std::allocator_traits, std::addressof
-#include <ranges>           // std::ranges::forward_range, std::ranges::sized_range,
-                            // std::ranges::range_reference_t, std::ranges::begin, std::ranges::end,
-                            // std::ranges::size, std::views::transform
+#include <memory>           // std::allocator_traits, std::addressof, std::construct_at, std::destroy_at
+#include <ranges>           // std::ranges::forward_range, std::ranges::subrange, std::views::transform
 #include <stdexcept>        // std::out_of_range
 #include <tuple>            // std::tuple_element_t
-#include <type_traits>      // std::remove_cvref_t, std::remove_cv_t, std::is_move_assignable_v, std::is_trivially_copyable_v
-#include <utility>          // std::move, std::exchange
-#include <vector>           // std::vector
+#include <type_traits>      // std::remove_cvref_t, std::conditional_t, std::derived_from
+#include <utility>          // std::move, std::exchange, std::pair
 #include <version>          // __cpp_lib_containers_ranges
-
-#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
-#  include <intrin.h> // _mm_prefetch
-#endif
 
 #include "../inplace_vector.hpp"
 #include "../ptrhash.hpp"
 #include "../uninitialized_algorithms.hpp"
 #include "../uninitialized_buffer.hpp"
-#include "fixed_buffer.hpp"
 #include "mphmap_traits.hpp"
 #include "mphset_traits.hpp"
+#include "pointer_wrapper.hpp"
+#include "random_placement_buffer.hpp"
 
 namespace stdex::minimal_perfect_hash_detail
 {
@@ -84,121 +78,39 @@ concept heterogeneous_key =
     is_hasher_for<Hasher, K> &&
     std::predicate<KeyEqual const &, KeyType const &, K const &>;
 
-/// Heap value storage is a bare (pointer-only) buffer: the single allocator lives
-/// in the shared ptr_hash index and the element count is derived from it, so the
-/// final object carries neither a per-storage allocator copy nor a capacity field.
-/// Stack storage stays inline via @c inplace_vector and never allocates.
-template <ptr_hash_storage_policy Policy, class Value, class Allocator, std::size_t Capacity>
-struct value_storage_selector;
-
-template <class Value, class Allocator, std::size_t Capacity>
-struct value_storage_selector<ptr_hash_storage_policy::heap, Value, Allocator, Capacity>
-{
-  using type = fixed_buffer<Value, Allocator>;
-};
-
-template <class Value, class Allocator, std::size_t Capacity>
-struct value_storage_selector<ptr_hash_storage_policy::stack, Value, Allocator, Capacity>
-{
-  using type = inplace_vector<Value, Capacity>;
-};
-
-/// Fingerprint table follows the value storage policy; on the heap it is a bare
-/// buffer allocated from the same single allocator.
-template <ptr_hash_storage_policy Policy, class T, class Allocator, std::size_t Capacity>
-struct fingerprint_storage_selector;
-
-template <class T, class Allocator, std::size_t Capacity>
-struct fingerprint_storage_selector<ptr_hash_storage_policy::heap, T, Allocator, Capacity>
-{
-  using type = fixed_buffer<T, Allocator>;
-};
-
-template <class T, class Allocator, std::size_t Capacity>
-struct fingerprint_storage_selector<ptr_hash_storage_policy::stack, T, Allocator, Capacity>
-{
-  using type = inplace_vector<T, Capacity>;
-};
-
-/// Ordered-permutation scratch buffer, transient during construction only.
-template <ptr_hash_storage_policy Policy, class T, class Allocator, std::size_t Capacity>
-struct scratch_storage_selector;
-
-template <class T, class Allocator, std::size_t Capacity>
-struct scratch_storage_selector<ptr_hash_storage_policy::heap, T, Allocator, Capacity>
-{
-  using allocator_type = typename std::allocator_traits<Allocator>::template rebind_alloc<T>;
-  using type           = uninitialized_buffer<T, allocator_type>;
-};
-
-template <class T, class Allocator, std::size_t Capacity>
-struct scratch_storage_selector<ptr_hash_storage_policy::stack, T, Allocator, Capacity>
-{
-  using type = inplace_vector<T, Capacity>;
-};
-
-/// The growable container used only while building. Heap uses a std::vector that
-/// is later moved into the final bare buffer; stack builds the inplace_vector that
-/// is kept directly.
-template <ptr_hash_storage_policy Policy, class Value, class Allocator, std::size_t Capacity>
-struct build_storage_selector;
-
-template <class Value, class Allocator, std::size_t Capacity>
-struct build_storage_selector<ptr_hash_storage_policy::heap, Value, Allocator, Capacity>
-{
-  using allocator_type = typename std::allocator_traits<Allocator>::template rebind_alloc<Value>;
-  using type           = std::vector<Value, allocator_type>;
-};
-
-template <class Value, class Allocator, std::size_t Capacity>
-struct build_storage_selector<ptr_hash_storage_policy::stack, Value, Allocator, Capacity>
-{
-  using type = inplace_vector<Value, Capacity>;
-};
-
-/**
- * @brief Immutable associative table backed by a minimal-perfect hash index.
- *
- * @details The @c ptr_hash index stores no keys, and its @c index()
- * result is only unique over the keys that were used to build it; an arbitrary
- * query still lands on some slot in @c [0, size()). @c storage_ therefore
- * stores the elements in index order, and every lookup verifies the candidate
- * with @c key_equal. A parallel one-byte fingerprint table rejects most misses
- * before @c storage_ is touched; only a fingerprint match pays for the
- * value-line fetch and the equality check. This keeps the final table free of
- * an occupancy bitmap or duplicate key storage.
- *
- * On the heap the value and fingerprint buffers are plain pointer handles
- * (@c fixed_buffer) whose lifetime is driven by the single allocator kept
- * inside @c ptr_hash_storage_. That is the whole point of the layout: an
- * immutable table never grows, so storing a per-buffer allocator copy or a
- * capacity field is pure overhead that a stateful allocator would amplify.
- *
- * Only @c ptr_hash_scheme::minimal_perfect is supported: it is the scheme that
- * maps every key onto a distinct index in @c [0, key_count), so a value
- * container of exactly @c key_count elements is sufficient and all its slots are
- * populated. The @c perfect scheme leaves holes in @c [0, capacity) and would
- * need a separate slot-to-value mapping.
- *
- * Lookups also accept heterogeneous key types when both @c Hasher and
- * @c KeyEqual expose @c is_transparent. The alternate key is hashed through the
- * same seeded PtrHash path, so the resulting index stays consistent with the
- * index built from @c key_type.
- */
+/// Immutable associative table backed by a minimal-perfect hash index.
+///
+/// The index stores no keys: @c ptr_hash::index() is a bijection over the built
+/// key set onto `[0, size())`, so the value buffer holds exactly `size()` elements
+/// in index order and every lookup verifies the candidate with @c key_equal.
+/// Misses are rejected by the fingerprint that @c ptr_hash keeps inside its own
+/// index blob, so no separate fingerprint buffer is needed.
+///
+/// Construction is a single pass: the index is built first (which also validates
+/// the stack capacity and fixes the key->index mapping), then each value is
+/// constructed directly at the index its key maps to. The range constructors
+/// therefore require forward iterators -- the range is walked once to build the
+/// index and once to construct the values; single-pass input iterators are
+/// intentionally not supported (that would need a second value buffer).
+///
+/// heap: the value buffer is a bare pointer handle allocated from the single
+/// allocator kept inside @c ptr_hash_storage_. stack: an inline raw buffer
+/// (@c random_placement_buffer) with no allocation.
 template <class Traits, class Hasher, class KeyEqual, auto Options>
 requires ptr_hash_detail::is_ptr_hash_options_v<std::remove_cvref_t<decltype(Options)>>
 class hash_table
 {
+  static_assert(Options.hash_scheme == ptr_hash_scheme::minimal_perfect,
+                "minimal_perfect_hash containers require ptr_hash_scheme::minimal_perfect");
+
 public:
   using options_type = std::remove_cvref_t<decltype(Options)>;
   static constexpr options_type options_value { Options };
-  /// Storage mode requested by the option set; selects the value container and auxiliary buffers.
   static constexpr ptr_hash_storage_policy storage_policy { options_type::storage_traits::storage_policy };
   /// The option set owns the allocator; rebinding it to @c value_type gives the
-  /// container's value allocator. Stack storage is inline and never allocates,
-  /// so there the rebound allocator only backs @c get_allocator().
-  using allocator_type = typename std::allocator_traits<
-      typename options_type::storage_traits::allocator_type>::template rebind_alloc<typename Traits::value_type>;
+  /// container's value allocator. Stack storage is inline and never allocates.
+  using allocator_type = typename std::allocator_traits<typename options_type::storage_traits::allocator_type>
+                                     ::template rebind_alloc<typename Traits::value_type>;
 
   using key_type        = typename Traits::key_type;
   using mapped_type     = typename Traits::mapped_type;
@@ -208,253 +120,105 @@ public:
   using size_type       = std::size_t;
   using difference_type = std::ptrdiff_t;
   using const_reference = value_type const &;
-  using const_pointer   = typename std::allocator_traits<allocator_type>::const_pointer;
   using reference       = const_reference;
-  using pointer         = const_pointer;
+
+  using ptr_hash_storage_type = ptr_hash<key_type, Hasher, options_value>;
+  using value_storage_type    = std::conditional_t<
+      storage_policy == ptr_hash_storage_policy::heap,
+      pointer_wrapper<typename std::allocator_traits<allocator_type>::pointer>,
+      random_placement_buffer<value_type, static_cast<size_type>(options_type::storage_traits::max_key_count)>>;
+
+  /// Per-slot "constructed yet?" marker used by the construction pass so a
+  /// throwing element construction rolls back exactly the slots it filled.
+  using build_marker_type = std::conditional_t<
+      storage_policy == ptr_hash_storage_policy::heap,
+      uninitialized_buffer<std::uint8_t, typename std::allocator_traits<allocator_type>::template rebind_alloc<std::uint8_t>>,
+      inplace_vector<std::uint8_t, static_cast<size_type>(options_type::storage_traits::max_key_count)>>;
+
+  using const_pointer  = value_type const *;
+  using pointer        = const_pointer;
+  using const_iterator = value_type const *;
+  using iterator       = const_iterator;
 
 private:
-  template <class T>
-  using rebind_alloc_t = typename std::allocator_traits<allocator_type>::template rebind_alloc<T>;
-
-  using fingerprint_type = std::uint8_t;
-  using order_index_type = std::uint32_t;
-
-  using ptr_hash_storage = ptr_hash<key_type, Hasher, Options>;
-  using value_storage    = typename value_storage_selector<
-      storage_policy,
-      value_type,
-      allocator_type,
-      options_type::storage_traits::max_key_count>::type;
-  using fingerprint_storage = typename fingerprint_storage_selector<
-      storage_policy,
-      fingerprint_type,
-      allocator_type,
-      options_type::storage_traits::max_key_count>::type;
-  using order_storage = typename scratch_storage_selector<
-      storage_policy,
-      order_index_type,
-      allocator_type,
-      options_type::storage_traits::max_key_count>::type;
-  using build_value_storage = typename build_storage_selector<
-      storage_policy,
-      value_type,
-      allocator_type,
-      options_type::storage_traits::max_key_count>::type;
-
-  /// The cycle path avoids the second value buffer. Probe data shows that
-  /// sequential out-of-place writes win for small values, while the cycle path
-  /// wins once the value is large or its nontrivial copy/move cost dominates.
-  static constexpr size_type cycle_reorder_trivial_threshold    = 32;
-  static constexpr size_type cycle_reorder_nontrivial_threshold = 16;
-  static constexpr bool use_cycle_reorder =
-      std::is_move_assignable_v<value_type> &&
-      (sizeof(value_type) >= cycle_reorder_trivial_threshold ||
-       (!std::is_trivially_copyable_v<value_type> && sizeof(value_type) >= cycle_reorder_nontrivial_threshold));
-
-  template <class Buffer, class BufferAllocator>
-  struct buffer_release_guard
+  /// Deallocate the heap value buffer (destroying the `size()` live elements).
+  constexpr void release_storage_() noexcept
   {
-    Buffer &buffer_;
-    size_type constructed_;
-    size_type capacity_;
-    BufferAllocator &allocator_;
-    bool dismissed_ { true };
-
-    constexpr ~buffer_release_guard()
-    {
-      if (dismissed_) buffer_.destroy_and_deallocate(constructed_, capacity_, allocator_);
-    }
-
-    constexpr void set_constructed(size_type const count) noexcept { constructed_ = count; }
-    constexpr void dismiss() noexcept { dismissed_ = false; }
-  };
-
-  struct build_tag {};
-
-  constexpr hash_table(build_tag, build_value_storage built, hasher const &hash, key_equal const &equal, allocator_type const &alloc)
-      : ptr_hash_storage_ { make_ptr_hash_storage_(built, hash, alloc) }
-      , key_eq_ { equal }
-  {
-    size_type const count = built.size();
     if constexpr (storage_policy == ptr_hash_storage_policy::heap) {
-      rebind_alloc_t<value_type> value_alloc { alloc };
-      rebind_alloc_t<fingerprint_type> fingerprint_alloc { alloc };
-      storage_      = value_storage::allocate(count, value_alloc);
-      fingerprints_ = fingerprint_storage::allocate(count, fingerprint_alloc);
-
-      buffer_release_guard<value_storage, rebind_alloc_t<value_type>> value_guard { storage_, 0, count, value_alloc };
-      buffer_release_guard<fingerprint_storage, rebind_alloc_t<fingerprint_type>> fingerprint_guard { fingerprints_, 0, count, fingerprint_alloc };
-
-      reorder_storage_and_fingerprints_(built, fingerprints_, count, alloc);
-
-      if (count != 0) {
-        ::stdex::uninitialized_move(built.begin(), built.end(), storage_.data(), storage_.data() + count, value_alloc);
-        value_guard.set_constructed(count);
+      if (!value_storage_) [[unlikely]] return;
+      allocator_type value_alloc { ptr_hash_storage_.get_allocator() };
+      value_type *const raw = value_storage_.data();
+      size_type const count = size();
+      for (size_type i = 0; i < count; ++i) {
+        std::allocator_traits<allocator_type>::destroy(value_alloc, raw + i);
       }
-      value_guard.dismiss();
-      fingerprint_guard.dismiss();
-    } else {
-      storage_      = std::move(built);
-      fingerprints_ = fingerprint_storage(count);
-      reorder_storage_and_fingerprints_(storage_, fingerprints_, count, alloc);
+      std::allocator_traits<allocator_type>::deallocate(value_alloc, value_storage_.get(), count);
+      value_storage_.reset();
     }
   }
 
 public:
-  using const_iterator = value_type const *;
-  using iterator       = const_iterator;
-
-  static_assert(options_value.hash_scheme == ptr_hash_scheme::minimal_perfect,
-                "minimal_perfect_hash containers require ptr_hash_scheme::minimal_perfect");
-
   constexpr hash_table() = default;
-
-  // ---------- iterator-range constructors ----------
-  template <std::input_iterator Iterator, std::sentinel_for<Iterator> Sentinel>
-  requires std::constructible_from<value_type, std::iter_reference_t<Iterator>>
-  constexpr hash_table(Iterator first, Sentinel last, hasher const &hash, key_equal const &equal, allocator_type const &alloc)
-      : hash_table { build_tag {}, make_build_storage_(std::ranges::subrange { std::move(first), std::move(last) }, alloc), hash, equal, alloc }
+  constexpr ~hash_table()
   {
+    if constexpr (storage_policy == ptr_hash_storage_policy::heap) {
+      release_storage_();
+    }
   }
 
-  template <std::input_iterator Iterator, std::sentinel_for<Iterator> Sentinel>
-  constexpr hash_table(Iterator first, Sentinel last)
-      : hash_table { std::move(first), std::move(last), hasher {}, key_equal {}, allocator_type {} }
+private:
+  /// Rolls a partially built value buffer back on unwind: destroys exactly the
+  /// slots marked as constructed (they sit at arbitrary final indices, not a
+  /// contiguous prefix). A null @c marker_ means the caller already rolled back
+  /// its constructed prefix (e.g. @c uninitialized_copy_n), so only the raw heap
+  /// allocation is released. @c alloc_ is null for stack storage.
+  struct value_build_guard
   {
-  }
+    value_storage_type &storage_;
+    build_marker_type *marker_;
+    size_type count_;
+    allocator_type *alloc_ = nullptr;
+    bool dismissed_        = false;
 
-  template <std::input_iterator Iterator, std::sentinel_for<Iterator> Sentinel>
-  constexpr hash_table(Iterator first, Sentinel last, hasher const &hash)
-      : hash_table { std::move(first), std::move(last), hash, key_equal {}, allocator_type {} }
-  {
-  }
+    value_build_guard &operator= (value_build_guard const &) = delete;
+    value_build_guard &operator= (value_build_guard &&)      = delete;
 
-  template <std::input_iterator Iterator, std::sentinel_for<Iterator> Sentinel>
-  constexpr hash_table(Iterator first, Sentinel last, hasher const &hash, key_equal const &equal)
-      : hash_table { std::move(first), std::move(last), hash, equal, allocator_type {} }
-  {
-  }
+    constexpr ~value_build_guard() noexcept
+    {
+      if (dismissed_) [[likely]] return;
+      if constexpr (storage_policy == ptr_hash_storage_policy::heap) {
+        if (marker_ != nullptr) {
+          for (size_type i = 0; i < count_; ++i) {
+            if ((*marker_)[i]) std::allocator_traits<allocator_type>::destroy(*alloc_, storage_.data() + i);
+          }
+        }
+        std::allocator_traits<allocator_type>::deallocate(*alloc_, storage_.get(), count_);
+      } else if (marker_ != nullptr) {
+        for (size_type i = 0; i < count_; ++i) {
+          if ((*marker_)[i]) std::destroy_at(storage_.data() + i);
+        }
+      }
+    }
 
-  template <std::input_iterator Iterator, std::sentinel_for<Iterator> Sentinel>
-  constexpr hash_table(Iterator first, Sentinel last, allocator_type const &alloc)
-      : hash_table { std::move(first), std::move(last), hasher {}, key_equal {}, alloc }
-  {
-  }
+    constexpr void dismiss() noexcept { dismissed_ = true; }
+  };
 
-  template <std::input_iterator Iterator, std::sentinel_for<Iterator> Sentinel>
-  constexpr hash_table(Iterator first, Sentinel last, hasher const &hash, allocator_type const &alloc)
-      : hash_table { std::move(first), std::move(last), hash, key_equal {}, alloc }
-  {
-  }
-
-  // ---------- initializer_list constructors ----------
-  constexpr hash_table(std::initializer_list<value_type> ilist, hasher const &hash, key_equal const &equal, allocator_type const &alloc)
-      : hash_table { ilist.begin(), ilist.end(), hash, equal, alloc }
-  {
-  }
-
-  constexpr hash_table(std::initializer_list<value_type> ilist)
-      : hash_table { ilist, hasher {}, key_equal {}, allocator_type {} }
-  {
-  }
-
-  constexpr hash_table(std::initializer_list<value_type> ilist, hasher const &hash)
-      : hash_table { ilist, hash, key_equal {}, allocator_type {} }
-  {
-  }
-
-  constexpr hash_table(std::initializer_list<value_type> ilist, hasher const &hash, key_equal const &equal)
-      : hash_table { ilist, hash, equal, allocator_type {} }
-  {
-  }
-
-  constexpr hash_table(std::initializer_list<value_type> ilist, allocator_type const &alloc)
-      : hash_table { ilist, hasher {}, key_equal {}, alloc }
-  {
-  }
-
-  constexpr hash_table(std::initializer_list<value_type> ilist, hasher const &hash, allocator_type const &alloc)
-      : hash_table { ilist, hash, key_equal {}, alloc }
-  {
-  }
-
-  // ---------- from_range constructors ----------
-#ifdef __cpp_lib_containers_ranges
-  template <std::ranges::input_range Range>
-  requires (!std::derived_from<std::remove_cvref_t<Range>, hash_table>) &&
-               std::constructible_from<value_type, std::ranges::range_reference_t<Range>>
-  constexpr hash_table(std::from_range_t, Range &&range, hasher const &hash, key_equal const &equal, allocator_type const &alloc)
-      : hash_table { std::ranges::begin(range), std::ranges::end(range), hash, equal, alloc }
-  {
-  }
-
-  template <std::ranges::input_range Range>
-  requires (!std::derived_from<std::remove_cvref_t<Range>, hash_table>) &&
-               std::constructible_from<value_type, std::ranges::range_reference_t<Range>>
-  constexpr hash_table(std::from_range_t, Range &&range)
-      : hash_table { std::ranges::begin(range), std::ranges::end(range), hasher {}, key_equal {}, allocator_type {} }
-  {
-  }
-
-  template <std::ranges::input_range Range>
-  requires (!std::derived_from<std::remove_cvref_t<Range>, hash_table>) &&
-               std::constructible_from<value_type, std::ranges::range_reference_t<Range>>
-  constexpr hash_table(std::from_range_t, Range &&range, hasher const &hash)
-      : hash_table { std::ranges::begin(range), std::ranges::end(range), hash, key_equal {}, allocator_type {} }
-  {
-  }
-
-  template <std::ranges::input_range Range>
-  requires (!std::derived_from<std::remove_cvref_t<Range>, hash_table>) &&
-               std::constructible_from<value_type, std::ranges::range_reference_t<Range>>
-  constexpr hash_table(std::from_range_t, Range &&range, hasher const &hash, key_equal const &equal)
-      : hash_table { std::ranges::begin(range), std::ranges::end(range), hash, equal, allocator_type {} }
-  {
-  }
-
-  template <std::ranges::input_range Range>
-  requires (!std::derived_from<std::remove_cvref_t<Range>, hash_table>) &&
-               std::constructible_from<value_type, std::ranges::range_reference_t<Range>>
-  constexpr hash_table(std::from_range_t, Range &&range, allocator_type const &alloc)
-      : hash_table { std::ranges::begin(range), std::ranges::end(range), hasher {}, key_equal {}, alloc }
-  {
-  }
-
-  template <std::ranges::input_range Range>
-  requires (!std::derived_from<std::remove_cvref_t<Range>, hash_table>) &&
-               std::constructible_from<value_type, std::ranges::range_reference_t<Range>>
-  constexpr hash_table(std::from_range_t, Range &&range, hasher const &hash, allocator_type const &alloc)
-      : hash_table { std::ranges::begin(range), std::ranges::end(range), hash, key_equal {}, alloc }
-  {
-  }
-#endif // __cpp_lib_containers_ranges
-
-  // ---------- copy / move ----------
-  constexpr hash_table(hash_table const &other)
+public:
+  constexpr hash_table(hash_table const& other)
       : ptr_hash_storage_ { other.ptr_hash_storage_ }
       , key_eq_ { other.key_eq_ }
   {
     if constexpr (storage_policy == ptr_hash_storage_policy::heap) {
       size_type const count = other.size();
-      if (count == 0) return;
-      allocator_type const alloc = ptr_hash_storage_.get_allocator();
-      rebind_alloc_t<value_type> value_alloc { alloc };
-      rebind_alloc_t<fingerprint_type> fingerprint_alloc { alloc };
-
-      storage_ = value_storage::allocate(count, value_alloc);
-      buffer_release_guard<value_storage, rebind_alloc_t<value_type>> value_guard { storage_, 0, count, value_alloc };
-      stdex::uninitialized_copy(other.storage_.data(), other.storage_.data() + count, storage_.data(), storage_.data() + count, value_alloc);
-      value_guard.set_constructed(count);
-
-      fingerprints_ = fingerprint_storage::allocate(count, fingerprint_alloc);
-      buffer_release_guard<fingerprint_storage, rebind_alloc_t<fingerprint_type>> fingerprint_guard { fingerprints_, 0, count, fingerprint_alloc };
-      std::copy_n(other.fingerprints_.data(), count, fingerprints_.data());
-
-      value_guard.dismiss();
-      fingerprint_guard.dismiss();
+      if (count == 0) [[unlikely]] return;
+      allocator_type value_alloc { ptr_hash_storage_.get_allocator() };
+      value_storage_ = value_storage_type { std::allocator_traits<allocator_type>::allocate(value_alloc, count) };
+      value_build_guard guard { value_storage_, nullptr, count, &value_alloc };
+      (void) ::stdex::uninitialized_copy_n(other.value_storage_.data(), static_cast<difference_type>(count),
+                                           value_storage_.data(), value_storage_.data() + count, value_alloc);
+      guard.dismiss();
     } else {
-      storage_      = other.storage_;
-      fingerprints_ = other.fingerprints_;
+      value_storage_ = other.value_storage_;
     }
   }
 
@@ -463,19 +227,16 @@ public:
       , key_eq_ { std::move(other.key_eq_) }
   {
     if constexpr (storage_policy == ptr_hash_storage_policy::heap) {
-      storage_ = other.storage_;
-      other.storage_.reset();
-      fingerprints_ = other.fingerprints_;
-      other.fingerprints_.reset();
+      value_storage_ = other.value_storage_;
+      other.value_storage_.reset();
     } else {
-      storage_      = std::move(other.storage_);
-      fingerprints_ = std::move(other.fingerprints_);
+      value_storage_ = std::move(other.value_storage_);
     }
   }
 
   constexpr hash_table &operator= (hash_table const &other)
   {
-    if (this == std::addressof(other)) return *this;
+    if (this == std::addressof(other)) [[unlikely]]  return *this;
     hash_table temporary { other };
     *this = std::move(temporary);
     return *this;
@@ -483,17 +244,232 @@ public:
 
   constexpr hash_table &operator= (hash_table &&other) noexcept
   {
-    if (this == std::addressof(other)) return *this;
+    if (this == std::addressof(other)) [[unlikely]]  return *this;
     // Destroy and rebuild in place through the move constructor so a stateful
-    // allocator is adopted (a move-assignment of the underlying vector would
-    // otherwise keep this object's old allocator and mis-own the stolen buffers).
+    // allocator is adopted (a plain member move would keep this object's old
+    // allocator and mis-own the stolen buffers).
     this->~hash_table();
     std::construct_at(this, std::move(other));
     return *this;
   }
 
-  constexpr ~hash_table() { dispose_(); }
+private:
+  /// Builds the index from the value range by projecting each value onto its key,
+  /// so the hasher only ever sees @c key_type (never @c value_type).
+  template <class Iterator, class Sentinel>
+  [[nodiscard]] static constexpr ptr_hash_storage_type make_ptr_hash_storage_(
+      Iterator first, Sentinel last, hasher const &hash, allocator_type const &alloc)
+  {
+    auto keys = std::views::transform(
+      std::ranges::subrange { std::move(first), std::move(last) },
+      [] (value_type const &value) -> key_type const & { return Traits::key_of(value); });
 
+    if constexpr (storage_policy == ptr_hash_storage_policy::heap) {
+      return ptr_hash_storage_type { std::ranges::begin(keys), std::ranges::end(keys), hash, alloc };
+    } else {
+      (void) alloc;
+      return ptr_hash_storage_type { std::ranges::begin(keys), std::ranges::end(keys), hash };
+    }
+  }
+
+  [[nodiscard]] constexpr build_marker_type make_marker_(size_type const count, allocator_type const &alloc) const
+  {
+    if constexpr (storage_policy == ptr_hash_storage_policy::heap) {
+      build_marker_type marker { count, typename std::allocator_traits<allocator_type>::template rebind_alloc<std::uint8_t> { alloc } };
+      std::fill_n(marker.data(), count, std::uint8_t { 0 });
+      return marker;
+    } else {
+      (void) alloc;
+      return build_marker_type(count, std::uint8_t { 0 });
+    }
+  }
+
+  template <std::forward_iterator Iterator, std::sentinel_for<Iterator> Sentinel>
+  constexpr value_storage_type construct_values_(Iterator first, Sentinel last)
+  {
+    size_type const count = ptr_hash_storage_.size();
+
+    if constexpr (storage_policy == ptr_hash_storage_policy::heap) {
+      if (count == 0) [[unlikely]] return {};
+
+      allocator_type value_alloc { ptr_hash_storage_.get_allocator() };
+      build_marker_type marker = make_marker_(count, value_alloc);
+      value_storage_type storage { std::allocator_traits<allocator_type>::allocate(value_alloc, count) };
+      value_build_guard guard { storage, &marker, count, &value_alloc };
+      // Single pass: hash each key once and construct the value directly at its
+      // final minimal-perfect index. No permutation pass and no move churn.
+      for (Iterator it = first; it != last; ++it) {
+        size_type const index = ptr_hash_storage_.index_unchecked(Traits::key_of(*it));
+        assert(index < count);
+        std::allocator_traits<allocator_type>::construct(value_alloc, storage.data() + index, *it);
+        marker[index] = 1;
+      }
+      guard.dismiss();
+      return storage;
+    } else {
+      if (count == 0) [[unlikely]]  return {};
+
+      value_storage_type storage {};
+      build_marker_type marker = make_marker_(count, allocator_type {});
+      value_build_guard guard { storage, &marker, count };
+      // Single pass: construct each value directly at its final minimal-perfect
+      // index, then publish the element count.
+      for (Iterator it = first; it != last; ++it) {
+        size_type const index = ptr_hash_storage_.index_unchecked(Traits::key_of(*it));
+        assert(index < count);
+        storage.emplace_at(index, *it);
+        marker[index] = 1;
+      }
+      storage.set_size(count);
+      guard.dismiss();
+      return storage;
+    }
+  }
+
+public:
+  // ---------- iterator-range constructors ----------
+  template <std::forward_iterator Iterator, std::sentinel_for<Iterator> Sentinel>
+  requires std::constructible_from<value_type, std::iter_reference_t<Iterator>> &&
+               (storage_policy == ptr_hash_storage_policy::heap)
+  constexpr hash_table(Iterator first, Sentinel last, hasher const &hasher_arg, key_equal const &eq, allocator_type const &alloc)
+      : ptr_hash_storage_ { make_ptr_hash_storage_(first, last, hasher_arg, alloc) }
+      , value_storage_ { construct_values_(std::move(first), std::move(last)) }
+      , key_eq_ { eq }
+  {
+  }
+
+  template <std::forward_iterator Iterator, std::sentinel_for<Iterator> Sentinel>
+  requires std::constructible_from<value_type, std::iter_reference_t<Iterator>> &&
+           (storage_policy == ptr_hash_storage_policy::heap)
+  constexpr hash_table(Iterator first, Sentinel last, hasher const &hasher_arg, allocator_type const &alloc)
+      : hash_table { std::move(first), std::move(last), hasher_arg, key_equal {}, alloc }
+  {
+  }
+
+  template <std::forward_iterator Iterator, std::sentinel_for<Iterator> Sentinel>
+  requires std::constructible_from<value_type, std::iter_reference_t<Iterator>> &&
+           (storage_policy == ptr_hash_storage_policy::heap)
+  constexpr hash_table(Iterator first, Sentinel last, allocator_type const &alloc)
+      : hash_table { std::move(first), std::move(last), hasher {}, key_equal {}, alloc }
+  {
+  }
+
+  template <std::forward_iterator Iterator, std::sentinel_for<Iterator> Sentinel>
+  requires std::constructible_from<value_type, std::iter_reference_t<Iterator>>
+  constexpr hash_table(Iterator first, Sentinel last, hasher const &hasher_arg, key_equal const &eq)
+      : ptr_hash_storage_ { make_ptr_hash_storage_(first, last, hasher_arg, allocator_type {}) }
+      , value_storage_ { construct_values_(std::move(first), std::move(last)) }
+      , key_eq_ { eq }
+  {
+  }
+
+  template <std::forward_iterator Iterator, std::sentinel_for<Iterator> Sentinel>
+  requires std::constructible_from<value_type, std::iter_reference_t<Iterator>>
+  constexpr hash_table(Iterator first, Sentinel last, hasher const &hasher_arg)
+      : hash_table { std::move(first), std::move(last), hasher_arg, key_equal {} }
+  {
+  }
+
+  template <std::forward_iterator Iterator, std::sentinel_for<Iterator> Sentinel>
+  requires std::constructible_from<value_type, std::iter_reference_t<Iterator>>
+  constexpr hash_table(Iterator first, Sentinel last)
+      : hash_table { std::move(first), std::move(last), hasher {}, key_equal {} }
+  {
+  }
+
+  // ---------- initializer_list constructors ----------
+  constexpr hash_table(std::initializer_list<value_type> ilist, hasher const &hasher_arg, key_equal const &eq, allocator_type const &alloc)
+  requires (storage_policy == ptr_hash_storage_policy::heap)
+      : hash_table { ilist.begin(), ilist.end(), hasher_arg, eq, alloc }
+  {
+  }
+
+  constexpr hash_table(std::initializer_list<value_type> ilist, hasher const &hasher_arg, allocator_type const &alloc)
+  requires (storage_policy == ptr_hash_storage_policy::heap)
+      : hash_table { ilist.begin(), ilist.end(), hasher_arg, key_equal {}, alloc }
+  {
+  }
+
+  constexpr hash_table(std::initializer_list<value_type> ilist, allocator_type const &alloc)
+  requires (storage_policy == ptr_hash_storage_policy::heap)
+      : hash_table { ilist.begin(), ilist.end(), hasher {}, key_equal {}, alloc }
+  {
+  }
+
+  constexpr hash_table(std::initializer_list<value_type> ilist, hasher const &hasher_arg, key_equal const &eq)
+      : hash_table { ilist.begin(), ilist.end(), hasher_arg, eq }
+  {
+  }
+
+  constexpr hash_table(std::initializer_list<value_type> ilist, hasher const &hasher_arg)
+      : hash_table { ilist.begin(), ilist.end(), hasher_arg, key_equal {} }
+  {
+  }
+
+  constexpr hash_table(std::initializer_list<value_type> ilist)
+      : hash_table { ilist.begin(), ilist.end(), hasher {}, key_equal {} }
+  {
+  }
+
+  // ---------- from_range constructors ----------
+#ifdef __cpp_lib_containers_ranges
+  template <std::ranges::forward_range Range>
+  requires (!std::derived_from<std::remove_cvref_t<Range>, hash_table>) &&
+           std::constructible_from<value_type, std::ranges::range_reference_t<Range>> &&
+           (storage_policy == ptr_hash_storage_policy::heap)
+  constexpr hash_table(std::from_range_t, Range &&range, hasher const &hasher_arg, key_equal const &eq, allocator_type const &alloc)
+      : hash_table { std::ranges::begin(range), std::ranges::end(range), hasher_arg, eq, alloc }
+  {
+  }
+
+  template <std::ranges::forward_range Range>
+  requires (!std::derived_from<std::remove_cvref_t<Range>, hash_table>) &&
+           std::constructible_from<value_type, std::ranges::range_reference_t<Range>> &&
+           (storage_policy == ptr_hash_storage_policy::heap)
+  constexpr hash_table(std::from_range_t, Range &&range, hasher const &hasher_arg, allocator_type const &alloc)
+      : hash_table { std::ranges::begin(range), std::ranges::end(range), hasher_arg, key_equal {}, alloc }
+  {
+  }
+
+  template <std::ranges::forward_range Range>
+  requires (!std::derived_from<std::remove_cvref_t<Range>, hash_table>) &&
+           std::constructible_from<value_type, std::ranges::range_reference_t<Range>> &&
+           (storage_policy == ptr_hash_storage_policy::heap)
+  constexpr hash_table(std::from_range_t, Range &&range, allocator_type const &alloc)
+      : hash_table { std::ranges::begin(range), std::ranges::end(range), hasher {}, key_equal {}, alloc }
+  {
+  }
+
+  template <std::ranges::forward_range Range>
+  requires (!std::derived_from<std::remove_cvref_t<Range>, hash_table>) &&
+           std::constructible_from<value_type, std::ranges::range_reference_t<Range>>
+  constexpr hash_table(std::from_range_t, Range &&range, hasher const &hasher_arg, key_equal const &eq)
+      : hash_table { std::ranges::begin(range), std::ranges::end(range), hasher_arg, eq }
+  {
+  }
+
+  template <std::ranges::forward_range Range>
+  requires (!std::derived_from<std::remove_cvref_t<Range>, hash_table>) &&
+           std::constructible_from<value_type, std::ranges::range_reference_t<Range>>
+  constexpr hash_table(std::from_range_t, Range &&range, hasher const &hasher_arg)
+      : hash_table { std::ranges::begin(range), std::ranges::end(range), hasher_arg, key_equal {} }
+  {
+  }
+
+  template <std::ranges::forward_range Range>
+  requires (!std::derived_from<std::remove_cvref_t<Range>, hash_table>) &&
+           std::constructible_from<value_type, std::ranges::range_reference_t<Range>>
+  constexpr hash_table(std::from_range_t, Range &&range)
+      : hash_table { std::ranges::begin(range), std::ranges::end(range), hasher {}, key_equal {} }
+  {
+  }
+#endif // __cpp_lib_containers_ranges
+
+public:
+  // ---------- observers ----------
+  [[nodiscard]] constexpr size_type bucket_count() const noexcept { return ptr_hash_storage_.bucket_count(); }
+  /// The bucket array is fixed at construction, so the current count is also the maximum.
+  [[nodiscard]] constexpr size_type max_bucket_count() const noexcept { return ptr_hash_storage_.bucket_count(); }
   [[nodiscard]] constexpr bool empty() const noexcept { return size() == 0; }
   [[nodiscard]] constexpr size_type size() const noexcept { return ptr_hash_storage_.size(); }
   [[nodiscard]] constexpr size_type max_size() const noexcept
@@ -501,70 +477,17 @@ public:
     if constexpr (storage_policy == ptr_hash_storage_policy::heap) {
       return (std::numeric_limits<size_type>::max)();
     } else {
-      return value_storage::max_size();
+      return static_cast<size_type>(options_type::storage_traits::max_key_count);
     }
   }
-  [[nodiscard]] constexpr size_type bucket_count() const noexcept { return ptr_hash_storage_.bucket_count(); }
-  /// The bucket array is fixed at construction, so the current count is also the maximum.
-  [[nodiscard]] constexpr size_type max_bucket_count() const noexcept { return ptr_hash_storage_.bucket_count(); }
 
-  [[nodiscard]] constexpr const_iterator begin() const noexcept { return static_cast<const_iterator>(storage_.data()); }
-  [[nodiscard]] constexpr const_iterator end() const noexcept { return static_cast<const_iterator>(storage_.data()) + static_cast<difference_type>(size()); }
   [[nodiscard]] constexpr const_iterator cbegin() const noexcept { return begin(); }
   [[nodiscard]] constexpr const_iterator cend() const noexcept { return end(); }
-
-  [[nodiscard]] constexpr const_iterator find(key_type const &key) const { return find_impl_(key); }
-  template <class K>
-  requires heterogeneous_key<key_type, hasher, key_equal, iterator, const_iterator, K>
-  [[nodiscard]] constexpr const_iterator find(K const &key) const { return find_impl_(key); }
-
-  [[nodiscard]] constexpr bool contains(key_type const &key) const { return contains_impl_(key); }
-  template <class K>
-  requires heterogeneous_key<key_type, hasher, key_equal, iterator, const_iterator, K>
-  [[nodiscard]] constexpr bool contains(K const &key) const { return contains_impl_(key); }
-
-  [[nodiscard]] constexpr size_type count(key_type const &key) const { return contains(key) ? 1U : 0U; }
-  template <class K>
-  requires heterogeneous_key<key_type, hasher, key_equal, iterator, const_iterator, K>
-  [[nodiscard]] constexpr size_type count(K const &key) const { return contains(key) ? 1U : 0U; }
-
-  [[nodiscard]] constexpr std::pair<const_iterator, const_iterator> equal_range(key_type const &key) const
+  [[nodiscard]] constexpr const_iterator begin() const noexcept { return static_cast<const_iterator>(value_storage_.data()); }
+  [[nodiscard]] constexpr const_iterator end() const noexcept
   {
-    const_iterator const it = find(key);
-    if (it == end()) return { end(), end() };
-    return { it, it + 1 };
-  }
-
-  template <class K>
-  requires heterogeneous_key<key_type, hasher, key_equal, iterator, const_iterator, K>
-  [[nodiscard]] constexpr std::pair<const_iterator, const_iterator> equal_range(K const &key) const
-  {
-    const_iterator const it = find(key);
-    if (it == end()) return { end(), end() };
-    return { it, it + 1 };
-  }
-
-  [[nodiscard]] constexpr mapped_type const &at(key_type const &key) const { return at_impl_(key); }
-  template <class K>
-  requires heterogeneous_key<key_type, hasher, key_equal, iterator, const_iterator, K>
-  [[nodiscard]] constexpr mapped_type const &at(K const &key) const { return at_impl_(key); }
-
-  [[nodiscard]] constexpr mapped_type const &at_unchecked(key_type const &key) const
-  {
-    size_type const index = ptr_hash_storage_.index_unchecked(key);
-    assert(index < size());
-    assert(key_eq_(Traits::key_of(storage_[index]), key));
-    return Traits::mapped_of(storage_[index]);
-  }
-
-  template <class K>
-  requires heterogeneous_key<key_type, hasher, key_equal, iterator, const_iterator, K>
-  [[nodiscard]] constexpr mapped_type const &at_unchecked(K const &key) const
-  {
-    size_type const index = ptr_hash_storage_.index_unchecked(key);
-    assert(index < size());
-    assert(key_eq_(Traits::key_of(storage_[index]), key));
-    return Traits::mapped_of(storage_[index]);
+    const_iterator const first = begin();
+    return first == nullptr ? first : first + static_cast<difference_type>(size());
   }
 
   [[nodiscard]] constexpr hasher hash_function() const noexcept { return ptr_hash_storage_.hash_function(); }
@@ -576,105 +499,22 @@ public:
   }
 
 private:
-  constexpr void dispose_() noexcept
-  {
-    if constexpr (storage_policy == ptr_hash_storage_policy::heap) {
-      if (!storage_ && !fingerprints_) return;
-      allocator_type const alloc = ptr_hash_storage_.get_allocator();
-      size_type const count      = size();
-      if (storage_) {
-        rebind_alloc_t<value_type> value_alloc { alloc };
-        storage_.destroy_and_deallocate(count, count, value_alloc);
-      }
-      if (fingerprints_) {
-        rebind_alloc_t<fingerprint_type> fingerprint_alloc { alloc };
-        fingerprints_.destroy_and_deallocate(0, count, fingerprint_alloc);
-      }
-    }
-  }
-
-  template <class Values>
-  [[nodiscard]] static constexpr ptr_hash_storage make_ptr_hash_storage_(Values const &values, hasher const &hash, allocator_type const &alloc)
-  {
-    auto keys = values | std::views::transform([](value_type const &value) -> key_type const & { return Traits::key_of(value); });
-    if constexpr (storage_policy == ptr_hash_storage_policy::heap) {
-      return ptr_hash_storage { std::ranges::begin(keys), std::ranges::end(keys), hash, alloc };
-    } else {
-      (void) alloc;
-      return ptr_hash_storage { std::ranges::begin(keys), std::ranges::end(keys), hash };
-    }
-  }
-
-  [[nodiscard]] static constexpr build_value_storage make_build_container_(allocator_type const &alloc)
-  {
-    if constexpr (storage_policy == ptr_hash_storage_policy::heap) {
-      return build_value_storage { rebind_alloc_t<value_type> { alloc } };
-    } else {
-      (void) alloc;
-      return build_value_storage {};
-    }
-  }
-
-  template <std::ranges::input_range Range>
-  [[nodiscard]] static constexpr build_value_storage make_build_storage_(Range &&values, allocator_type const &alloc)
-  {
-    build_value_storage result = make_build_container_(alloc);
-    if constexpr (std::ranges::sized_range<Range> && storage_policy == ptr_hash_storage_policy::heap) {
-      result.reserve(static_cast<size_type>(std::ranges::size(values)));
-    }
-    for (auto &&value : values) result.emplace_back(std::forward<decltype(value)>(value));
-    return result;
-  }
-
-  [[nodiscard]] constexpr order_storage make_order_storage_(size_type const count, allocator_type const &alloc) const
-  {
-    if constexpr (storage_policy == ptr_hash_storage_policy::heap) {
-      return order_storage(static_cast<std::uint32_t>(count), rebind_alloc_t<order_index_type> { alloc });
-    } else {
-      (void) alloc;
-      return order_storage(static_cast<std::uint32_t>(count));
-    }
-  }
-
-  [[nodiscard]] static constexpr fingerprint_type fingerprint_of_(std::uint64_t const hash) noexcept
-  {
-    return static_cast<fingerprint_type>(hash >> 56U);
-  }
-
   template <class K>
   [[nodiscard]] constexpr const_iterator find_impl_(K const &key) const
   {
-    if (empty()) [[unlikely]]
-      return end();
-
-    std::uint64_t const hash = ptr_hash_storage_.hash_value(key);
-    size_type const index    = ptr_hash_storage_.index_from_hash(hash);
+    size_type const index = ptr_hash_storage_.index(key);
+    if (index == ptr_hash_storage_type::npos) return end();
     assert(index < size());
-    if (fingerprints_[index] != fingerprint_of_(hash))
-      return end();
-
-#if defined(__GNUC__) || defined(__clang__)
-    void const *const address = std::addressof(storage_[index]);
-    __builtin_prefetch(address, 0, 3);
-#elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
-    void const *const address = std::addressof(storage_[index]);
-    _mm_prefetch(static_cast<char const *>(address), _MM_HINT_T0);
-#endif
-
-    return key_eq_(Traits::key_of(storage_[index]), key) ? begin() + static_cast<difference_type>(index)
-                                                         : end();
+    return key_eq_(Traits::key_of(value_storage_[index]), key) ? begin() + static_cast<difference_type>(index) : end();
   }
 
   template <class K>
   [[nodiscard]] constexpr bool contains_impl_(K const &key) const
   {
-    if (empty()) [[unlikely]]
-      return false;
-
-    std::uint64_t const hash = ptr_hash_storage_.hash_value(key);
-    size_type const index    = ptr_hash_storage_.index_from_hash(hash);
+    size_type const index = ptr_hash_storage_.index(key);
+    if (index == ptr_hash_storage_type::npos) return false;
     assert(index < size());
-    return fingerprints_[index] == fingerprint_of_(hash) && key_eq_(Traits::key_of(storage_[index]), key);
+    return key_eq_(Traits::key_of(value_storage_[index]), key);
   }
 
   template <class K>
@@ -683,82 +523,89 @@ private:
     if (empty()) [[unlikely]] {
       throw std::out_of_range("minimal_perfect_hash::at: key not found");
     }
-
-    std::uint64_t const hash = ptr_hash_storage_.hash_value(key);
-    size_type const index    = ptr_hash_storage_.index_from_hash(hash);
-    assert(index < size());
-    if (fingerprints_[index] != fingerprint_of_(hash) || !key_eq_(Traits::key_of(storage_[index]), key)) [[unlikely]] {
+    size_type const index = ptr_hash_storage_.index_unchecked(key);
+    if (index == ptr_hash_storage_type::npos || !key_eq_(Traits::key_of(value_storage_[index]), key)) [[unlikely]] {
       throw std::out_of_range("minimal_perfect_hash::at: key not found");
     }
-    return Traits::mapped_of(storage_[index]);
+    assert(index < size());
+    return Traits::mapped_of(value_storage_[index]);
   }
 
-  /**
-   * @brief Permutes the input order into minimal-perfect-index order and builds
-   *        the fingerprint table in the same pass.
-   *
-   * @details The index is a bijection from the key set onto [0, size()), so every
-   * destination slot is written exactly once; no occupancy check is needed during
-   * the permutation. The key hash computed for each input element is also the
-   * fingerprint source, so hashing and `key_of` are each done only once.
-   *
-   * The cycle variant avoids the second value buffer used by the fallback when
-   * the value is large enough to make that buffer expensive; it requires
-   * assignable values and marks consumed permutation entries with `count`,
-   * which is outside the valid index range. Small values keep the sequential
-   * out-of-place write used by the fallback.
-   */
-  template <class ValueContainer, class FingerprintContainer>
-  constexpr void reorder_storage_and_fingerprints_(
-      ValueContainer &values, FingerprintContainer &fingerprints, size_type const count, allocator_type const &alloc)
+public:
+  // ---------- lookup ----------
+  [[nodiscard]] constexpr mapped_type const &at(key_type const &key) const
   {
-    if (count == 0) return;
-    assert(count <= static_cast<size_type>((std::numeric_limits<order_index_type>::max)()));
-
-    order_storage order = make_order_storage_(count, alloc);
-    for (size_type input_index = 0; input_index < count; ++input_index) {
-      key_type const &key          = Traits::key_of(values[input_index]);
-      std::uint64_t const hash     = ptr_hash_storage_.hash_value(key);
-      size_type const output_index = ptr_hash_storage_.index_from_hash(hash);
-      assert(output_index < count);
-      order[output_index]         = static_cast<order_index_type>(input_index);
-      fingerprints[output_index]  = fingerprint_of_(hash);
-    }
-
-    if constexpr (use_cycle_reorder) {
-      order_index_type const visited = static_cast<order_index_type>(count);
-      for (size_type start = 0; start < count; ++start) {
-        if (order[start] == visited) continue;
-        if (order[start] == static_cast<order_index_type>(start)) {
-          order[start] = visited;
-          continue;
-        }
-
-        value_type pending    = std::move(values[start]);
-        size_type destination = start;
-        size_type source      = static_cast<size_type>(order[start]);
-        while (source != start) {
-          values[destination] = std::move(values[source]);
-          order[destination]  = visited;
-          destination         = source;
-          source              = static_cast<size_type>(order[source]);
-        }
-        values[destination] = std::move(pending);
-        order[destination]  = visited;
-      }
-    } else {
-      build_value_storage ordered = make_build_container_(alloc);
-      ordered.reserve(count);
-      for (order_index_type input_index : order) {
-        ordered.emplace_back(std::move(values[input_index]));
-      }
-      values.swap(ordered);
-    }
+    return at_impl_(key);
   }
 
-  ptr_hash_storage ptr_hash_storage_;
-  value_storage storage_;
-  fingerprint_storage fingerprints_;
+  template <class K>
+  requires heterogeneous_key<key_type, hasher, key_equal, iterator, const_iterator, K>
+  [[nodiscard]] constexpr mapped_type const &at(K const &key) const
+  {
+    return at_impl_(key);
+  }
+
+  [[nodiscard]] constexpr mapped_type const &at_unchecked(key_type const &key) const
+  {
+    size_type const index = ptr_hash_storage_.index_unchecked(key);
+    assert(index < size());
+    assert(key_eq_(Traits::key_of(value_storage_[index]), key));
+    return Traits::mapped_of(value_storage_[index]);
+  }
+
+  template <class K>
+  requires heterogeneous_key<key_type, hasher, key_equal, iterator, const_iterator, K>
+  [[nodiscard]] constexpr mapped_type const &at_unchecked(K const &key) const
+  {
+    size_type const index = ptr_hash_storage_.index_unchecked(key);
+    assert(index < size());
+    assert(key_eq_(Traits::key_of(value_storage_[index]), key));
+    return Traits::mapped_of(value_storage_[index]);
+  }
+
+  [[nodiscard]] constexpr const_iterator find(key_type const &key) const { return find_impl_(key); }
+  [[nodiscard]] constexpr bool contains(key_type const &key) const { return contains_impl_(key); }
+  [[nodiscard]] constexpr size_type count(key_type const &key) const { return contains(key) ? 1U : 0U; }
+  [[nodiscard]] constexpr std::pair<const_iterator, const_iterator> equal_range(key_type const &key) const
+  {
+    const_iterator const it = find(key);
+    if (it == end()) return { end(), end() };
+    return { it, it + 1 };
+  }
+
+  template <class K>
+  requires heterogeneous_key<key_type, hasher, key_equal, iterator, const_iterator, K>
+  [[nodiscard]] constexpr const_iterator find(K const &key) const
+  {
+    return find_impl_(key);
+  }
+
+  template <class K>
+  requires heterogeneous_key<key_type, hasher, key_equal, iterator, const_iterator, K>
+  [[nodiscard]] constexpr bool contains(K const &key) const
+  {
+    return contains_impl_(key);
+  }
+
+  template <class K>
+  requires heterogeneous_key<key_type, hasher, key_equal, iterator, const_iterator, K>
+  [[nodiscard]] constexpr size_type count(K const &key) const
+  {
+    return contains(key) ? 1U : 0U;
+  }
+
+  template <class K>
+  requires heterogeneous_key<key_type, hasher, key_equal, iterator, const_iterator, K>
+  [[nodiscard]] constexpr std::pair<const_iterator, const_iterator> equal_range(K const &key) const
+  {
+    const_iterator const it = find(key);
+    if (it == end()) return { end(), end() };
+    return { it, it + 1 };
+  }
+
+private:
+  ptr_hash_storage_type ptr_hash_storage_;
+  value_storage_type value_storage_; // heap: pointer handle; stack: inline raw buffer
   [[no_unique_address]] key_equal key_eq_ {};
 };
 } // namespace stdex::minimal_perfect_hash_detail
