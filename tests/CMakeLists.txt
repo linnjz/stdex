@@ -65,6 +65,7 @@ stdex_add_test(test_hash test_hash.cpp)
 stdex_add_test(test_ptrhash test_ptrhash.cpp)
 stdex_add_test(test_minimal_perfect_hash test_minimal_perfect_hash.cpp)
 stdex_add_test(test_inplace_vector test_inplace_vector.cpp)
+stdex_add_test(test_inplace_array test_inplace_array.cpp)
 stdex_add_test(test_inlined_vector test_inlined_vector.cpp)
 
 stdex_add_test(test_bit test_bit.cpp)

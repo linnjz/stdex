@@ -101,7 +101,7 @@ struct trivial_category
 
   static constexpr bool bitcopy_constructible = std::conjunction_v<
       std::bool_constant<same_size_and_compatible>,
-      std::is_trivially_constructible<Dest, SourceRef>>;
+      std::is_trivially_constructible<Dest, SourceRef>>; // UB is ok, not set is_trivially_destructible
 
   static constexpr bool bitcopy_assignable = same_size_and_compatible &&
     is_trivially_assignable_returning_same_reference<DestRef, SourceRef>;
@@ -111,7 +111,7 @@ template <class Source, class Dest, class SourceRef, class DestRef>
 struct trivial_category<Source *, Dest *, SourceRef, DestRef>
 {
   static constexpr bool bitcopy_constructible = is_pointer_address_convertible<Source, Dest> &&
-    std::is_trivially_constructible_v<Dest *, SourceRef>;
+    std::is_trivially_constructible_v<Dest *, SourceRef>; // UB is ok, not set is_trivially_destructible_v
 
   static constexpr bool bitcopy_assignable = is_pointer_address_convertible<Source, Dest> &&
     is_trivially_assignable_returning_same_reference<DestRef, SourceRef>;
