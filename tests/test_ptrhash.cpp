@@ -32,6 +32,12 @@
 #include <vector>
 #include <version>
 
+#if defined(__has_include)
+#  if __has_include(<meta>)
+#    include <meta>
+#  endif
+#endif
+
 #include "ptrhash.hpp"
 
 namespace
@@ -136,7 +142,7 @@ constexpr bool fixed_constexpr_check()
   stdex::ptr_hash<std::uint64_t, stdex::hash<std::uint64_t>, stdex::ptr_hash_stack_options<8>::profile_default()> table(keys.begin(), keys.end());
   if (table.size() != keys.size()) return false;
   for (std::uint64_t key : keys) {
-    if (table.index(key) >= table.capacity()) return false;
+    if (table.index(key) >= table.slot_count()) return false;
   }
   return true;
 }
@@ -265,7 +271,7 @@ void test_basic_construction()
     stdex::ptr_hash<std::uint64_t> empty;
     CHECK(empty.empty());
     CHECK(empty.size() == 0);
-    CHECK(empty.capacity() == 0);
+    CHECK(empty.slot_count() == 0);
     CHECK(empty.index(12345) == stdex::ptr_hash<std::uint64_t>::npos);
   }
 
@@ -279,14 +285,14 @@ void test_basic_construction()
     fast fast_table;
     CHECK(fast_table.try_build(keys));
     CHECK(fast_table.size() == count);
-    CHECK(fast_table.capacity() >= count);
-    CHECK(check_indices(fast_table, keys, fast_table.capacity()));
-    if (count != 0) CHECK(check_absent_keys(fast_table, 8, fast_table.capacity(), count * 104729u + 3u));
+    CHECK(fast_table.slot_count() >= count);
+    CHECK(check_indices(fast_table, keys, fast_table.slot_count()));
+    if (count != 0) CHECK(check_absent_keys(fast_table, 8, fast_table.slot_count(), count * 104729u + 3u));
 
     balanced balanced_table;
     CHECK(balanced_table.try_build(keys));
     CHECK(balanced_table.size() == count);
-    CHECK(balanced_table.capacity() >= count);
+    CHECK(balanced_table.slot_count() >= count);
     CHECK(check_indices(balanced_table, keys, balanced_table.size()));
     if (count != 0) CHECK(check_absent_keys(balanced_table, 8, balanced_table.size(), count * 104729u + 5u));
 
@@ -310,7 +316,7 @@ void test_basic_construction()
     std::size_t const first_seed = table.hash_seed();
     CHECK(table.try_build(keys));
     CHECK(table.size() == keys.size());
-    CHECK(check_indices(table, keys, table.capacity()));
+    CHECK(check_indices(table, keys, table.slot_count()));
     CHECK(first_seed != 0);
   }
 }
@@ -566,7 +572,7 @@ void test_stress()
 
     stdex::ptr_hash<std::uint64_t, identity_hasher> table;
     CHECK(table.try_build(keys));
-    CHECK(check_indices(table, keys, table.capacity()));
+    CHECK(check_indices(table, keys, table.slot_count()));
 
     using balanced_identity = stdex::ptr_hash<std::uint64_t, identity_hasher, stdex::ptr_hash_heap_options<std::allocator<std::uint64_t>>::profile_balanced()>;
     balanced_identity minimal;
@@ -578,7 +584,7 @@ void test_stress()
     std::vector<std::uint64_t> const keys = make_random_keys(50'000, 20261107);
     stdex::ptr_hash<std::uint64_t> table(keys.begin(), keys.end());
     CHECK(table.size() == keys.size());
-    CHECK(check_indices(table, keys, table.capacity()));
+    CHECK(check_indices(table, keys, table.slot_count()));
 
     stdex::ptr_hash<std::uint64_t, stdex::hash<std::uint64_t>, stdex::ptr_hash_heap_options<std::allocator<std::uint64_t>>::profile_balanced()> minimal(keys.begin(), keys.end());
     CHECK(minimal.size() == keys.size());
@@ -595,7 +601,7 @@ void test_stress()
 
       stdex::ptr_hash<std::uint64_t> fast_table;
       CHECK(fast_table.try_build(keys));
-      CHECK(check_indices(fast_table, keys, fast_table.capacity()));
+      CHECK(check_indices(fast_table, keys, fast_table.slot_count()));
 
       stdex::ptr_hash<std::uint64_t, stdex::hash<std::uint64_t>, stdex::ptr_hash_heap_options<std::allocator<std::uint64_t>>::profile_compact()> compact_table;
       CHECK(compact_table.try_build(keys));
@@ -608,7 +614,7 @@ void test_stress()
     for (std::size_t i = 0; i < keys.size(); ++i) keys[i] = (i % 97U) * 7919U + i;
     stdex::ptr_hash<std::uint64_t> fast_table;
     CHECK(fast_table.try_build(keys));
-    CHECK(check_indices(fast_table, keys, fast_table.capacity()));
+    CHECK(check_indices(fast_table, keys, fast_table.slot_count()));
   }
 }
 
@@ -625,9 +631,9 @@ void test_fixed_capacity()
     fixed_fast fast_table;
     CHECK(fast_table.try_build(keys));
     CHECK(fast_table.size() == count);
-    CHECK(fast_table.capacity() >= count);
-    CHECK(check_indices(fast_table, keys, fast_table.capacity()));
-    if (count != 0) CHECK(check_absent_keys(fast_table, 8, fast_table.capacity(), count * 104729u + 3u));
+    CHECK(fast_table.slot_count() >= count);
+    CHECK(check_indices(fast_table, keys, fast_table.slot_count()));
+    if (count != 0) CHECK(check_absent_keys(fast_table, 8, fast_table.slot_count(), count * 104729u + 3u));
 
     fixed_balanced balanced_table;
     CHECK(balanced_table.try_build(keys));
@@ -648,7 +654,7 @@ void test_fixed_capacity()
     for (std::size_t i = 0; i < keys.size(); ++i) keys[i] = i;
     stdex::ptr_hash<std::uint64_t, identity_hasher, stdex::ptr_hash_stack_options<512>::profile_default()> table;
     CHECK(table.try_build(keys));
-    CHECK(check_indices(table, keys, table.capacity()));
+    CHECK(check_indices(table, keys, table.slot_count()));
   }
 
   {
@@ -662,7 +668,7 @@ void test_fixed_capacity()
     std::vector<std::uint64_t> const keys = make_random_keys(16, 17);
     stdex::ptr_hash<std::uint64_t, stdex::hash<std::uint64_t>, stdex::ptr_hash_stack_options<16>::profile_default()> table;
     CHECK(table.try_build(keys));
-    CHECK(check_indices(table, keys, table.capacity()));
+    CHECK(check_indices(table, keys, table.slot_count()));
   }
 
   {
@@ -688,7 +694,7 @@ void test_fixed_capacity()
     }
     CHECK(threw);
     CHECK(table.empty());
-    CHECK(table.capacity() == 0);
+    CHECK(table.slot_count() == 0);
   }
 
   {
@@ -696,7 +702,7 @@ void test_fixed_capacity()
     stdex::ptr_hash<std::uint64_t, constant_hasher, stdex::ptr_hash_stack_options<8>::profile_default()> table;
     CHECK(!table.try_build(keys));
     CHECK(table.empty());
-    CHECK(table.capacity() == 0);
+    CHECK(table.slot_count() == 0);
   }
 }
 
@@ -710,7 +716,7 @@ void test_regressions()
     CHECK(!table.try_build(keys));
     CHECK(table.empty());
     CHECK(table.size() == 0);
-    CHECK(table.capacity() == 0);
+    CHECK(table.slot_count() == 0);
     CHECK(table.bucket_count() == 0);
     CHECK(table.index(1) == stdex::ptr_hash<std::uint64_t>::npos);
   }
@@ -723,7 +729,7 @@ void test_regressions()
     CHECK(table.try_build(empty));
     CHECK(table.empty());
     CHECK(table.size() == 0);
-    CHECK(table.capacity() == 0);
+    CHECK(table.slot_count() == 0);
     CHECK(table.bucket_count() == 0);
   }
 
@@ -731,14 +737,14 @@ void test_regressions()
     std::vector<std::uint64_t> keys { 1, 2, 3 };
     stdex::ptr_hash<std::uint64_t, stdex::hash<std::uint64_t>, options_zero_evictions<std::allocator<std::uint64_t>>()> table;
     CHECK(table.try_build(keys));
-    CHECK(check_indices(table, keys, table.capacity()));
+    CHECK(check_indices(table, keys, table.slot_count()));
   }
 
   {
     std::vector<std::uint64_t> const keys = make_random_keys(99, 17);
     stdex::ptr_hash<std::uint64_t> table;
     CHECK(table.try_build(keys));
-    CHECK(table.capacity() == 100);
+    CHECK(table.slot_count() == 100);
   }
 
   {
@@ -752,8 +758,62 @@ void test_regressions()
     }
     CHECK(threw);
     CHECK(table.empty());
-    CHECK(table.capacity() == 0);
+    CHECK(table.slot_count() == 0);
   }
+}
+// ---------------------------------------------------------------
+// Reflection freeze() (C++26 P3491 std::define_static_array).
+//
+// Compiled only when the standard library actually exposes
+// __cpp_lib_define_static. This keeps the test dormant on pre-C++26 toolchains
+// while making it active automatically once a local compiler supports C++26
+// reflection (-freflection), without touching the build files.
+// ---------------------------------------------------------------
+#if defined(__cpp_lib_define_static)
+consteval std::uint64_t reflection_freeze_key(std::size_t i)
+{
+  return static_cast<std::uint64_t>(i) * 0x9E'37'79'B9'7F'4A'7C'15ULL + 0xD1'B5'4A'32'D1'92'ED'03ULL;
+}
+
+// Build a table in constant evaluation, bake its index blob into static storage,
+// and confirm the frozen, ownership-free view reproduces the source table.
+consteval bool ptrhash_freeze_reproduces_owner()
+{
+  std::array<std::uint64_t, 24> keys {};
+  for (std::size_t i = 0; i < keys.size(); ++i) keys[i] = reflection_freeze_key(i);
+
+  stdex::ptr_hash<std::uint64_t> table(keys.begin(), keys.end());
+  auto const view = stdex::ptr_hash<std::uint64_t>::freeze(table);
+
+  bool ok = view.size() == table.size() && view.slot_count() == table.slot_count() &&
+            view.bucket_count() == table.bucket_count() && view.hash_seed() == table.hash_seed();
+
+  std::array<std::uint32_t, 24> idx {};
+  for (std::size_t i = 0; i < keys.size(); ++i) {
+    std::size_t const vi = view.index(keys[i]);
+    if (vi != table.index(keys[i]) || vi >= view.slot_count()) ok = false;
+    if (view.index_from_hash(view.hash_value(keys[i])) != vi) ok = false;
+    idx[i] = static_cast<std::uint32_t>(vi);
+  }
+  // A perfect / minimal-perfect build maps distinct keys to distinct slots.
+  for (std::size_t i = 0; i < keys.size(); ++i)
+    for (std::size_t j = i + 1; j < keys.size(); ++j)
+      if (idx[i] == idx[j]) ok = false;
+  return ok;
+}
+#endif
+
+void test_reflection_freeze()
+{
+  std::printf("\n=== ptr_hash: reflection freeze ===\n");
+#if defined(__cpp_lib_define_static)
+  constexpr bool ok = ptrhash_freeze_reproduces_owner();
+  static_assert(ok);
+  CHECK(ok);
+#else
+  std::printf("  (skipped: __cpp_lib_define_static / <meta> reflection not available)\n");
+  CHECK(true);
+#endif
 }
 } // namespace
 
@@ -768,6 +828,7 @@ int main()
   test_fixed_capacity();
   test_stress();
   test_regressions();
+  test_reflection_freeze();
 
   std::printf("\n===============================\n");
   std::printf("PASS: %d   FAIL: %d\n", g_pass, g_fail);

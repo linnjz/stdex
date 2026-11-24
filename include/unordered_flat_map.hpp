@@ -15,11 +15,12 @@
  */
 
 #pragma once
-#if __cplusplus >= 202603L
-#include <optional>  // std::optional
-#endif
 #include <stdexcept> // std::out_of_range
-#include <version>   // __cpp_lib_containers_ranges
+#include <version>   // __cpp_lib_containers_ranges, __cpp_lib_optional
+
+#if defined(__cpp_lib_optional) && __cpp_lib_optional >= 202506L
+#  include <optional>
+#endif
 
 #include "unordered_flat_detail/ufmap_traits.hpp"
 #include "unordered_flat_detail/hash_table.hpp"
@@ -48,7 +49,8 @@ public:
   using typename base::hasher;
   using typename base::key_equal;
   using typename base::allocator_type;
-
+  
+  using typename base::const_view;
 
   using mapped_type = typename traits::mapped_type;
   using typename base::key_type;
@@ -427,7 +429,7 @@ public:
     return it->second;
   }
 
-#if __cplusplus >= 202603L
+#if defined(__cpp_lib_optional) && __cpp_lib_optional >= 202506L
   // ---------- lookup ----------
   [[nodiscard]] constexpr std::optional<mapped_type &> lookup(key_type const &key_val)
   {

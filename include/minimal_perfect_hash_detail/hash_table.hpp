@@ -24,13 +24,21 @@
 #include <initializer_list> // std::initializer_list
 #include <iterator>         // std::forward_iterator, std::sentinel_for, std::iter_reference_t
 #include <limits>           // std::numeric_limits
-#include <memory>           // std::allocator_traits, std::addressof, std::construct_at, std::destroy_at
+#include <memory>           // std::allocator_traits, std::addressof, std::construct_at, std::destroy_at      
 #include <ranges>           // std::ranges::forward_range, std::ranges::subrange, std::views::transform
 #include <stdexcept>        // std::out_of_range
 #include <tuple>            // std::tuple_element_t
 #include <type_traits>      // std::remove_cvref_t, std::conditional_t, std::derived_from
 #include <utility>          // std::move, std::exchange, std::pair
-#include <version>          // __cpp_lib_containers_ranges
+#include <version>          // __cpp_lib_containers_ranges, __cpp_lib_define_static, __cpp_lib_optional
+
+#if defined(__cpp_lib_define_static)
+#  include <meta> // std::define_static_array
+#endif
+
+#if defined(__cpp_lib_optional) && __cpp_lib_optional >= 202506L
+#  include <optional>
+#endif
 
 #include "../inplace_vector.hpp"
 #include "../ptrhash.hpp"
@@ -602,6 +610,201 @@ public:
     if (it == end()) return { end(), end() };
     return { it, it + 1 };
   }
+
+public:
+  /// Non-owning read-only descriptor over a frozen minimal-perfect table
+  class const_view
+  {
+  public:
+    using key_type        = typename hash_table::key_type;
+    using mapped_type     = typename hash_table::mapped_type;
+    using value_type      = typename hash_table::value_type;
+    using size_type       = typename hash_table::size_type;
+    using difference_type = typename hash_table::difference_type;
+    using hasher          = typename hash_table::hasher;
+    using key_equal       = typename hash_table::key_equal;
+    using reference       = typename hash_table::const_reference;
+    using const_reference = typename hash_table::const_reference;
+    using pointer         = typename hash_table::const_pointer;
+    using const_pointer   = typename hash_table::const_pointer;
+    using iterator        = typename hash_table::const_iterator;
+    using const_iterator  = typename hash_table::const_iterator;
+
+    const_view() = delete;
+
+    // observers
+    [[nodiscard]] constexpr size_type bucket_count() const noexcept { return index_.bucket_count(); }
+    [[nodiscard]] constexpr size_type max_bucket_count() const noexcept { return index_.bucket_count(); }
+    [[nodiscard]] constexpr bool empty() const noexcept { return size_ == 0; }
+    [[nodiscard]] constexpr size_type size() const noexcept { return size_; }
+    [[nodiscard]] constexpr hasher hash_function() const noexcept { return index_.hash_function(); }
+    [[nodiscard]] constexpr key_equal key_eq() const noexcept { return key_eq_; }
+
+    // iteration (packed, in index order)
+    [[nodiscard]] constexpr const_iterator begin() const noexcept { return values_; }
+    [[nodiscard]] constexpr const_iterator end() const noexcept
+    {
+      return values_ == nullptr ? values_ : values_ + static_cast<difference_type>(size_);
+    }
+    [[nodiscard]] constexpr const_iterator cbegin() const noexcept { return begin(); }
+    [[nodiscard]] constexpr const_iterator cend() const noexcept { return end(); }
+
+    // lookup
+    [[nodiscard]] constexpr const_iterator find(key_type const &key) const { return find_impl_(key); }
+    [[nodiscard]] constexpr bool contains(key_type const &key) const { return contains_impl_(key); }
+    [[nodiscard]] constexpr size_type count(key_type const &key) const { return contains(key) ? 1U : 0U; }
+    [[nodiscard]] constexpr std::pair<const_iterator, const_iterator> equal_range(key_type const &key) const
+    {
+      const_iterator const it = find(key);
+      if (it == end()) return { end(), end() };
+      return { it, it + 1 };
+    }
+
+    [[nodiscard]] constexpr mapped_type const &at(key_type const &key) const { return at_impl_(key); }
+    [[nodiscard]] constexpr mapped_type const &at_unchecked(key_type const &key) const { return at_unchecked_impl_(key); }
+
+    template <class K>
+    requires heterogeneous_key<key_type, hasher, key_equal, iterator, const_iterator, K>
+    [[nodiscard]] constexpr const_iterator find(K const &key) const
+    {
+      return find_impl_(key);
+    }
+
+    template <class K>
+    requires heterogeneous_key<key_type, hasher, key_equal, iterator, const_iterator, K>
+    [[nodiscard]] constexpr bool contains(K const &key) const
+    {
+      return contains_impl_(key);
+    }
+
+    template <class K>
+    requires heterogeneous_key<key_type, hasher, key_equal, iterator, const_iterator, K>
+    [[nodiscard]] constexpr size_type count(K const &key) const
+    {
+      return contains(key) ? 1U : 0U;
+    }
+
+    template <class K>
+    requires heterogeneous_key<key_type, hasher, key_equal, iterator, const_iterator, K>
+    [[nodiscard]] constexpr std::pair<const_iterator, const_iterator> equal_range(K const &key) const
+    {
+      const_iterator const it = find(key);
+      if (it == end()) return { end(), end() };
+      return { it, it + 1 };
+    }
+
+    template <class K>
+    requires heterogeneous_key<key_type, hasher, key_equal, iterator, const_iterator, K>
+    [[nodiscard]] constexpr mapped_type const &at(K const &key) const
+    {
+      return at_impl_(key);
+    }
+
+    template <class K>
+    requires heterogeneous_key<key_type, hasher, key_equal, iterator, const_iterator, K>
+    [[nodiscard]] constexpr mapped_type const &at_unchecked(K const &key) const
+    {
+      return at_unchecked_impl_(key);
+    }
+
+#if defined(__cpp_lib_optional) && __cpp_lib_optional >= 202506L
+    // lookup (map only; a set's mapped_type is its key, and the minimal_perfect_hash_set exposes no lookup)
+    template <class Tr = Traits>
+    requires (!std::is_same_v<Tr, mphset_traits<key_type>>)
+    [[nodiscard]] constexpr std::optional<typename Tr::mapped_type const &> lookup(key_type const &key) const
+    {
+      const_iterator const it = find_impl_(key);
+      if (it == end()) [[unlikely]] return std::nullopt;
+      return Traits::mapped_of(*it);
+    }
+
+    template <class K, class Tr = Traits>
+    requires heterogeneous_key<key_type, hasher, key_equal, iterator, const_iterator, K> &&
+             (!std::is_same_v<Tr, mphset_traits<key_type>>)
+    [[nodiscard]] constexpr std::optional<typename Tr::mapped_type const &> lookup(K const &key) const
+    {
+      const_iterator const it = find_impl_(key);
+      if (it == end()) [[unlikely]] return std::nullopt;
+      return Traits::mapped_of(*it);
+    }
+#endif
+
+  private:
+    friend class hash_table;
+
+    constexpr const_view(typename ptr_hash_storage_type::const_view index, value_type const *values, size_type size, key_equal eq) noexcept(std::is_nothrow_copy_constructible_v<typename ptr_hash_storage_type::const_view> && std::is_nothrow_copy_constructible_v<key_equal>)
+        : index_ { index }
+        , values_ { values }
+        , size_ { size }
+        , key_eq_ { eq }
+    {
+    }
+
+    template <class K>
+    [[nodiscard]] constexpr const_iterator find_impl_(K const &key) const
+    {
+      size_type const index = index_.index(key);
+      if (index == ptr_hash_storage_type::npos) return end();
+      assert(index < size_);
+      return key_eq_(Traits::key_of(values_[index]), key) ? begin() + static_cast<difference_type>(index) : end();
+    }
+
+    template <class K>
+    [[nodiscard]] constexpr bool contains_impl_(K const &key) const
+    {
+      size_type const index = index_.index(key);
+      if (index == ptr_hash_storage_type::npos) return false;
+      assert(index < size_);
+      return key_eq_(Traits::key_of(values_[index]), key);
+    }
+
+    template <class K>
+    [[nodiscard]] constexpr mapped_type const &at_impl_(K const &key) const
+    {
+      if (empty()) [[unlikely]] {
+        throw std::out_of_range("minimal_perfect_hash_view::at: key not found");
+      }
+      size_type const index = index_.index_unchecked(key);
+      if (index == ptr_hash_storage_type::npos || !key_eq_(Traits::key_of(values_[index]), key)) [[unlikely]] {
+        throw std::out_of_range("minimal_perfect_hash_view::at: key not found");
+      }
+      assert(index < size_);
+      return Traits::mapped_of(values_[index]);
+    }
+
+    template <class K>
+    [[nodiscard]] constexpr mapped_type const &at_unchecked_impl_(K const &key) const
+    {
+      size_type const index = index_.index_unchecked(key);
+      assert(index < size_);
+      assert(key_eq_(Traits::key_of(values_[index]), key));
+      return Traits::mapped_of(values_[index]);
+    }
+
+    typename ptr_hash_storage_type::const_view index_ {};
+    value_type const *values_ = nullptr;
+    size_type size_           = 0;
+    [[no_unique_address]] key_equal key_eq_ {};
+  };
+
+  [[nodiscard]] constexpr const_view as_const_view() const
+      noexcept(std::is_nothrow_copy_constructible_v<key_equal> && noexcept(ptr_hash_storage_.as_const_view()))
+  {
+    return const_view { ptr_hash_storage_.as_const_view(), static_cast<value_type const *>(value_storage_.data()), size(), key_eq_ };
+  }
+
+#if defined(__cpp_lib_define_static)
+  /// Bake the ptr_hash index blob and the packed values into static storage and
+  /// return a read-only view over them. Requires a structural value_type.
+  [[nodiscard]] static consteval const_view freeze(hash_table const &src)
+  {
+    static_assert(std::is_structural_v<value_type>,
+                  "minimal_perfect_hash freeze(): value_type must be a structural type (P3491 std::define_static_array)");
+    auto const baked_ptrhash = ptr_hash_storage_type::freeze(src.ptr_hash_storage_);
+    auto const baked_value = std::define_static_array(std::span<value_type const>(src.value_storage_.data(), src.value_storage_.data() + src.size()));
+    return const_view { baked_ptrhash, baked_value.data(), src.size(), src.key_eq_ };
+  }
+#endif
 
 private:
   ptr_hash_storage_type ptr_hash_storage_;

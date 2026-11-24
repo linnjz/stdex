@@ -21,15 +21,23 @@
 #include <cstdint>
 #include <cstdio>
 #include <memory>
-#if __cplusplus >= 202603L
-#include <optional>
-#endif
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <type_traits>
 #include <utility>
 #include <vector>
+#include <version>
+
+#if defined(__has_include)
+#  if __has_include(<meta>)
+#    include <meta>
+#  endif
+#endif
+
+#if defined(__cpp_lib_optional) && __cpp_lib_optional >= 202506L
+#  include <optional>
+#endif
 
 #include "minimal_perfect_hash_map.hpp"
 #include "minimal_perfect_hash_set.hpp"
@@ -490,7 +498,7 @@ void test_heterogeneous_lookup()
   CHECK(custom_map.at(std::string_view { "key-321" }) == 321);
 }
 
-#if __cplusplus >= 202603L
+#if defined(__cpp_lib_optional) && __cpp_lib_optional >= 202506L
 void test_lookup()
 {
   std::printf("\n=== minimal_perfect_hash: lookup ===\n");
@@ -587,6 +595,62 @@ void test_stress_sizes()
     for (std::uint64_t key : keys) CHECK(set.contains(key));
   }
 }
+// ---------------------------------------------------------------
+// Reflection freeze() (C++26 P3491 std::define_static_array).
+//
+// Compiled only when the standard library actually exposes
+// __cpp_lib_define_static, so it stays dormant on pre-C++26 toolchains and
+// becomes active automatically once a local compiler supports C++26 reflection.
+// The heap-backed default options are used because they can be built during
+// constant evaluation (stack storage of non-trivial value_type is not yet
+// constexpr-constructible).
+// ---------------------------------------------------------------
+#if defined(__cpp_lib_define_static)
+consteval bool minimal_freeze_reproduces_owner()
+{
+  constexpr int n = 40;
+
+  std::array<std::pair<int, int>, n> entries {};
+  for (int i = 0; i < n; ++i) entries[static_cast<std::size_t>(i)] = { i, i * 3 + 1 };
+
+  stdex::minimal_perfect_hash_map<int, int> map(entries.begin(), entries.end());
+  auto const mv = stdex::minimal_perfect_hash_map<int, int>::freeze(map);
+
+  bool ok = mv.size() == map.size() && mv.bucket_count() == map.bucket_count();
+  for (int i = 0; i < n; ++i) {
+    if (!mv.contains(i) || mv.at(i) != i * 3 + 1) ok = false;
+    auto const it = mv.find(i);
+    if (it == mv.end() || it->second != i * 3 + 1) ok = false;
+  }
+  if (mv.contains(n + 12345)) ok = false;
+  std::size_t visited = 0;
+  for (auto it = mv.begin(); it != mv.end(); ++it) ++visited;
+  if (visited != static_cast<std::size_t>(n)) ok = false;
+
+  std::array<int, n> keys {};
+  for (int i = 0; i < n; ++i) keys[static_cast<std::size_t>(i)] = i;
+  stdex::minimal_perfect_hash_set<int> set(keys.begin(), keys.end());
+  auto const sv = stdex::minimal_perfect_hash_set<int>::freeze(set);
+  for (int i = 0; i < n; ++i) {
+    if (!sv.contains(i) || sv.at(i) != i) ok = false;
+  }
+  if (sv.contains(n + 12345)) ok = false;
+  return ok;
+}
+#endif
+
+void test_reflection_freeze()
+{
+  std::printf("\n=== minimal_perfect_hash: reflection freeze ===\n");
+#if defined(__cpp_lib_define_static)
+  constexpr bool ok = minimal_freeze_reproduces_owner();
+  static_assert(ok);
+  CHECK(ok);
+#else
+  std::printf("  (skipped: __cpp_lib_define_static / <meta> reflection not available)\n");
+  CHECK(true);
+#endif
+}
 } // namespace
 
 int main()
@@ -603,10 +667,11 @@ int main()
   test_interface();
   test_ctad();
   test_heterogeneous_lookup();
-#if __cplusplus >= 202603L
+#if defined(__cpp_lib_optional) && __cpp_lib_optional >= 202506L
   test_lookup();
 #endif
   test_stress_sizes();
+  test_reflection_freeze();
 
   std::printf("\n=== minimal_perfect_hash summary: %d passed, %d failed ===\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;

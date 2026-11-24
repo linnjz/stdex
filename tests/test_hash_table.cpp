@@ -24,9 +24,6 @@
 #include <functional>
 #include <memory>
 #include <new>
-#if __cplusplus >= 202603L
-#  include <optional>
-#endif
 #include <random>
 #include <ranges>
 #include <stdexcept>
@@ -38,6 +35,16 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+#if defined(__has_include)
+#  if __has_include(<meta>)
+#    include <meta>
+#  endif
+#endif
+
+#if defined(__cpp_lib_optional) && __cpp_lib_optional >= 202506L
+#  include <optional>
+#endif
 
 #include "hash.hpp"
 #include "hash_table.hpp"
@@ -1140,7 +1147,7 @@ void test_heterogeneous_lookup()
 // ==================================================================
 // 10b. P3091-style lookup
 // ==================================================================
-#if __cplusplus >= 202603L
+#if defined(__cpp_lib_optional) && __cpp_lib_optional >= 202506L
 void test_lookup()
 {
   SECTION("lookup");
@@ -3511,6 +3518,45 @@ void test_swap_exception()
   CHECK(state.invalid_deallocations == 0);
 }
 
+// ---------------------------------------------------------------
+// Reflection freeze() (C++26 P3491 std::define_static_array).
+// Compiled only when the standard library exposes __cpp_lib_define_static, so it
+// stays dormant on pre-C++26 toolchains and activates automatically later.
+// ---------------------------------------------------------------
+#if defined(__cpp_lib_define_static)
+consteval auto make_frozen_uf_map()
+{
+  std::vector<std::pair<int, int>> v;
+  for (int i = 0; i < 64; ++i) v.push_back({ i * 3 + 1, i * 7 });
+  stdex::unordered_flat_map<int, int> m(v.begin(), v.end());
+  return stdex::unordered_flat_map<int, int>::freeze(m);
+}
+#endif
+
+void test_reflection_freeze()
+{
+  SECTION("reflection freeze");
+#if defined(__cpp_lib_define_static)
+  constexpr auto fv = make_frozen_uf_map();
+  CHECK(fv.size() == 64);
+  for (int i = 0; i < 64; ++i) {
+    int const k = i * 3 + 1;
+    CHECK(fv.contains(k));
+    auto const it = fv.find(k);
+    CHECK(it != fv.end());
+    if (it != fv.end()) CHECK_EQ(it->second, i * 7);
+    CHECK_EQ(fv.at(k), i * 7);
+  }
+  CHECK(!fv.contains(-123));
+  std::size_t n = 0;
+  for (auto it = fv.begin(); it != fv.end(); ++it) ++n;
+  CHECK_EQ(n, std::size_t{ 64 });
+#else
+  std::printf("  (skipped: __cpp_lib_define_static / <meta> reflection not available)\n");
+  CHECK(true);
+#endif
+}
+
 // ==================================================================
 // main
 // ==================================================================
@@ -3529,7 +3575,7 @@ int main()
   test_stack_heap_iteration();
   test_insert_variants();
   test_heterogeneous_lookup();
-#if __cplusplus >= 202603L
+#if defined(__cpp_lib_optional) && __cpp_lib_optional >= 202506L
   test_lookup();
 #endif
   test_introspection();
@@ -3574,6 +3620,7 @@ int main()
   test_move_aware_allocator();
   test_unaligned_allocator();
   test_swap_exception();
+  test_reflection_freeze();
 
   std::printf("\n===============================\n");
   std::printf("PASS: %d   FAIL: %d\n", g_pass, g_fail);

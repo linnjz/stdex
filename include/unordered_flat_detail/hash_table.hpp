@@ -27,6 +27,17 @@
                        // std::is_convertible_v,
                        // std::is_trivially_copyable_v,
                        // std::is_standard_layout_v
+#include <version>     // __cpp_lib_define_static, __cpp_lib_optional
+
+#if defined(__cpp_lib_define_static)
+#  include <meta> // std::define_static_array
+#  include <span>
+#  include <vector>
+#endif
+
+#if defined(__cpp_lib_optional) && __cpp_lib_optional >= 202506L
+#  include <optional>
+#endif
 
 #include "inline_storage.hpp"
 #include "try_key_extraction.hpp"
@@ -139,6 +150,7 @@ private:
   using base::required_capacity_for_growth_;
   using base::aligned_capacity_;
   using base::reset_load_threshold_;
+  using base::countr_zero_unchecked_;
 
   using base::uses_fancy_pointers_v;
   static constexpr bool is_pocca_v = allocator_traits::propagate_on_container_copy_assignment::value;
@@ -1284,7 +1296,7 @@ public:
       group_type *group_ptr = a_groups + group_index;
       auto occupied_mask    = group_type::occupied_mask_excluding_sentinel(group_ptr, a_sentinel);
       while (occupied_mask) {
-        unsigned slot_index     = static_cast<unsigned>(std::countr_zero(static_cast<unsigned>(occupied_mask)));
+        unsigned slot_index     = static_cast<unsigned>(countr_zero_unchecked_(static_cast<unsigned>(occupied_mask)));
         value_type *element_ptr = a_elements + group_index * group_size_() + slot_index;
         auto it                 = b.find(Traits::key_fn(*element_ptr));
         if (it == b.end() || !(*it == *element_ptr)) return false;
@@ -1295,6 +1307,252 @@ public:
   }
   friend bool operator!= (hash_table const& a, hash_table const& b) { return !(a == b); }
 
-  // consteval auto freeze();
+private:
+  static constexpr const_iterator make_const_iterator_(value_type const *e, group_type const *g, size_type slot) noexcept
+  {
+    return const_iterator(const_cast<value_type *>(e), const_cast<group_type *>(g), slot);
+  }
+
+public:
+  /// Non-owning read-only descriptor over an open-addressing table's live storage.
+  /// The view borrows the table's element and group arrays and must not outlive
+  /// them; it exists so constant-evaluated / statically-stored tables can be
+  /// queried through a small pointer-only handle.
+  class const_view
+  {
+  public:
+    using key_type        = typename hash_table::key_type;
+    using value_type      = typename hash_table::value_type;
+    using size_type       = typename hash_table::size_type;
+    using difference_type = typename hash_table::difference_type;
+    using hasher          = typename hash_table::hasher;
+    using key_equal       = typename hash_table::key_equal;
+    using reference       = typename hash_table::const_reference;
+    using const_reference = typename hash_table::const_reference;
+    using pointer         = typename hash_table::const_pointer;
+    using const_pointer   = typename hash_table::const_pointer;
+    using iterator        = typename hash_table::const_iterator;
+    using const_iterator  = typename hash_table::const_iterator;
+
+    const_view() = delete;
+
+    // observers
+    [[nodiscard]] constexpr bool empty() const noexcept { return size_ == 0; }
+    [[nodiscard]] constexpr size_type size() const noexcept { return size_; }
+    [[nodiscard]] constexpr size_type bucket_count() const noexcept
+    {
+      return groups_ptr_ == nullptr ? 0 : (group_count_mask_ + 1) * group_type::capacity() - 1;
+    }
+    [[nodiscard]] constexpr size_type capacity() const noexcept { return bucket_count(); }
+    [[nodiscard]] constexpr float load_factor() const noexcept
+    {
+      size_type const cap = bucket_count();
+      return cap == 0 ? 0.F : static_cast<float>(size_) / static_cast<float>(cap);
+    }
+    [[nodiscard]] constexpr float max_load_factor() const noexcept { return 0.875F; }
+    [[nodiscard]] constexpr hasher hash_function() const noexcept { return hasher_; }
+    [[nodiscard]] constexpr key_equal key_eq() const noexcept { return key_eq_; }
+
+    // iteration (via group metadata; skips holes and the sentinel)
+    [[nodiscard]] constexpr const_iterator begin() const noexcept
+    {
+      if (empty() || groups_ptr_ == nullptr) return end();
+      const_iterator it = hash_table::make_const_iterator_(elements_ptr_, groups_ptr_, size_type { 0 });
+      return (groups_ptr_[0].occupied_mask() & 0x1) ? it : ++it;
+    }
+    [[nodiscard]] constexpr const_iterator end() const noexcept { return const_iterator {}; }
+    [[nodiscard]] constexpr const_iterator cbegin() const noexcept { return begin(); }
+    [[nodiscard]] constexpr const_iterator cend() const noexcept { return end(); }
+
+    // lookup
+    [[nodiscard]] constexpr const_iterator find(key_type const &key) const { return find_impl_(key); }
+    [[nodiscard]] constexpr bool contains(key_type const &key) const { return find_impl_(key) != end(); }
+    [[nodiscard]] constexpr size_type count(key_type const &key) const { return contains(key) ? 1U : 0U; }
+    [[nodiscard]] constexpr std::pair<const_iterator, const_iterator> equal_range(key_type const &key) const
+    {
+      const_iterator const it = find_impl_(key);
+      return { it, it != end() ? std::next(it) : it };
+    }
+
+    template <class K> requires heterogeneous_key<K const &, hasher, key_equal, iterator, const_iterator>
+    [[nodiscard]] constexpr const_iterator find(K const &key) const { return find_impl_(key); }
+    template <class K> requires heterogeneous_key<K const &, hasher, key_equal, iterator, const_iterator>
+    [[nodiscard]] constexpr bool contains(K const &key) const { return find_impl_(key) != end(); }
+    template <class K> requires heterogeneous_key<K const &, hasher, key_equal, iterator, const_iterator>
+    [[nodiscard]] constexpr size_type count(K const &key) const { return contains(key) ? 1U : 0U; }
+    template <class K> requires heterogeneous_key<K const &, hasher, key_equal, iterator, const_iterator>
+    [[nodiscard]] constexpr std::pair<const_iterator, const_iterator> equal_range(K const &key) const
+    {
+      const_iterator const it = find_impl_(key);
+      return { it, it != end() ? std::next(it) : it };
+    }
+
+    // element access / lookup: only for map-like traits (a set's Traits has no
+    // mapped_type, matching unordered_flat_set which exposes neither at nor lookup).
+    template <class Tr = Traits> requires requires { typename Tr::mapped_type; }
+    [[nodiscard]] constexpr typename Tr::mapped_type const &at(key_type const &key) const
+    {
+      const_iterator const it = find_impl_(key);
+      if (it == end()) [[unlikely]] throw std::out_of_range("unordered_flat hash_table::at: key not found");
+      return it->second;
+    }
+
+    template <class K, class Tr = Traits>
+    requires heterogeneous_key<K const &, hasher, key_equal, iterator, const_iterator> && requires { typename Tr::mapped_type; }
+    [[nodiscard]] constexpr typename Tr::mapped_type const &at(K const &key) const
+    {
+      const_iterator const it = find_impl_(key);
+      if (it == end()) [[unlikely]] throw std::out_of_range("unordered_flat hash_table::at: key not found");
+      return it->second;
+    }
+
+#if defined(__cpp_lib_optional) && __cpp_lib_optional >= 202506L
+    template <class Tr = Traits> requires requires { typename Tr::mapped_type; }
+    [[nodiscard]] constexpr std::optional<typename Tr::mapped_type const &> lookup(key_type const &key) const
+    {
+      const_iterator const it = find_impl_(key);
+      if (it == end()) [[unlikely]] return std::nullopt;
+      return it->second;
+    }
+
+    template <class K, class Tr = Traits>
+    requires heterogeneous_key<K const &, hasher, key_equal, iterator, const_iterator> && requires { typename Tr::mapped_type; }
+    [[nodiscard]] constexpr std::optional<typename Tr::mapped_type const &> lookup(K const &key) const
+    {
+      const_iterator const it = find_impl_(key);
+      if (it == end()) [[unlikely]] return std::nullopt;
+      return it->second;
+    }
+#endif
+
+  private:
+    friend class hash_table;
+
+    constexpr const_view(value_type const *elements, group_type const *groups, std::uint8_t shift,
+                         size_type mask, size_type size, hasher h, key_equal eq) noexcept
+        : elements_ptr_ { elements }
+        , groups_ptr_ { groups }
+        , group_index_shift_ { shift }
+        , group_count_mask_ { mask }
+        , size_ { size }
+        , hasher_ { h }
+        , key_eq_ { eq }
+    {
+    }
+
+    // Same fingerprint probe as find_fingerprint_slot_unchecked_, re-expressed over
+    // the view's read-only raw pointers (holes are never touched: only occupied
+    // slots are probed).
+    template <class K>
+    [[nodiscard]] constexpr const_iterator find_impl_(K const &key) const
+    {
+      if (empty() || elements_ptr_ == nullptr || groups_ptr_ == nullptr) [[unlikely]] return end();
+      size_type const hash = static_cast<size_type>(hasher_(key));
+
+      prober_type prober(static_cast<size_type>(hash >> group_index_shift_));
+      do [[likely]] {
+        size_type const position          = prober.position();
+        group_type const *const group_ptr = groups_ptr_ + position;
+        if (int fingerprint_mask = group_ptr->fingerprint_mask(hash)) {
+          value_type const *const element_ptr = elements_ptr_ + position * group_size_();
+          if (!std::is_constant_evaluated()) {
+#if defined(_MSC_VER)
+            _mm_prefetch(static_cast<char const *>(static_cast<void const *>(element_ptr)), _MM_HINT_T0);
+#elif defined(__GNUC__) || defined(__clang__)
+            __builtin_prefetch(element_ptr, 0, 3);
+#endif
+          }
+          do {
+            unsigned const slot_index = static_cast<unsigned>(hash_table::countr_zero_unchecked_(static_cast<unsigned>(fingerprint_mask)));
+            if (key_eq_(key, Traits::key_fn(element_ptr[slot_index]))) [[likely]] {
+              return hash_table::make_const_iterator_(element_ptr + slot_index, group_ptr, slot_index);
+            }
+            fingerprint_mask &= fingerprint_mask - 1;
+          } while (fingerprint_mask);
+        }
+        if (!group_ptr->is_overflow_by_hash(hash)) [[likely]] {
+          return end();
+        }
+      } while (prober.next(group_count_mask_));
+
+      return end();
+    }
+
+    value_type const *elements_ptr_ = nullptr;
+    group_type const *groups_ptr_   = nullptr;
+    std::uint8_t group_index_shift_ = 0;
+    size_type group_count_mask_     = 0;
+    size_type size_                 = 0;
+    [[no_unique_address]] hasher hasher_ {};
+    [[no_unique_address]] key_equal key_eq_ {};
+  };
+
+  [[nodiscard]] constexpr const_view as_const_view() const noexcept
+  {
+    return const_view { elements_address_(), groups_address_(), static_cast<std::uint8_t>(this->group_index_shift_),
+                        this->group_count_mask_, this->size(), this->hash_function(), this->key_eq() };
+  }
+
+#if defined(__cpp_lib_define_static)
+  /// Bake the table's element and group arrays into static storage and return a
+  /// read-only view over them that is independent of `src`'s lifetime.
+  ///
+  /// Requires a structural value_type (e.g. a pair of scalars) so P3491 can turn
+  /// the element array into a template argument; `group_type` was made structural
+  /// for the same reason.
+  [[nodiscard]] static consteval const_view freeze(hash_table const &src)
+  {
+    static_assert(std::is_structural_v<value_type>,
+                  "unordered_flat freeze(): value_type must be a structural type (P3491 std::define_static_array)");
+    static_assert(std::is_structural_v<group_type>,
+                  "unordered_flat freeze(): group_type must be a structural type (P3491 std::define_static_array)");
+    size_type const group_count = src.groups_address_() != nullptr ? src.group_count_() : 0;
+
+    std::vector<value_type> elements;
+    if (group_count != 0 && src.size() != 0) {
+      size_type const capacity = src.capacity_unchecked_();
+
+      // Open addressing leaves unoccupied element slots uninitialised, but the
+      // whole array is copied into static storage, so every slot must hold a
+      // live value. Fill the holes with a copy of any live element (a view never
+      // reads hole slots), then write the real elements back into their slots.
+      if constexpr (std::is_copy_assignable_v<value_type>) {
+        value_type const *filler = nullptr;
+        (void) src.try_for_each_occupied_slot_unchecked_([&](value_type *element, group_type *, unsigned) {
+          filler = element;
+          return false; // stop at the first live element
+        });
+        elements.assign(capacity, *filler);
+        src.for_each_occupied_slot_unchecked_([&](value_type *element, group_type *group, unsigned slot) {
+          elements[static_cast<size_type>(group - src.groups_address_()) * group_size_() + slot] = *element;
+        });
+      } else {
+        // Structural types without copy assignment: record each slot's source and
+        // copy-construct every slot instead (no assignment required).
+        std::vector<value_type const *> slot_source(capacity, nullptr);
+        src.for_each_occupied_slot_unchecked_([&](value_type *element, group_type *group, unsigned slot) {
+          slot_source[static_cast<size_type>(group - src.groups_address_()) * group_size_() + slot] = element;
+        });
+        value_type const *filler = nullptr;
+        for (value_type const *p : slot_source) {
+          if (p != nullptr) {
+            filler = p;
+            break;
+          }
+        }
+        elements.reserve(capacity);
+        for (size_type i = 0; i < capacity; ++i) {
+          elements.push_back(slot_source[i] != nullptr ? *slot_source[i] : *filler);
+        }
+      }
+    }
+
+    auto const baked_elements = std::define_static_array(std::span<value_type const>(elements.data(), elements.size()));
+    auto const baked_groups   = std::define_static_array(std::span<group_type const>(src.groups_address_(), group_count));
+
+    return const_view { baked_elements.data(), baked_groups.data(), static_cast<std::uint8_t>(src.group_index_shift_),
+                        src.group_count_mask_, src.size(), src.hash_function(), src.key_eq() };
+  }
+#endif
 };
 } // namespace stdex::unordered_flat_detail

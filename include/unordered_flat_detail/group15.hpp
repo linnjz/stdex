@@ -126,14 +126,14 @@ private:
     0xFCFCFCFCu,0xFDFDFDFDu,0xFEFEFEFEu,0xFFFFFFFFu,
   };
 
-  static constexpr int broadcast_fingerprint(std::size_t hash) noexcept
+  static constexpr int broadcast_fingerprint_(std::size_t hash) noexcept
   {
     return static_cast<int>(fingerprint_table[static_cast<unsigned char>(hash)]);
   }
 
-  static constexpr unsigned char get_fingerprint_byte(std::size_t hash) noexcept
+  static constexpr unsigned char get_fingerprint_byte_(std::size_t hash) noexcept
   {
-    return static_cast<unsigned char>(broadcast_fingerprint(hash));
+    return static_cast<unsigned char>(broadcast_fingerprint_(hash));
   }
 #else
   static constexpr unsigned char fingerprint_table[] = {
@@ -155,7 +155,7 @@ private:
     240,241,242,243,244,245,246,247,248,249,250,251,252,253,254,255,
   };
 
-  static constexpr unsigned char get_fingerprint_byte(std::size_t hash) noexcept
+  static constexpr unsigned char get_fingerprint_byte_(std::size_t hash) noexcept
   {
     return fingerprint_table[static_cast<unsigned char>(hash)];
   }
@@ -172,7 +172,7 @@ public:
   {
     if constexpr (is_simd_enabled) {
       if (std::is_constant_evaluated()) {
-        auto fp  = get_fingerprint_byte(hash);
+        auto fp  = get_fingerprint_byte_(hash);
         int mask = 0;
         for (std::size_t i = 0; i < capacity(); ++i) {
           if (slot_fp_bytes_[i] == fp) mask |= (1 << i);
@@ -180,9 +180,9 @@ public:
         return mask;
       } else {
 #if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (_M_IX86_FP >= 2)
-        return _mm_movemask_epi8(_mm_cmpeq_epi8(load_fp_vector(), _mm_set1_epi32(broadcast_fingerprint(hash)))) & 0x7F'FF;
+        return _mm_movemask_epi8(_mm_cmpeq_epi8(load_fp_vector_(), _mm_set1_epi32(broadcast_fingerprint_(hash)))) & 0x7F'FF;
 #elif (defined(__ARM_NEON__) || defined(__ARM_NEON)) && !defined(__ARM_BIG_ENDIAN)
-        return simde_mm_movemask_epi8(vceqq_u8(load_fp_vector(), vdupq_n_u8(get_fingerprint_byte(hash)))) & 0x7F'FF;
+        return simde_mm_movemask_epi8_(vceqq_u8(load_fp_vector_(), vdupq_n_u8(get_fingerprint_byte_(hash)))) & 0x7F'FF;
 #endif
       }
     } else {
@@ -205,7 +205,7 @@ public:
         0xff'ff'ff'ff'ff'ff'ff'ffull,
       };
 
-      std::size_t code = static_cast<std::size_t>(get_fingerprint_byte(hash));
+      std::size_t code = static_cast<std::size_t>(get_fingerprint_byte_(hash));
 
       auto const low_nibble  = code & 0xFu;
       auto const high_nibble = code >> 4;
@@ -244,7 +244,7 @@ public:
     ((defined(__ARM_NEON__) || defined(__ARM_NEON)) && !defined(__ARM_BIG_ENDIAN))
     slot_fp_bytes_[slot_index] = slot_available_mark;
 #else
-    set_fingerprint_hash_impl(slot_index, slot_available_mark);
+    set_fingerprint_hash_impl_(slot_index, slot_available_mark);
 #endif
   }
 
@@ -275,9 +275,9 @@ public:
     assert(slot_index < capacity() && "slot index out of range");
 #if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (_M_IX86_FP >= 2) || \
     ((defined(__ARM_NEON__) || defined(__ARM_NEON)) && !defined(__ARM_BIG_ENDIAN))
-    slot_fp_bytes_[slot_index] = get_fingerprint_byte(hash);
+    slot_fp_bytes_[slot_index] = get_fingerprint_byte_(hash);
 #else
-    set_fingerprint_hash_impl(slot_index, get_fingerprint_byte(hash));
+    set_fingerprint_hash_impl_(slot_index, get_fingerprint_byte_(hash));
 #endif
   }
 
@@ -288,7 +288,7 @@ public:
   constexpr void set_overflow_mark(std::size_t hash) noexcept
   {
     if constexpr (is_simd_enabled) {
-      overflow() |= static_cast<unsigned char>(1u << (hash % 8));
+      overflow_() |= static_cast<unsigned char>(1u << (hash % 8));
     } else {
       if (std::is_constant_evaluated()) {
         // Scalar layout: the overflow flag of lane j = hash % 8 lives at bit 15
@@ -312,7 +312,7 @@ public:
   {
     if constexpr (is_simd_enabled) {
       constexpr unsigned char shift[] = { 1, 2, 4, 8, 16, 32, 64, 128 };
-      return (overflow() & shift[hash % 8]) != 0;
+      return (overflow_() & shift[hash % 8]) != 0;
     } else {
       if (std::is_constant_evaluated()) {
         auto const lane = std::uint64_t(0x80'00u) << (16 * (hash % 4));
@@ -358,7 +358,7 @@ public:
     ((defined(__ARM_NEON__) || defined(__ARM_NEON)) && !defined(__ARM_BIG_ENDIAN))
     slot_fp_bytes_[capacity() - 1] = slot_sentinel_mark;
 #else
-    set_fingerprint_hash_impl(capacity() - 1, slot_sentinel_mark);
+    set_fingerprint_hash_impl_(capacity() - 1, slot_sentinel_mark);
 #endif
   }
 
@@ -419,9 +419,9 @@ public:
         return mask;
       } else {
 #if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (_M_IX86_FP >= 2)
-        return _mm_movemask_epi8(_mm_cmpeq_epi8(load_fp_vector(), _mm_setzero_si128())) & 0x7F'FF;
+        return _mm_movemask_epi8(_mm_cmpeq_epi8(load_fp_vector_(), _mm_setzero_si128())) & 0x7F'FF;
 #elif (defined(__ARM_NEON__) || defined(__ARM_NEON)) && !defined(__ARM_BIG_ENDIAN)
-        return simde_mm_movemask_epi8(vceqq_u8(load_fp_vector(), vdupq_n_u8(0))) & 0x7F'FF;
+        return simde_mm_movemask_epi8_(vceqq_u8(load_fp_vector_(), vdupq_n_u8(0))) & 0x7F'FF;
 #endif
       }
     } else {
@@ -445,7 +445,7 @@ public:
 #if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (_M_IX86_FP >= 2)
         return (~available_mask()) & 0x7F'FF;
 #elif (defined(__ARM_NEON__) || defined(__ARM_NEON)) && !defined(__ARM_BIG_ENDIAN)
-        return simde_mm_movemask_epi8(vcgtq_u8(load_fp_vector(), vdupq_n_u8(0))) & 0x7F'FF;
+        return simde_mm_movemask_epi8_(vcgtq_u8(load_fp_vector_(), vdupq_n_u8(0))) & 0x7F'FF;
 #endif
       }
     } else {
@@ -458,17 +458,17 @@ public:
 
 private:
 #if defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64) || (_M_IX86_FP >= 2)
-  __m128i load_fp_vector() const
+  __m128i load_fp_vector_() const
   {
     return _mm_load_si128(reinterpret_cast<__m128i const *>(slot_fp_bytes_));
   }
 #elif (defined(__ARM_NEON__) || defined(__ARM_NEON)) && !defined(__ARM_BIG_ENDIAN)
-  uint8x16_t load_fp_vector() const
+  uint8x16_t load_fp_vector_() const
   {
     return vld1q_u8(reinterpret_cast<std::uint8_t const *>(slot_fp_bytes_));
   }
 
-  static int simde_mm_movemask_epi8(uint8x16_t input_vec)
+  static int simde_mm_movemask_epi8_(uint8x16_t input_vec)
   {
     static constexpr std::uint8_t bit_weights[16] = {
       1 << 0, 1 << 1, 1 << 2, 1 << 3, 1 << 4, 1 << 5, 1 << 6, 1 << 7,
@@ -493,7 +493,7 @@ private:
   // The scalar bit layout is expressed with plain integer masks so that the
   // constant-evaluated and runtime paths share one representation on platforms
   // without SIMD.
-  constexpr void set_fingerprint_hash_impl(std::size_t slot_index, unsigned char fp_hash) noexcept
+  constexpr void set_fingerprint_hash_impl_(std::size_t slot_index, unsigned char fp_hash) noexcept
   {
     constexpr std::uint64_t write_masks[] = {
       0x00'00'00'00'00'00'00'00ull,
@@ -542,10 +542,13 @@ private:
   }
 #endif
 
-  constexpr unsigned char &overflow() noexcept { return slot_fp_bytes_[15]; }
+  constexpr unsigned char &overflow_() noexcept { return slot_fp_bytes_[15]; }
 
-  constexpr unsigned char const &overflow() const noexcept { return slot_fp_bytes_[15]; }
+  constexpr unsigned char const &overflow_() const noexcept { return slot_fp_bytes_[15]; }
 
+/// C++ 26 `std::define_static_array` requires the type to be `structural type`,
+/// and currently private members are not supported, so here it's made public.
+public:
   union
   {
     alignas(16) unsigned char slot_fp_bytes_[16];

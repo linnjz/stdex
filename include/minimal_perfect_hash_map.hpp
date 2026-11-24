@@ -19,11 +19,12 @@
 #include <functional> // std::equal_to
 #include <iterator>   // std::input_iterator
 #include <memory>     // std::allocator
-#if __cplusplus >= 202603L
-#include <optional>   // std::optional
-#endif
 #include <utility>    // std::pair
-#include <version>    // __cpp_lib_containers_ranges
+#include <version>    // __cpp_lib_containers_ranges, __cpp_lib_optional
+
+#if defined(__cpp_lib_optional) && __cpp_lib_optional >= 202506L
+#include <optional>
+#endif
 
 #include "hash.hpp"
 #include "minimal_perfect_hash_detail/mphmap_traits.hpp"
@@ -71,11 +72,13 @@ public:
   using typename base::size_type;
   using typename base::value_type;
 
+  using typename base::const_view;
+
   using base::base;
 
   constexpr minimal_perfect_hash_map() = default;
 
-#if __cplusplus >= 202603L
+#if defined(__cpp_lib_optional) && __cpp_lib_optional >= 202506L
   // ---------- lookup ----------
   [[nodiscard]] constexpr std::optional<const mapped_type &> lookup(key_type const &key) const
   {

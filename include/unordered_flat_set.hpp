@@ -45,6 +45,8 @@ public:
   using typename base::hasher;
   using typename base::key_equal;
 
+  using typename base::const_view;
+
   using typename base::const_pointer;
   using typename base::const_reference;
   using typename base::difference_type;

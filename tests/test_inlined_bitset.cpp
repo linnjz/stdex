@@ -44,6 +44,12 @@
 #include <utility>
 #include <vector>
 
+#if defined(__has_include)
+#  if __has_include(<meta>)
+#    include <meta>
+#  endif
+#endif
+
 #include "inlined_bitset.hpp"
 
 static int g_pass = 0;
@@ -2597,6 +2603,55 @@ void test_constexpr()
 #endif
 }
 
+// ---------------------------------------------------------------
+// Reflection freeze() (C++26 P3491 std::define_static_array).
+//
+// Compiled only when the standard library actually exposes
+// __cpp_lib_define_static, so it stays dormant on pre-C++26 toolchains and
+// becomes active automatically once a local compiler supports C++26 reflection.
+// ---------------------------------------------------------------
+#if defined(__cpp_lib_define_static)
+consteval bool bitset_freeze_reproduces_owner()
+{
+  using BS = stdex::inlined_bitset<std::uint64_t>;
+  constexpr std::size_t n = 130;
+
+  BS b(n);
+  std::size_t expected_count = 0;
+  std::size_t expected_first = static_cast<std::size_t>(-1);
+  std::size_t expected_last  = static_cast<std::size_t>(-1);
+  for (std::size_t i = 0; i < n; ++i) {
+    if (i % 3 == 0) {
+      b.set(i, true);
+      ++expected_count;
+      if (expected_first == static_cast<std::size_t>(-1)) expected_first = i;
+      expected_last = i;
+    }
+  }
+
+  auto const v = BS::freeze(b);
+
+  bool ok = v.size() == b.size() && v.block_count() == b.block_count() && v.count() == expected_count &&
+            v.find_first() == expected_first && v.find_last() == expected_last &&
+            v.find_first_zero() == b.find_first_zero() && v.to_string() == b.to_string();
+  for (std::size_t i = 0; i < n; ++i) { if (v[i] != b[i]) ok = false; }
+  return ok;
+}
+#endif
+
+void test_reflection_freeze()
+{
+  SECTION("reflection freeze");
+#if defined(__cpp_lib_define_static)
+  constexpr bool ok = bitset_freeze_reproduces_owner();
+  static_assert(ok);
+  CHECK(ok);
+#else
+  std::printf("  (skipped: __cpp_lib_define_static / <meta> reflection not available)\n");
+  CHECK(true);
+#endif
+}
+
 // ==================================================================
 // main
 // ==================================================================
@@ -2638,6 +2693,7 @@ int main()
   test_exception_safety_alloc();
   test_allocator_lifecycle();
   test_constexpr();
+  test_reflection_freeze();
 
   std::printf("\n===============================\n");
   std::printf("PASS: %d   FAIL: %d\n", g_pass, g_fail);

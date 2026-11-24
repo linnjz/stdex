@@ -20,6 +20,7 @@
 #include <bit>              // std::popcount
 #include <cassert>          // assert
 #include <concepts>         // std::convertible_to, std::unsigned_integral
+#include <cstddef>          // std::ptrdiff_t, std::size_t
 #include <cstdint>          // std::uint32_t, std::uint64_t
 #include <cstdlib>          // std::abort
 #include <cstring>          // std::memmove, std::memset
@@ -37,7 +38,12 @@
 #include <string_view>      // std::basic_string_view
 #include <type_traits>      // std::remove_cv_t, std::remove_cvref_t
 #include <utility>          // std::forward
-#include <version>          // __cpp_lib_containers_ranges
+#include <version>          // __cpp_lib_containers_ranges, __cpp_lib_define_static
+
+#if defined(__cpp_lib_define_static)
+#  include <meta>            // std::define_static_array
+#  include <span>            // std::span
+#endif
 
 #if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_AMD64) || (defined(_M_IX86) && _M_IX86_FP >= 2))
 #  include <immintrin.h> // MSVC: every intrinsic is usable without /arch; dispatch is the caller's job
@@ -84,12 +90,257 @@ struct from_blocks_t
 
 inline constexpr from_blocks_t from_blocks {};
 
+template <std::unsigned_integral Block, std::size_t N, class Allocator>
+class inlined_bitset;
+
+namespace bitset_detail
+{
+template <class Block, bool Const>
+class block_iterator;
+
+/// Non-owning bit proxy: only the mutable iterator materialises one; const
+/// iteration yields plain bool (bits are not addressable).
+template <class Block>
+struct bit_reference
+{
+  using block_type = Block;
+  using size_type  = std::size_t;
+
+  static constexpr size_type bits_per_block = static_cast<size_type>(std::numeric_limits<block_type>::digits);
+
+private:
+  template <class, bool>
+  friend class block_iterator;
+  template <std::unsigned_integral, std::size_t, class>
+  friend class ::stdex::inlined_bitset;
+
+  constexpr bit_reference(block_type *block, size_type bit_pos) noexcept
+      : block_ { block }
+      , single_bit_mask_ { static_cast<block_type>(block_type { 1 } << (bit_pos % bits_per_block)) }
+  {
+  }
+
+public:
+  constexpr bit_reference(bit_reference const &) noexcept = default;
+  constexpr bit_reference(bit_reference &&) noexcept      = default;
+  constexpr ~bit_reference() noexcept                     = default;
+
+  constexpr bit_reference &operator= (bit_reference const &other) noexcept { return *this = static_cast<bool>(other); }
+  constexpr bit_reference &operator= (bit_reference &&other) noexcept { return *this = static_cast<bool>(other); }
+
+  constexpr bit_reference &operator= (bool value) noexcept
+  {
+    if (value) {
+      *block_ |= single_bit_mask_;
+    } else {
+      *block_ &= static_cast<block_type>(~single_bit_mask_);
+    }
+    return *this;
+  }
+
+  constexpr bit_reference &operator&= (bool val) noexcept
+  {
+    if (!val) {
+      *block_ &= static_cast<block_type>(~single_bit_mask_);
+    }
+    return *this;
+  }
+
+  constexpr bit_reference &operator|= (bool val) noexcept
+  {
+    if (val) {
+      *block_ |= single_bit_mask_;
+    }
+    return *this;
+  }
+
+  constexpr bit_reference &operator^= (bool val) noexcept
+  {
+    if (val) {
+      *block_ ^= single_bit_mask_;
+    }
+    return *this;
+  }
+
+  constexpr bit_reference &operator-= (bool val) noexcept
+  {
+    return *this &= static_cast<bool>(!val);
+  }
+
+  [[nodiscard]] constexpr operator bool() const noexcept { return (*block_ & single_bit_mask_) != block_type { 0 }; }
+
+  [[nodiscard]] constexpr bool operator~() const noexcept { return (*block_ & single_bit_mask_) == block_type { 0 }; }
+
+  constexpr bit_reference &set() noexcept
+  {
+    *block_ |= single_bit_mask_;
+    return *this;
+  }
+
+  constexpr bit_reference &reset() noexcept
+  {
+    *block_ &= static_cast<block_type>(~single_bit_mask_);
+    return *this;
+  }
+
+  constexpr bit_reference &flip() noexcept
+  {
+    *block_ ^= single_bit_mask_;
+    return *this;
+  }
+
+  constexpr bit_reference &assign(bool value) noexcept { return *this = value; }
+
+  constexpr void operator& () = delete;
+
+  friend constexpr void swap(bit_reference lhs, bit_reference rhs) noexcept
+  {
+    bool const tmp = static_cast<bool>(lhs);
+    lhs            = static_cast<bool>(rhs);
+    rhs            = tmp;
+  }
+
+  friend constexpr void swap(bit_reference lhs, bool &rhs) noexcept
+  {
+    bool const tmp = static_cast<bool>(lhs);
+    lhs            = rhs;
+    rhs            = tmp;
+  }
+
+  friend constexpr void swap(bool &lhs, bit_reference rhs) noexcept
+  {
+    bool const tmp = lhs;
+    lhs            = static_cast<bool>(rhs);
+    rhs            = tmp;
+  }
+
+private:
+  block_type *block_;
+  block_type single_bit_mask_;
+};
+
+/// A single iterator template for bitset/view
+template <class Block, bool Const>
+class block_iterator
+{
+public:
+  using block_type        = Block;
+  using block_pointer     = std::conditional_t<Const, block_type const *, block_type *>;
+  using iterator_category = std::random_access_iterator_tag;
+  using iterator_concept  = std::random_access_iterator_tag;
+  using value_type        = bool;
+  using difference_type   = std::ptrdiff_t;
+  using pointer           = void;
+  using reference         = std::conditional_t<Const, bool, bit_reference<block_type>>;
+
+  static constexpr std::size_t bits_per_block = static_cast<std::size_t>(std::numeric_limits<block_type>::digits);
+
+  constexpr block_iterator() noexcept = default;
+
+  template <bool OtherConst>
+  requires (Const && !OtherConst)
+  constexpr block_iterator(block_iterator<block_type, OtherConst> const &other) noexcept
+      : blocks_ { other.blocks_ }
+      , pos_ { other.pos_ }
+  {
+  }
+
+  [[nodiscard]] constexpr reference operator* () const noexcept
+  {
+    if constexpr (Const) {
+      std::size_t const block_index = static_cast<std::size_t>(pos_) / bits_per_block;
+      std::size_t const bit_index   = static_cast<std::size_t>(pos_) % bits_per_block;
+      return static_cast<bool>((blocks_[block_index] >> bit_index) & block_type { 1 });
+    } else {
+      return reference(blocks_ + pos_ / bits_per_block, pos_);
+    }
+  }
+
+  [[nodiscard]] constexpr reference operator[] (difference_type n) const noexcept { return *(*this + n); }
+
+  constexpr block_iterator &operator++ () noexcept
+  {
+    ++pos_;
+    return *this;
+  }
+
+  constexpr block_iterator operator++ (int) noexcept
+  {
+    block_iterator tmp = *this;
+    ++pos_;
+    return tmp;
+  }
+
+  constexpr block_iterator &operator-- () noexcept
+  {
+    --pos_;
+    return *this;
+  }
+
+  constexpr block_iterator operator-- (int) noexcept
+  {
+    block_iterator tmp = *this;
+    --pos_;
+    return tmp;
+  }
+
+  constexpr block_iterator &operator+= (difference_type n) noexcept
+  {
+    pos_ = static_cast<std::size_t>(static_cast<difference_type>(pos_) + n);
+    return *this;
+  }
+
+  constexpr block_iterator &operator-= (difference_type n) noexcept { return *this += -n; }
+
+  [[nodiscard]] friend constexpr block_iterator operator+ (block_iterator it, difference_type n) noexcept
+  {
+    it += n;
+    return it;
+  }
+
+  [[nodiscard]] friend constexpr block_iterator operator+ (difference_type n, block_iterator it) noexcept { return it + n; }
+
+  [[nodiscard]] friend constexpr block_iterator operator- (block_iterator it, difference_type n) noexcept
+  {
+    it -= n;
+    return it;
+  }
+
+  [[nodiscard]] friend constexpr difference_type operator- (block_iterator const &lhs, block_iterator const &rhs) noexcept
+  {
+    return static_cast<difference_type>(lhs.pos_) - static_cast<difference_type>(rhs.pos_);
+  }
+
+  constexpr bool operator== (block_iterator const &) const noexcept  = default;
+  constexpr auto operator<=> (block_iterator const &) const noexcept = default;
+
+private:
+  template <std::unsigned_integral, std::size_t, class>
+  friend class ::stdex::inlined_bitset;
+
+  template <class, bool>
+  friend class block_iterator;
+
+  constexpr block_iterator(block_pointer blocks, std::size_t pos) noexcept
+      : blocks_ { blocks }
+      , pos_ { pos }
+  {
+  }
+
+  block_pointer blocks_ = nullptr;
+  std::size_t pos_      = 0;
+};
+
+} // namespace bitset_detail
+
 template <std::unsigned_integral Block = std::uint64_t, std::size_t N = 0, class Allocator = std::allocator<Block>>
 class inlined_bitset : private inline_storage<Block, N, Allocator>
 {
   using base = inline_storage<Block, N, Allocator>;
 
 public:
+  class const_view;
+
   using block_type = typename base::value_type;
   using value_type = bool;
   using typename base::allocator_traits;
@@ -100,328 +351,10 @@ public:
   using typename base::pointer;
   using typename base::size_type;
 
-  class iterator;
-  class const_iterator;
-
+  using reference       = bitset_detail::bit_reference<block_type>;
   using const_reference = bool;
-  class reference
-  {
-    friend inlined_bitset;
-    friend class iterator;
-
-  public:
-    constexpr reference(reference const &) noexcept = default;
-    constexpr reference(reference &&) noexcept      = default;
-    constexpr ~reference() noexcept                 = default;
-
-    constexpr reference &operator= (reference const &other) noexcept
-    {
-      return *this = static_cast<bool>(other);
-    }
-
-    constexpr reference &operator= (reference &&other) noexcept
-    {
-      return *this = static_cast<bool>(other);
-    }
-
-    constexpr reference &operator= (bool const val) noexcept
-    {
-      if (val) {
-        *block_ |= single_bit_mask_;
-      } else {
-        *block_ &= static_cast<block_type>(~single_bit_mask_);
-      }
-      return *this;
-    }
-
-    constexpr reference &operator&= (bool val) noexcept
-    {
-      if (!val) {
-        *block_ &= static_cast<block_type>(~single_bit_mask_);
-      }
-      return *this;
-    }
-
-    constexpr reference &operator|= (bool val) noexcept
-    {
-      if (val) {
-        *block_ |= single_bit_mask_;
-      }
-      return *this;
-    }
-
-    constexpr reference &operator^= (bool val) noexcept
-    {
-      if (val) {
-        *block_ ^= single_bit_mask_;
-      }
-      return *this;
-    }
-
-    constexpr reference &operator-= (bool val) noexcept
-    {
-      return *this &= static_cast<bool>(!val);
-    }
-
-    constexpr void operator& () = delete;
-
-    [[nodiscard]] constexpr bool operator~() const noexcept
-    {
-      return (*block_ & single_bit_mask_) == 0;
-    }
-
-    [[nodiscard]] constexpr operator bool() const noexcept
-    {
-      return (*block_ & single_bit_mask_) != 0;
-    }
-
-    constexpr reference &set() noexcept
-    {
-      *block_ |= single_bit_mask_;
-      return *this;
-    }
-
-    constexpr reference &reset() noexcept
-    {
-      *block_ &= static_cast<block_type>(~single_bit_mask_);
-      return *this;
-    }
-
-    constexpr reference &flip() noexcept
-    {
-      *block_ ^= single_bit_mask_;
-      return *this;
-    }
-
-    constexpr reference &assign(bool val) noexcept
-    {
-      return *this = val;
-    }
-
-    friend constexpr void swap(reference lhs, reference rhs) noexcept
-    {
-      bool const tmp = static_cast<bool>(lhs);
-      lhs            = static_cast<bool>(rhs);
-      rhs            = tmp;
-    }
-
-    friend constexpr void swap(reference lhs, bool &rhs) noexcept
-    {
-      bool const tmp = static_cast<bool>(lhs);
-      lhs            = rhs;
-      rhs            = tmp;
-    }
-
-    friend constexpr void swap(bool &lhs, reference rhs) noexcept
-    {
-      bool const tmp = lhs;
-      lhs            = static_cast<bool>(rhs);
-      rhs            = tmp;
-    }
-
-  private:
-    constexpr reference(block_type *block, size_type bit_pos) noexcept
-        : block_ { block }
-        , single_bit_mask_ { static_cast<block_type>(block_type { 1 } << (bit_pos % bits_per_block)) }
-    {
-    }
-
-    block_type *block_;
-    block_type single_bit_mask_;
-  };
-
-  class iterator
-  {
-    friend class const_iterator;
-    friend inlined_bitset;
-
-  public:
-    using iterator_category = std::random_access_iterator_tag;
-    using iterator_concept  = std::random_access_iterator_tag;
-    using value_type        = bool;
-    using difference_type   = typename base::difference_type;
-    using pointer           = void;
-    using reference         = inlined_bitset::reference;
-
-    constexpr iterator() noexcept = default;
-
-    [[nodiscard]] constexpr reference operator*() const noexcept { return reference(blocks_ + pos_ / bits_per_block, pos_); }
-    [[nodiscard]] constexpr reference operator[] (difference_type n) const noexcept { return *(*this + n); }
-
-    constexpr iterator &operator++ () noexcept
-    {
-      ++pos_;
-      return *this;
-    }
-
-    constexpr iterator operator++ (int) noexcept
-    {
-      iterator tmp = *this;
-      ++pos_;
-      return tmp;
-    }
-
-    constexpr iterator &operator-- () noexcept
-    {
-      --pos_;
-      return *this;
-    }
-
-    constexpr iterator operator-- (int) noexcept
-    {
-      iterator tmp = *this;
-      --pos_;
-      return tmp;
-    }
-
-    constexpr iterator &operator+= (difference_type n) noexcept
-    {
-      pos_ = static_cast<size_type>(static_cast<difference_type>(pos_) + n);
-      return *this;
-    }
-
-    constexpr iterator &operator-= (difference_type n) noexcept { return *this += -n; }
-
-    [[nodiscard]] constexpr iterator operator+ (difference_type n) const noexcept
-    {
-      iterator tmp = *this;
-      tmp += n;
-      return tmp;
-    }
-
-    [[nodiscard]] constexpr iterator operator- (difference_type n) const noexcept
-    {
-      iterator tmp = *this;
-      tmp -= n;
-      return tmp;
-    }
-
-    [[nodiscard]] constexpr difference_type operator- (iterator const &other) const noexcept
-    {
-      return static_cast<difference_type>(pos_) - static_cast<difference_type>(other.pos_);
-    }
-
-    [[nodiscard]] friend constexpr iterator operator+ (difference_type n, iterator it) noexcept
-    {
-      it += n;
-      return it;
-    }
-
-    constexpr bool operator== (iterator const &) const noexcept  = default;
-    constexpr auto operator<=> (iterator const &) const noexcept = default;
-
-  private:
-    constexpr iterator(block_type *blocks, size_type pos) noexcept
-        : blocks_ { blocks }
-        , pos_ { pos }
-    {
-    }
-
-    block_type *blocks_ = nullptr;
-    size_type pos_      = size_type { 0 };
-  };
-
-  class const_iterator
-  {
-  public:
-    using iterator_category = std::random_access_iterator_tag;
-    using iterator_concept  = std::random_access_iterator_tag;
-    using value_type        = bool;
-    using difference_type   = typename base::difference_type;
-    using pointer           = void;
-    using reference         = bool;
-
-    constexpr const_iterator() noexcept = default;
-
-    constexpr const_iterator(iterator const &other) noexcept
-        : blocks_ { other.blocks_ }
-        , pos_ { other.pos_ }
-    {
-    }
-
-    [[nodiscard]] constexpr reference operator* () const noexcept
-    {
-      size_type const block_index = pos_ / bits_per_block;
-      size_type const bit_index   = pos_ % bits_per_block;
-      return static_cast<bool>((blocks_[block_index] >> bit_index) & block_type { 1 });
-    }
-
-    [[nodiscard]] constexpr reference operator[] (difference_type n) const noexcept { return *(*this + n); }
-
-    constexpr const_iterator &operator++ () noexcept
-    {
-      ++pos_;
-      return *this;
-    }
-
-    constexpr const_iterator operator++ (int) noexcept
-    {
-      const_iterator tmp = *this;
-      ++pos_;
-      return tmp;
-    }
-
-    constexpr const_iterator &operator-- () noexcept
-    {
-      --pos_;
-      return *this;
-    }
-
-    constexpr const_iterator operator-- (int) noexcept
-    {
-      const_iterator tmp = *this;
-      --pos_;
-      return tmp;
-    }
-
-    constexpr const_iterator &operator+= (difference_type n) noexcept
-    {
-      pos_ = static_cast<size_type>(static_cast<difference_type>(pos_) + n);
-      return *this;
-    }
-
-    constexpr const_iterator &operator-= (difference_type n) noexcept { return *this += -n; }
-
-    [[nodiscard]] constexpr const_iterator operator+ (difference_type n) const noexcept
-    {
-      const_iterator tmp = *this;
-      tmp += n;
-      return tmp;
-    }
-
-    [[nodiscard]] constexpr const_iterator operator- (difference_type n) const noexcept
-    {
-      const_iterator tmp = *this;
-      tmp -= n;
-      return tmp;
-    }
-
-    [[nodiscard]] constexpr difference_type operator- (const_iterator const &other) const noexcept
-    {
-      return static_cast<difference_type>(pos_) - static_cast<difference_type>(other.pos_);
-    }
-
-    [[nodiscard]] friend constexpr const_iterator operator+ (difference_type n, const_iterator it) noexcept
-    {
-      it += n;
-      return it;
-    }
-
-    constexpr bool operator== (const_iterator const &) const noexcept  = default;
-    constexpr auto operator<=> (const_iterator const &) const noexcept = default;
-
-  private:
-    friend inlined_bitset;
-
-    constexpr const_iterator(block_type const *blocks, size_type pos) noexcept
-        : blocks_ { blocks }
-        , pos_ { pos }
-    {
-    }
-
-    block_type const *blocks_ = nullptr;
-    size_type pos_            = size_type { 0 };
-  };
+  using iterator        = bitset_detail::block_iterator<block_type, false>;
+  using const_iterator  = bitset_detail::block_iterator<block_type, true>;
 
   using reverse_iterator       = std::reverse_iterator<iterator>;
   using const_reverse_iterator = std::reverse_iterator<const_iterator>;
@@ -467,6 +400,11 @@ private:
   {
     block_type *const blocks = data();
     return block_iterator(blocks == nullptr ? nullptr : blocks + block_pos);
+  }
+
+  static constexpr const_iterator make_const_iterator_(block_type const *blocks, size_type pos) noexcept
+  {
+    return const_iterator(blocks, pos);
   }
 
   static constexpr size_type blocks_for_bits_(size_type bit_count) noexcept
@@ -1562,54 +1500,25 @@ public:
     return reference(data() + pos / bits_per_block, pos);
   }
 
-  [[nodiscard]] constexpr bool operator[] (size_type pos) const noexcept
-  {
-    // Read via a shift: x86 masks the shift count implicitly, so tight loops
-    // avoid the separate mask materialization that `word & bit_mask_(pos)`
-    // forces (measured on MSVC x64).
-    size_type const block_index = pos / bits_per_block;
-    size_type const bit_index   = pos % bits_per_block;
-    return static_cast<bool>((data()[block_index] >> bit_index) & block_type { 1 });
-  }
+  [[nodiscard]] constexpr bool operator[] (size_type pos) const noexcept { return as_const_view()[pos]; }
 
   [[nodiscard]] constexpr reference at(size_type pos)
   {
     if (pos >= bit_size_) throw_out_of_range_();
     return reference(data() + pos / bits_per_block, pos);
   }
-
-  [[nodiscard]] constexpr bool at(size_type pos) const
-  {
-    if (pos >= bit_size_) [[unlikely]] throw_out_of_range_();
-    size_type const block_index = pos / bits_per_block;
-    size_type const bit_index   = pos % bits_per_block;
-    return static_cast<bool>((data()[block_index] >> bit_index) & block_type { 1 });
-  }
+  [[nodiscard]] constexpr bool at(size_type pos) const { return as_const_view().at(pos); }
 
   [[nodiscard]] constexpr reference front() noexcept { return reference(data(), size_type { 0 }); }
-  [[nodiscard]] constexpr bool front() const noexcept { return (data()[0] & block_type { 1 }) != 0; }
+  [[nodiscard]] constexpr bool front() const noexcept { return as_const_view().front(); }
 
   [[nodiscard]] constexpr reference back() noexcept
   {
     return reference(data() + (bit_size_ - 1) / bits_per_block, bit_size_ - 1);
   }
+  [[nodiscard]] constexpr bool back() const noexcept { return as_const_view().back(); }
 
-  [[nodiscard]] constexpr bool back() const noexcept
-  {
-    size_type const pos         = bit_size_ - 1;
-    size_type const block_index = pos / bits_per_block;
-    size_type const bit_index   = pos % bits_per_block;
-    return static_cast<bool>((data()[block_index] >> bit_index) & block_type { 1 });
-  }
-
-  [[nodiscard]] constexpr bool test(size_type pos) const
-  {
-    if (pos >= bit_size_) [[unlikely]] throw_out_of_range_();
-    size_type const block_index = pos / bits_per_block;
-    size_type const bit_index   = pos % bits_per_block;
-    return static_cast<bool>((data()[block_index] >> bit_index) & block_type { 1 });
-  }
-
+  [[nodiscard]] constexpr bool test(size_type pos) const { return as_const_view().test(pos); }
   [[nodiscard]] constexpr bool test_set(size_type pos, bool value = true)
   {
     if (pos >= bit_size_) throw_out_of_range_();
@@ -1624,10 +1533,10 @@ public:
     return old;
   }
 
-  [[nodiscard]] constexpr bool all() const noexcept { return all_blocks_(data(), bit_size_); }
-  [[nodiscard]] constexpr bool any() const noexcept { return any_blocks_(data(), block_count()); }
-  [[nodiscard]] constexpr bool none() const noexcept { return !any(); }
-  [[nodiscard]] constexpr size_type count() const noexcept { return count_blocks_(data(), bit_size_); }
+  [[nodiscard]] constexpr bool all() const noexcept { return as_const_view().all(); }
+  [[nodiscard]] constexpr bool any() const noexcept { return as_const_view().any(); }
+  [[nodiscard]] constexpr bool none() const noexcept { return as_const_view().none(); }
+  [[nodiscard]] constexpr size_type count() const noexcept { return as_const_view().count(); }
 
 private:
   enum class range_op { set_bits, clear_bits, flip_bits };
@@ -2200,266 +2109,24 @@ public:
   [[nodiscard]] constexpr auto to_string(CharT zero = CharT('0'), CharT one = CharT('1')) const
       -> std::basic_string<CharT, Traits, StrAlloc>
   {
-    size_type const len = bit_size_;
-    std::basic_string<CharT, Traits, StrAlloc> str(static_cast<typename std::basic_string<CharT, Traits, StrAlloc>::size_type>(len), zero);
-    block_type const *const blocks = data();
-    size_type const n              = block_count();
-    for (size_type i = 0; i < n; ++i) {
-      if (block_type const w = blocks[i]; w != block_type { 0 }) {
-        block_type mask = block_type { 1 };
-        size_type const limit = (i == n - 1) ? len - i * bits_per_block : bits_per_block;
-        for (size_type j = 0; j < limit; ++j) {
-          if ((w & mask) != block_type { 0 }) {
-            Traits::assign(str[len - (i * bits_per_block + j + 1)], one);
-          }
-          // No <<= on mask: it would warn on integral promotion for block
-          // types narrower than int.
-          mask = static_cast<block_type>(mask << 1);
-        }
-      }
-    }
-    return str;
+    return as_const_view().template to_string<CharT, Traits, StrAlloc>(zero, one);
   }
 
-  [[nodiscard]] constexpr unsigned long to_ulong() const
-  {
-    if (empty()) [[unlikely]] return 0;
-    constexpr size_type width = static_cast<size_type>(std::numeric_limits<unsigned long>::digits);
-    if (find_next(width - 1) != npos) [[unlikely]] throw_overflow_error_();
-    unsigned long result       = 0;
-    size_type const result_bits = (std::min)(width, bit_size_);
-    block_type const *const blocks = data();
-    // Casting each block truncates wider-than-ulong blocks; narrower blocks
-    // shift in exactly (no overshoot: widths are powers of two, and the last
-    // shift stays below the ulong width).
-    for (size_type i = 0; i <= (result_bits - 1) / bits_per_block; ++i) {
-      result |= static_cast<unsigned long>(blocks[i]) << (i * bits_per_block);
-    }
-    return result;
-  }
+  [[nodiscard]] constexpr unsigned long to_ulong() const { return as_const_view().to_ulong(); }
+  [[nodiscard]] constexpr unsigned long long to_ullong() const { return as_const_view().to_ullong(); }
 
-  [[nodiscard]] constexpr unsigned long long to_ullong() const
-  {
-    if (empty()) [[unlikely]] return 0;
-    constexpr size_type width = static_cast<size_type>(std::numeric_limits<unsigned long long>::digits);
-    if (find_next(width - 1) != npos) [[unlikely]] throw_overflow_error_();
-    unsigned long long result = 0;
-    size_type const result_bits = (std::min)(width, bit_size_);
-    block_type const *const blocks = data();
-    for (size_type i = 0; i <= (result_bits - 1) / bits_per_block; ++i) {
-      result |= static_cast<unsigned long long>(blocks[i]) << (i * bits_per_block);
-    }
-    return result;
-  }
+  [[nodiscard]] constexpr bool is_subset_of(inlined_bitset const &other) const { return as_const_view().is_subset_of(other.as_const_view()); }
+  [[nodiscard]] constexpr bool is_proper_subset_of(inlined_bitset const &other) const { return as_const_view().is_proper_subset_of(other.as_const_view()); }
+  [[nodiscard]] constexpr bool intersects(inlined_bitset const &other) const { return as_const_view().intersects(other.as_const_view()); }
 
-  [[nodiscard]] constexpr bool is_subset_of(inlined_bitset const &other) const
-  {
-    if (bit_size_ != other.bit_size_) [[unlikely]] throw_size_mismatch_();
-    block_type const *const blocks = data();
-    block_type const *const rhs    = other.data();
-    size_type const n              = block_count();
-    for (size_type i = 0; i < n; ++i) {
-      if ((blocks[i] & static_cast<block_type>(~rhs[i])) != block_type { 0 }) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  [[nodiscard]] constexpr bool is_proper_subset_of(inlined_bitset const &other) const
-  {
-    if (bit_size_ != other.bit_size_) [[unlikely]] throw_size_mismatch_();
-    block_type const *const blocks = data();
-    block_type const *const rhs    = other.data();
-    size_type const n              = block_count();
-
-    block_type missing {};
-    for (size_type i = 0; i < n; ++i) {
-      block_type const a = blocks[i];
-      block_type const b = rhs[i];
-      if ((a & static_cast<block_type>(~b)) != block_type { 0 }) return false;
-      missing |= static_cast<block_type>(~a) & b;
-    }
-    return missing != block_type { 0 };
-  }
-
-  [[nodiscard]] constexpr bool intersects(inlined_bitset const &other) const
-  {
-    if (bit_size_ != other.bit_size_) [[unlikely]] throw_size_mismatch_();
-    block_type const *const blocks = data();
-    block_type const *const rhs    = other.data();
-    size_type const n              = block_count();
-    for (size_type i = 0; i < n; ++i) {
-      if ((blocks[i] & rhs[i]) != block_type { 0 }) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  [[nodiscard]] constexpr size_type find_first() const noexcept
-  {
-    block_type const *const blocks = data();
-    size_type const n              = block_count();
-    for (size_type i = 0; i < n; ++i) {
-      if (block_type const w = blocks[i]; w != block_type { 0 }) {
-        return i * bits_per_block + static_cast<size_type>(std::countr_zero(w));
-      }
-    }
-    return npos;
-  }
-
-  [[nodiscard]] constexpr size_type find_next(size_type prev) const noexcept
-  {
-    // Strictly after prev; npos (or the last bit) has no successor — the
-    // prev + 1 increment below must never wrap around.
-    if (prev == npos) [[unlikely]] return npos;
-    size_type const from = prev + 1;
-    if (from >= bit_size_) [[unlikely]] return npos;
-    block_type const *const blocks = data();
-    size_type const first          = from / bits_per_block;
-    size_type const shift          = from % bits_per_block;
-    if (block_type const w = static_cast<block_type>(blocks[first] & static_cast<block_type>(static_cast<block_type>(~block_type { 0 }) << shift));
-        w != block_type { 0 }) {
-      return first * bits_per_block + static_cast<size_type>(std::countr_zero(w));
-    }
-    size_type const n = block_count();
-    for (size_type i = first + 1; i < n; ++i) {
-      if (block_type const w = blocks[i]; w != block_type { 0 }) {
-        return i * bits_per_block + static_cast<size_type>(std::countr_zero(w));
-      }
-    }
-    return npos;
-  }
-
-  [[nodiscard]] constexpr size_type find_last() const noexcept
-  {
-    block_type const *const blocks = data();
-    for (size_type n = block_count(); n-- > 0;) {
-      if (block_type const w = blocks[n]; w != block_type { 0 }) {
-        return n * bits_per_block + (bits_per_block - 1 - static_cast<size_type>(std::countl_zero(w)));
-      }
-    }
-    return npos;
-  }
-
-  [[nodiscard]] constexpr size_type find_prev(size_type next) const noexcept
-  {
-    // Strictly before next; clamp end-of-range (and npos) to size, so
-    // find_prev(size) — and find_prev(npos) — mean "last overall".
-    size_type const bound = next <= bit_size_ ? next : bit_size_;
-    if (bound == 0) [[unlikely]] return npos;
-    block_type const *const blocks = data();
-    size_type const last          = bound - 1;
-    size_type const bl            = last / bits_per_block;
-    size_type const keep          = last - bl * bits_per_block + 1;
-    block_type w                  = blocks[bl];
-    if (keep != bits_per_block) {
-      w = static_cast<block_type>(w & low_bits_mask_(keep));
-    }
-    if (w != block_type { 0 }) {
-      return bl * bits_per_block + (bits_per_block - 1 - static_cast<size_type>(std::countl_zero(w)));
-    }
-    for (size_type i = bl; i-- > 0;) {
-      if (block_type const u = blocks[i]; u != block_type { 0 }) {
-        return i * bits_per_block + (bits_per_block - 1 - static_cast<size_type>(std::countl_zero(u)));
-      }
-    }
-    return npos;
-  }
-
-  [[nodiscard]] constexpr size_type find_first_zero() const noexcept
-  {
-    // Only real bits qualify: the tail padding is zero but must never match.
-    block_type const *const blocks = data();
-    size_type const full           = bit_size_ / bits_per_block;
-    for (size_type i = 0; i < full; ++i) {
-      if (block_type const w = static_cast<block_type>(~blocks[i]); w != block_type { 0 }) {
-        return i * bits_per_block + static_cast<size_type>(std::countr_zero(w));
-      }
-    }
-    if (size_type const r = bit_size_ % bits_per_block; r != 0) {
-      // Mask before testing: ~tail has ones exactly in the padding.
-      if (block_type const w = static_cast<block_type>(~blocks[full] & low_bits_mask_(r)); w != block_type { 0 }) {
-        return full * bits_per_block + static_cast<size_type>(std::countr_zero(w));
-      }
-    }
-    return npos;
-  }
-
-  [[nodiscard]] constexpr size_type find_next_zero(size_type prev) const noexcept
-  {
-    if (prev == npos) [[unlikely]] return npos;
-    size_type const from = prev + 1;
-    if (from >= bit_size_) [[unlikely]] return npos;
-    block_type const *const blocks = data();
-    size_type const full           = bit_size_ / bits_per_block;
-    size_type const first          = from / bits_per_block;
-    size_type const shift          = from % bits_per_block;
-    {
-      block_type mask = static_cast<block_type>(static_cast<block_type>(~block_type { 0 }) << shift);
-      if (first >= full) {
-        // from lies in the partial tail word: also exclude its zero padding,
-        // which would otherwise false-positive as "zero".
-        mask = static_cast<block_type>(mask & low_bits_mask_(bit_size_ - full * bits_per_block));
-      }
-      if (block_type const w = static_cast<block_type>(~blocks[first] & mask); w != block_type { 0 }) {
-        return first * bits_per_block + static_cast<size_type>(std::countr_zero(w));
-      }
-    }
-    for (size_type i = first + 1; i < full; ++i) {
-      if (block_type const w = static_cast<block_type>(~blocks[i]); w != block_type { 0 }) {
-        return i * bits_per_block + static_cast<size_type>(std::countr_zero(w));
-      }
-    }
-    if (size_type const r = bit_size_ % bits_per_block; r != 0 && first < full) {
-      if (block_type const w = static_cast<block_type>(~blocks[full] & low_bits_mask_(r)); w != block_type { 0 }) {
-        return full * bits_per_block + static_cast<size_type>(std::countr_zero(w));
-      }
-    }
-    return npos;
-  }
-
-  [[nodiscard]] constexpr size_type find_last_zero() const noexcept
-  {
-    block_type const *const blocks = data();
-    size_type const full           = bit_size_ / bits_per_block;
-    // Highest real bits live in the partial tail; check it first.
-    if (size_type const r = bit_size_ % bits_per_block; r != 0) {
-      if (block_type const w = static_cast<block_type>(~blocks[full] & low_bits_mask_(r)); w != block_type { 0 }) {
-        return full * bits_per_block + (bits_per_block - 1 - static_cast<size_type>(std::countl_zero(w)));
-      }
-    }
-    for (size_type i = full; i-- > 0;) {
-      if (block_type const w = static_cast<block_type>(~blocks[i]); w != block_type { 0 }) {
-        return i * bits_per_block + (bits_per_block - 1 - static_cast<size_type>(std::countl_zero(w)));
-      }
-    }
-    return npos;
-  }
-
-  [[nodiscard]] constexpr size_type find_prev_zero(size_type next) const noexcept
-  {
-    size_type const bound = next <= bit_size_ ? next : bit_size_;
-    if (bound == 0) [[unlikely]] return npos;
-    block_type const *const blocks = data();
-    size_type const last          = bound - 1;
-    size_type const bl            = last / bits_per_block;
-    size_type const keep          = last - bl * bits_per_block + 1;
-    block_type w                  = static_cast<block_type>(~blocks[bl]);
-    if (keep != bits_per_block) {
-      w = static_cast<block_type>(w & low_bits_mask_(keep));
-    }
-    if (w != block_type { 0 }) {
-      return bl * bits_per_block + (bits_per_block - 1 - static_cast<size_type>(std::countl_zero(w)));
-    }
-    for (size_type i = bl; i-- > 0;) {
-      if (block_type const u = static_cast<block_type>(~blocks[i]); u != block_type { 0 }) {
-        return i * bits_per_block + (bits_per_block - 1 - static_cast<size_type>(std::countl_zero(u)));
-      }
-    }
-    return npos;
-  }
+  [[nodiscard]] constexpr size_type find_first() const noexcept { return as_const_view().find_first(); }
+  [[nodiscard]] constexpr size_type find_next(size_type prev) const noexcept { return as_const_view().find_next(prev); }
+  [[nodiscard]] constexpr size_type find_last() const noexcept { return as_const_view().find_last(); }
+  [[nodiscard]] constexpr size_type find_prev(size_type next) const noexcept { return as_const_view().find_prev(next); }
+  [[nodiscard]] constexpr size_type find_first_zero() const noexcept { return as_const_view().find_first_zero(); }
+  [[nodiscard]] constexpr size_type find_next_zero(size_type prev) const noexcept { return as_const_view().find_next_zero(prev); }
+  [[nodiscard]] constexpr size_type find_last_zero() const noexcept { return as_const_view().find_last_zero(); }
+  [[nodiscard]] constexpr size_type find_prev_zero(size_type next) const noexcept { return as_const_view().find_prev_zero(next); }
 
 public:
   [[nodiscard]] constexpr inlined_bitset operator~ () const
@@ -2602,6 +2269,355 @@ public:
     if (lhs.bit_size_ != rhs.bit_size_) return false;
     return lhs.storage_equal_(rhs);
   }
+
+public:
+  /// Non-owning read-only view over a packed block array: the single home of
+  /// every const query.
+  /// 
+  /// It stores only what a query needs (raw block pointer, block count, bit count),
+  /// so the owning container delegates its whole const surface here and freeze()
+  /// materialises one over consteval-baked static data.
+  class const_view
+  {
+  public:
+    using block_type      = typename inlined_bitset::block_type;
+    using value_type      = bool;
+    using size_type       = typename inlined_bitset::size_type;
+    using difference_type = typename inlined_bitset::difference_type;
+    using reference       = bool; // read-only view: no bit proxy
+    using const_reference = bool;
+    using pointer         = block_type const *;
+    using const_pointer   = block_type const *;
+
+    using const_iterator         = typename inlined_bitset::const_iterator;
+    using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+    using iterator               = const_iterator;
+    using reverse_iterator       = const_reverse_iterator;
+
+    using block_const_iterator         = block_type const *;
+    using block_const_reverse_iterator = std::reverse_iterator<block_const_iterator>;
+    using block_iterator               = block_const_iterator;
+    using block_reverse_iterator       = block_const_reverse_iterator;
+
+    static constexpr size_type bits_per_block = inlined_bitset::bits_per_block;
+    static constexpr size_type npos           = inlined_bitset::npos;
+
+    constexpr const_view() noexcept = default;
+
+    constexpr const_view(const_pointer data_arg, size_type size_arg, size_type bit_size) noexcept
+        : data_ { data_arg }
+        , size_ { size_arg }
+        , bit_size_ { bit_size }
+    {
+    }
+
+    constexpr const_view(std::span<block_type const> rospan, size_type bit_size) noexcept
+        : data_ { rospan.data() }
+        , size_ { rospan.size() }
+        , bit_size_ { bit_size }
+    {
+    }
+
+    [[nodiscard]] constexpr const_pointer data() const noexcept { return data_; }
+    [[nodiscard]] constexpr size_type block_count() const noexcept { return size_; }
+    [[nodiscard]] constexpr size_type size() const noexcept { return bit_size_; }
+    [[nodiscard]] constexpr bool empty() const noexcept { return bit_size_ == 0; }
+
+    // iterators (bit-level, const only)
+    [[nodiscard]] constexpr const_iterator begin() const noexcept { return inlined_bitset::make_const_iterator_(data_, size_type { 0 }); }
+    [[nodiscard]] constexpr const_iterator end() const noexcept { return inlined_bitset::make_const_iterator_(data_, bit_size_); }
+    [[nodiscard]] constexpr const_iterator cbegin() const noexcept { return begin(); }
+    [[nodiscard]] constexpr const_iterator cend() const noexcept { return end(); }
+    [[nodiscard]] constexpr const_reverse_iterator rbegin() const noexcept { return const_reverse_iterator(end()); }
+    [[nodiscard]] constexpr const_reverse_iterator rend() const noexcept { return const_reverse_iterator(begin()); }
+    [[nodiscard]] constexpr const_reverse_iterator crbegin() const noexcept { return rbegin(); }
+    [[nodiscard]] constexpr const_reverse_iterator crend() const noexcept { return rend(); }
+
+    // block-level access
+    [[nodiscard]] constexpr block_const_iterator block_begin() const noexcept { return data_; }
+    [[nodiscard]] constexpr block_const_iterator block_end() const noexcept { return data_ + size_; }
+    [[nodiscard]] constexpr block_const_iterator block_cbegin() const noexcept { return block_begin(); }
+    [[nodiscard]] constexpr block_const_iterator block_cend() const noexcept { return block_end(); }
+    [[nodiscard]] constexpr block_const_reverse_iterator block_rbegin() const noexcept { return block_const_reverse_iterator(block_end()); }
+    [[nodiscard]] constexpr block_const_reverse_iterator block_rend() const noexcept { return block_const_reverse_iterator(block_begin()); }
+    [[nodiscard]] constexpr block_const_reverse_iterator block_crbegin() const noexcept { return block_rbegin(); }
+    [[nodiscard]] constexpr block_const_reverse_iterator block_crend() const noexcept { return block_rend(); }
+
+    // element access
+    [[nodiscard]] constexpr bool operator[] (size_type pos) const noexcept
+    {
+      size_type const block_index = pos / bits_per_block;
+      size_type const bit_index   = pos % bits_per_block;
+      return static_cast<bool>((data_[block_index] >> bit_index) & block_type { 1 });
+    }
+
+    [[nodiscard]] constexpr bool at(size_type pos) const
+    {
+      if (pos >= bit_size_) [[unlikely]] throw_out_of_range_();
+      return (*this)[pos];
+    }
+
+    [[nodiscard]] constexpr bool front() const noexcept { return (data_[0] & block_type { 1 }) != 0; }
+    [[nodiscard]] constexpr bool back() const noexcept { return (*this)[bit_size_ - 1]; }
+
+    [[nodiscard]] constexpr bool test(size_type pos) const
+    {
+      if (pos >= bit_size_) [[unlikely]] throw_out_of_range_();
+      return (*this)[pos];
+    }
+
+    // observers
+    [[nodiscard]] constexpr bool all() const noexcept { return all_blocks_(data_, bit_size_); }
+    [[nodiscard]] constexpr bool any() const noexcept { return any_blocks_(data_, size_); }
+    [[nodiscard]] constexpr bool none() const noexcept { return !any(); }
+    [[nodiscard]] constexpr size_type count() const noexcept { return count_blocks_(data_, bit_size_); }
+
+    // find (bit index or npos)
+    [[nodiscard]] constexpr size_type find_first() const noexcept
+    {
+      for (size_type i = 0; i < size_; ++i) {
+        if (block_type const w = data_[i]; w != block_type { 0 }) {
+          return i * bits_per_block + static_cast<size_type>(std::countr_zero(w));
+        }
+      }
+      return npos;
+    }
+
+    [[nodiscard]] constexpr size_type find_next(size_type prev) const noexcept
+    {
+      if (prev == npos) [[unlikely]] return npos;
+      size_type const from = prev + 1;
+      if (from >= bit_size_) [[unlikely]] return npos;
+      size_type const first = from / bits_per_block;
+      size_type const shift = from % bits_per_block;
+      if (block_type const w = static_cast<block_type>(data_[first] & static_cast<block_type>(static_cast<block_type>(~block_type { 0 }) << shift));
+          w != block_type { 0 }) {
+        return first * bits_per_block + static_cast<size_type>(std::countr_zero(w));
+      }
+      for (size_type i = first + 1; i < size_; ++i) {
+        if (block_type const w = data_[i]; w != block_type { 0 }) {
+          return i * bits_per_block + static_cast<size_type>(std::countr_zero(w));
+        }
+      }
+      return npos;
+    }
+
+    [[nodiscard]] constexpr size_type find_last() const noexcept
+    {
+      for (size_type n = size_; n-- > 0;) {
+        if (block_type const w = data_[n]; w != block_type { 0 }) {
+          return n * bits_per_block + (bits_per_block - 1 - static_cast<size_type>(std::countl_zero(w)));
+        }
+      }
+      return npos;
+    }
+
+    [[nodiscard]] constexpr size_type find_prev(size_type next) const noexcept
+    {
+      size_type const bound = next <= bit_size_ ? next : bit_size_;
+      if (bound == 0) [[unlikely]] return npos;
+      size_type const last = bound - 1;
+      size_type const bl   = last / bits_per_block;
+      size_type const keep = last - bl * bits_per_block + 1;
+      block_type w         = data_[bl];
+      if (keep != bits_per_block) {
+        w = static_cast<block_type>(w & low_bits_mask_(keep));
+      }
+      if (w != block_type { 0 }) {
+        return bl * bits_per_block + (bits_per_block - 1 - static_cast<size_type>(std::countl_zero(w)));
+      }
+      for (size_type i = bl; i-- > 0;) {
+        if (block_type const u = data_[i]; u != block_type { 0 }) {
+          return i * bits_per_block + (bits_per_block - 1 - static_cast<size_type>(std::countl_zero(u)));
+        }
+      }
+      return npos;
+    }
+
+    [[nodiscard]] constexpr size_type find_first_zero() const noexcept
+    {
+      size_type const full = bit_size_ / bits_per_block;
+      for (size_type i = 0; i < full; ++i) {
+        if (block_type const w = static_cast<block_type>(~data_[i]); w != block_type { 0 }) {
+          return i * bits_per_block + static_cast<size_type>(std::countr_zero(w));
+        }
+      }
+      if (size_type const r = bit_size_ % bits_per_block; r != 0) {
+        if (block_type const w = static_cast<block_type>(~data_[full] & low_bits_mask_(r)); w != block_type { 0 }) {
+          return full * bits_per_block + static_cast<size_type>(std::countr_zero(w));
+        }
+      }
+      return npos;
+    }
+
+    [[nodiscard]] constexpr size_type find_next_zero(size_type prev) const noexcept
+    {
+      if (prev == npos) [[unlikely]] return npos;
+      size_type const from = prev + 1;
+      if (from >= bit_size_) [[unlikely]] return npos;
+      size_type const full  = bit_size_ / bits_per_block;
+      size_type const first = from / bits_per_block;
+      size_type const shift = from % bits_per_block;
+      {
+        block_type mask = static_cast<block_type>(static_cast<block_type>(~block_type { 0 }) << shift);
+        if (first >= full) {
+          mask = static_cast<block_type>(mask & low_bits_mask_(bit_size_ - full * bits_per_block));
+        }
+        if (block_type const w = static_cast<block_type>(~data_[first] & mask); w != block_type { 0 }) {
+          return first * bits_per_block + static_cast<size_type>(std::countr_zero(w));
+        }
+      }
+      for (size_type i = first + 1; i < full; ++i) {
+        if (block_type const w = static_cast<block_type>(~data_[i]); w != block_type { 0 }) {
+          return i * bits_per_block + static_cast<size_type>(std::countr_zero(w));
+        }
+      }
+      if (size_type const r = bit_size_ % bits_per_block; r != 0 && first < full) {
+        if (block_type const w = static_cast<block_type>(~data_[full] & low_bits_mask_(r)); w != block_type { 0 }) {
+          return full * bits_per_block + static_cast<size_type>(std::countr_zero(w));
+        }
+      }
+      return npos;
+    }
+
+    [[nodiscard]] constexpr size_type find_last_zero() const noexcept
+    {
+      size_type const full = bit_size_ / bits_per_block;
+      if (size_type const r = bit_size_ % bits_per_block; r != 0) {
+        if (block_type const w = static_cast<block_type>(~data_[full] & low_bits_mask_(r)); w != block_type { 0 }) {
+          return full * bits_per_block + (bits_per_block - 1 - static_cast<size_type>(std::countl_zero(w)));
+        }
+      }
+      for (size_type i = full; i-- > 0;) {
+        if (block_type const w = static_cast<block_type>(~data_[i]); w != block_type { 0 }) {
+          return i * bits_per_block + (bits_per_block - 1 - static_cast<size_type>(std::countl_zero(w)));
+        }
+      }
+      return npos;
+    }
+
+    [[nodiscard]] constexpr size_type find_prev_zero(size_type next) const noexcept
+    {
+      size_type const bound = next <= bit_size_ ? next : bit_size_;
+      if (bound == 0) [[unlikely]] return npos;
+      size_type const last = bound - 1;
+      size_type const bl   = last / bits_per_block;
+      size_type const keep = last - bl * bits_per_block + 1;
+      block_type w         = static_cast<block_type>(~data_[bl]);
+      if (keep != bits_per_block) {
+        w = static_cast<block_type>(w & low_bits_mask_(keep));
+      }
+      if (w != block_type { 0 }) {
+        return bl * bits_per_block + (bits_per_block - 1 - static_cast<size_type>(std::countl_zero(w)));
+      }
+      for (size_type i = bl; i-- > 0;) {
+        if (block_type const u = static_cast<block_type>(~data_[i]); u != block_type { 0 }) {
+          return i * bits_per_block + (bits_per_block - 1 - static_cast<size_type>(std::countl_zero(u)));
+        }
+      }
+      return npos;
+    }
+
+    // conversions
+    template <class CharT = char, class Traits = std::char_traits<CharT>, class StrAlloc = std::allocator<CharT>>
+    [[nodiscard]] constexpr std::basic_string<CharT, Traits, StrAlloc> to_string(CharT zero = CharT('0'), CharT one = CharT('1')) const
+    {
+      size_type const len = bit_size_;
+      std::basic_string<CharT, Traits, StrAlloc> str(static_cast<typename std::basic_string<CharT, Traits, StrAlloc>::size_type>(len), zero);
+      for (size_type i = 0; i < size_; ++i) {
+        if (block_type const w = data_[i]; w != block_type { 0 }) {
+          block_type mask       = block_type { 1 };
+          size_type const limit = (i == size_ - 1) ? len - i * bits_per_block : bits_per_block;
+          for (size_type j = 0; j < limit; ++j) {
+            if ((w & mask) != block_type { 0 }) {
+              Traits::assign(str[len - (i * bits_per_block + j + 1)], one);
+            }
+            mask = static_cast<block_type>(mask << 1);
+          }
+        }
+      }
+      return str;
+    }
+
+    [[nodiscard]] constexpr unsigned long to_ulong() const
+    {
+      if (empty()) [[unlikely]] return 0;
+      constexpr size_type width = static_cast<size_type>(std::numeric_limits<unsigned long>::digits);
+      if (find_next(width - 1) != npos) [[unlikely]] throw_overflow_error_();
+      unsigned long result        = 0;
+      size_type const result_bits = (std::min)(width, bit_size_);
+      for (size_type i = 0; i <= (result_bits - 1) / bits_per_block; ++i) {
+        result |= static_cast<unsigned long>(data_[i]) << (i * bits_per_block);
+      }
+      return result;
+    }
+
+    [[nodiscard]] constexpr unsigned long long to_ullong() const
+    {
+      if (empty()) [[unlikely]] return 0;
+      constexpr size_type width = static_cast<size_type>(std::numeric_limits<unsigned long long>::digits);
+      if (find_next(width - 1) != npos) [[unlikely]] throw_overflow_error_();
+      unsigned long long result   = 0;
+      size_type const result_bits = (std::min)(width, bit_size_);
+      for (size_type i = 0; i <= (result_bits - 1) / bits_per_block; ++i) {
+        result |= static_cast<unsigned long long>(data_[i]) << (i * bits_per_block);
+      }
+      return result;
+    }
+
+    // relational
+    [[nodiscard]] constexpr bool is_subset_of(const_view const &other) const
+    {
+      if (bit_size_ != other.bit_size_) [[unlikely]] throw_size_mismatch_();
+      for (size_type i = 0; i < size_; ++i) {
+        if ((data_[i] & static_cast<block_type>(~other.data_[i])) != block_type { 0 }) return false;
+      }
+      return true;
+    }
+
+    [[nodiscard]] constexpr bool is_proper_subset_of(const_view const &other) const
+    {
+      if (bit_size_ != other.bit_size_) [[unlikely]] throw_size_mismatch_();
+      block_type missing {};
+      for (size_type i = 0; i < size_; ++i) {
+        block_type const a = data_[i];
+        block_type const b = other.data_[i];
+        if ((a & static_cast<block_type>(~b)) != block_type { 0 }) return false;
+        missing |= static_cast<block_type>(~a) & b;
+      }
+      return missing != block_type { 0 };
+    }
+
+    [[nodiscard]] constexpr bool intersects(const_view const &other) const
+    {
+      if (bit_size_ != other.bit_size_) [[unlikely]] throw_size_mismatch_();
+      for (size_type i = 0; i < size_; ++i) {
+        if ((data_[i] & other.data_[i]) != block_type { 0 }) return true;
+      }
+      return false;
+    }
+
+  private:
+    const_pointer data_ = nullptr;
+    size_type size_     = 0;
+    size_type bit_size_ = 0;
+  };
+
+  [[nodiscard]] constexpr const_view as_const_view() const noexcept
+  {
+    return const_view { data(), block_count(), bit_size_ };
+  }
+
+#if defined(__cpp_lib_define_static)
+  /// Bake the blocks into static storage and return a read-only view over them.
+  [[nodiscard]] static consteval const_view freeze(inlined_bitset const &src)
+  {
+    static_assert(std::is_structural_v<block_type>,
+                  "inlined_bitset freeze(): block_type must be a structural type (P3491 std::define_static_array)");
+    auto const baked = std::define_static_array(std::span<block_type const>(src.data(), src.data() + src.block_count()));
+    return const_view { baked, src.size() };
+  }
+#endif
 
 private:
   [[noreturn]] static void throw_overflow_error_()

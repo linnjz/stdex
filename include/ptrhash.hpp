@@ -37,7 +37,11 @@
                             // std::is_trivially_default_constructible_v,
                             // std::is_trivially_destructible_v, std::is_nothrow_invocable_v
 #include <utility>          // std::move, std::pair, std::declval
-#include <version>          // __cpp_lib_containers_ranges
+#include <version>          // __cpp_lib_containers_ranges, __cpp_lib_define_static
+
+#if defined(__cpp_lib_define_static)
+#  include <meta>           // std::define_static_array
+#endif
 
 #include "hash.hpp"
 #include "inlined_bitset.hpp"
@@ -218,6 +222,30 @@ constexpr void store_uint(std::uint8_t *const bytes, UInt const value) noexcept
   for (std::size_t i = 0; i < sizeof(UInt); ++i) bytes[i] = raw[i];
 }
 
+/// Non-owning description of a built index blob: `[pilots | remap(u32) | fingerprint(uN)]`.
+struct ptr_hash_layout
+{
+  std::uint8_t const *bytes      = nullptr;
+  std::size_t remap_offset       = 0;
+  std::size_t fingerprint_offset = 0;
+};
+
+[[nodiscard]] constexpr std::uint8_t layout_pilot(ptr_hash_layout const layout, std::uint32_t const bucket) noexcept
+{
+  return layout.bytes[bucket];
+}
+
+[[nodiscard]] constexpr std::uint32_t layout_remap(ptr_hash_layout const layout, std::uint32_t const index) noexcept
+{
+  return load_u32(layout.bytes + layout.remap_offset + 4ULL * index);
+}
+
+template <class UInt>
+[[nodiscard]] constexpr UInt layout_fingerprint(ptr_hash_layout const layout, std::uint32_t const index) noexcept
+{
+  return load_uint<UInt>(layout.bytes + layout.fingerprint_offset + static_cast<std::size_t>(index) * sizeof(UInt));
+}
+
 template <std::uint32_t Bytes>
 struct fingerprint_uint
 {
@@ -337,6 +365,12 @@ public:
 
   [[nodiscard]] constexpr allocator_type get_allocator() const noexcept { return bytes_.get_allocator(); }
 
+  /// Non-owning description of the blob, so a view can read it without ownership.
+  [[nodiscard]] constexpr std::uint8_t const * data() const noexcept { return bytes_.data(); }
+  [[nodiscard]] constexpr std::size_t size() const noexcept { return bytes_.size(); }
+  [[nodiscard]] constexpr std::size_t remap_offset() const noexcept { return remap_offset_; }
+  [[nodiscard]] constexpr std::size_t fingerprint_offset() const noexcept { return fingerprint_offset_; }
+
 private:
   /// Fancy-pointer-aware owning byte buffer. The blob is sized once per build and
   /// never grows afterwards, so a plain allocator-backed array (not std::vector)
@@ -401,6 +435,11 @@ public:
   {
     store_uint<UInt>(bytes_.data() + fingerprint_offset_ + static_cast<std::size_t>(index) * sizeof(UInt), value);
   }
+
+  [[nodiscard]] constexpr std::uint8_t const * data() const noexcept { return bytes_.data(); }
+  [[nodiscard]] constexpr std::size_t size() const noexcept { return bytes_.size(); }
+  [[nodiscard]] constexpr std::size_t remap_offset() const noexcept { return remap_offset_; }
+  [[nodiscard]] constexpr std::size_t fingerprint_offset() const noexcept { return fingerprint_offset_; }
 
 private:
   static constexpr std::size_t remap_offset_       = align_up(MaxBucketCount, 4);
@@ -1086,7 +1125,16 @@ private:
     if constexpr (has_fingerprint) {
       for (std::uint32_t i = 0; i < key_count_; ++i) {
         std::uint64_t const hash = hashes[i];
-        index_table_.template set_fingerprint<fingerprint_type>(static_cast<std::uint32_t>(index_from_hash_unfiltered_(hash)), fingerprint_of_(hash));
+        size_type const raw_index = index_from_hash_unfiltered_(
+            ptr_hash_detail::ptr_hash_layout { index_table_.data(), index_table_.remap_offset(), index_table_.fingerprint_offset() },
+            key_count_,
+            slot_count_,
+            bucket_count_,
+            slot_scramble_multiplier_,
+            hash_seed_,
+            hash);
+
+        index_table_.template set_fingerprint<fingerprint_type>(static_cast<std::uint32_t>(raw_index), fingerprint_of_(hash));
       }
     } else {
       (void) hashes;
@@ -1130,11 +1178,11 @@ private:
   {
     std::array<slot_index_type, BucketSize> slots;
     for (decltype(options_value.pilot_search_limit) pilot = 0; pilot < options_value.pilot_search_limit; ++pilot) {
-      std::uint64_t const pilot_hash = pilot_hash_value_(static_cast<pilot_value_type>(pilot));
+      std::uint64_t const pilot_hash = pilot_hash_value_(hash_seed_, static_cast<pilot_value_type>(pilot));
 
       bool is_fits = true;
       for (std::uint32_t i = 0; i < BucketSize; ++i) {
-        slots[i] = slot_index_(bucket_hashes[i], pilot_hash);
+        slots[i] = slot_index_(slot_count_, slot_scramble_multiplier_,  bucket_hashes[i], pilot_hash);
         is_fits  = is_fits && !context.occupied_slots[slots[i]];
       }
       if (!is_fits) [[likely]] continue;
@@ -1178,11 +1226,11 @@ private:
     std::uint32_t const bucket_size = static_cast<std::uint32_t>(bucket_hashes.size());
     assert(context.slot_scratch.size() >= bucket_size);
     for (decltype(options_value.pilot_search_limit) pilot = 0; pilot < options_value.pilot_search_limit; ++pilot) {
-      std::uint64_t const pilot_hash = pilot_hash_value_(static_cast<pilot_value_type>(pilot));
+      std::uint64_t const pilot_hash = pilot_hash_value_(hash_seed_, static_cast<pilot_value_type>(pilot));
 
       bool is_fits = true;
       for (std::uint32_t i = 0; i < bucket_size; ++i) {
-        context.slot_scratch[i] = slot_index_(bucket_hashes[i], pilot_hash);
+        context.slot_scratch[i] = slot_index_(slot_count_, slot_scramble_multiplier_,  bucket_hashes[i], pilot_hash);
         if (context.occupied_slots[context.slot_scratch[i]]) [[unlikely]] {
           is_fits = false;
           break;
@@ -1231,12 +1279,12 @@ private:
 
     for (decltype(options_value.pilot_search_limit) delta = 0; delta < options_value.pilot_search_limit; ++delta) {
       std::uint32_t const pilot      = (first_pilot + delta) & (options_value.pilot_search_limit - 1u);
-      std::uint64_t const pilot_hash = pilot_hash_value_(static_cast<pilot_value_type>(pilot));
+      std::uint64_t const pilot_hash = pilot_hash_value_(hash_seed_, static_cast<pilot_value_type>(pilot));
 
       std::uint64_t collision_score { 0 };
       bool rejected { false };
       for (std::uint32_t i = 0; i < bucket_size; ++i) {
-        slot_index_type const slot = slot_index_(bucket_hashes[i], pilot_hash);
+        slot_index_type const slot = slot_index_(slot_count_, slot_scramble_multiplier_,  bucket_hashes[i], pilot_hash);
         context.slot_scratch[i]    = slot;
 
         if (!context.occupied_slots[slot]) [[likely]] continue;
@@ -1275,10 +1323,10 @@ private:
     if (best_collision_score == (std::numeric_limits<std::uint64_t>::max)()) [[unlikely]] return false;
 
     index_table_.set_pilot(bucket, static_cast<pilot_value_type>(best_pilot));
-    std::uint64_t const pilot_hash = pilot_hash_value_(static_cast<pilot_value_type>(best_pilot));
+    std::uint64_t const pilot_hash = pilot_hash_value_(hash_seed_, static_cast<pilot_value_type>(best_pilot));
 
     for (std::uint64_t const hash : bucket_hashes) {
-      slot_index_type const slot = slot_index_(hash, pilot_hash);
+      slot_index_type const slot = slot_index_(slot_count_, slot_scramble_multiplier_,  hash, pilot_hash);
       if (context.occupied_slots[slot]) [[likely]] {
         bucket_index_type const owner = context.slot_owners[slot];
         ++context.eviction_count;
@@ -1286,9 +1334,9 @@ private:
         std::push_heap(context.eviction_heap.begin(), context.eviction_heap.end());
 
         std::span<std::uint64_t const> const owner_hashes = context.bucket_hashes(owner);
-        std::uint64_t const owner_pilot_hash              = pilot_hash_value_(index_table_.pilot(owner));
+        std::uint64_t const owner_pilot_hash              = pilot_hash_value_(hash_seed_, index_table_.pilot(owner));
         for (std::uint64_t const owner_hash : owner_hashes) {
-          slot_index_type const owner_slot   = slot_index_(owner_hash, owner_pilot_hash);
+          slot_index_type const owner_slot   = slot_index_(slot_count_, slot_scramble_multiplier_,  owner_hash, owner_pilot_hash);
           context.occupied_slots[owner_slot] = false;
           context.slot_owners[owner_slot]    = vacant_slot;
         }
@@ -1310,7 +1358,7 @@ private:
     // starting offset of every bucket with one prefix-sum pass.
     bucket_offsets_type bucket_offsets = make_bucket_offsets_(bucket_count_ + 1U);
     for (std::uint32_t i = 0; i < key_count_; ++i) {
-      ++bucket_offsets[static_cast<offset_type>(bucket_index_(hashes[i]) + 1U)];
+      ++bucket_offsets[static_cast<offset_type>(bucket_index_(bucket_count_, hashes[i]) + 1U)];
     }
     for (std::uint32_t bucket = 1; bucket <= bucket_count_; ++bucket) {
       bucket_offsets[bucket] = static_cast<offset_type>(bucket_offsets[bucket] + bucket_offsets[bucket - 1U]);
@@ -1506,10 +1554,10 @@ public:
 
   [[nodiscard]] constexpr bool empty() const noexcept { return key_count_ == 0; }
   [[nodiscard]] constexpr size_type size() const noexcept { return key_count_; }
-  [[nodiscard]] constexpr size_type capacity() const noexcept { return slot_count_; }
+  [[nodiscard]] constexpr size_type slot_count() const noexcept { return slot_count_; }
   [[nodiscard]] constexpr size_type bucket_count() const noexcept { return bucket_count_; }
   [[nodiscard]] constexpr std::uint64_t hash_seed() const noexcept { return hash_seed_; }
-  [[nodiscard]] constexpr hasher hash_function() const noexcept { return hasher_; }
+  [[nodiscard]] constexpr hasher hash_function() const noexcept(std::is_nothrow_copy_constructible_v<hasher>) { return hasher_; }
   [[nodiscard]] constexpr allocator_type get_allocator() const noexcept(std::is_nothrow_copy_constructible_v<allocator_type>)
   requires (storage_policy == ptr_hash_storage_policy::heap)
   {
@@ -1523,7 +1571,7 @@ private:
       std::invocable<hasher const &, K const &, std::uint64_t>;
 
   template <class K>
-  [[nodiscard]] constexpr std::uint64_t hash_value_impl_(K const &key) const
+  [[nodiscard]] static constexpr std::uint64_t hash_value_impl_(K const &key, std::uint64_t const seed, hasher const &h)
       noexcept(hash_value_uses_seeded_call_v<K> ? std::is_nothrow_invocable_v<hasher const &, K const &, std::uint64_t> : std::is_nothrow_invocable_v<hasher const &, K const &>)
   {
     // hash<T> intentionally omits its final avalanche multiply; the default
@@ -1540,26 +1588,35 @@ private:
 #  pragma GCC diagnostic push
 #  pragma GCC diagnostic ignored "-Wsign-conversion"
 #endif
-      return static_cast<std::uint64_t>(hasher_(key, static_cast<std::uint64_t>(hash_seed_))) * kPhiMixMultConstant;
+      return static_cast<std::uint64_t>(h(key, static_cast<std::uint64_t>(seed))) * kPhiMixMultConstant;
 #if defined(__clang__)
 #  pragma clang diagnostic pop
 #elif defined(__GNUC__)
 #  pragma GCC diagnostic pop
 #endif
     } else {
-      return static_cast<std::uint64_t>(hasher_(key)) ^ hash_seed_;
+      return static_cast<std::uint64_t>(h(key)) ^ seed;
     }
   }
 
   /// Final index of @p hash without any fingerprint filtering. Used during the build
   /// (reordering values, filling fingerprints) where the fingerprint table is not yet
   /// valid. For a member key it is always the correct index.
-  [[nodiscard]] constexpr size_type index_from_hash_unfiltered_(std::uint64_t const hash) const noexcept
+  [[nodiscard]] static constexpr size_type index_from_hash_unfiltered_(
+          ptr_hash_detail::ptr_hash_layout const layout,
+          std::uint32_t const key_count,
+          std::uint32_t const slot_count,
+          std::uint32_t const bucket_count,
+          std::uint64_t const scramble,
+          std::uint64_t const seed,
+          std::uint64_t const hash) noexcept
   {
-    pilot_value_type const pilot_value = index_table_.pilot(bucket_index_(hash));
-    slot_index_type const slot_index   = slot_index_(hash, pilot_hash_value_(pilot_value));
+    pilot_value_type const pilot_value = ptr_hash_detail::layout_pilot(layout, static_cast<std::uint32_t>(bucket_index_(bucket_count, hash)));
+    slot_index_type const slot_index   = slot_index_(slot_count, scramble, hash, pilot_hash_value_(seed, pilot_value));
     if constexpr (options_value.hash_scheme == ptr_hash_scheme::minimal_perfect) {
-      return static_cast<size_type>(slot_index < key_count_ ? slot_index : index_table_.remap(slot_index - key_count_));
+      return static_cast<size_type>(
+          slot_index < key_count ? slot_index
+                                 : ptr_hash_detail::layout_remap(layout, static_cast<std::uint32_t>(slot_index - key_count)));
     } else {
       return static_cast<size_type>(slot_index);
     }
@@ -1571,7 +1628,7 @@ public:
                    ? std::is_nothrow_invocable_v<hasher const &, key_type const &, std::uint64_t>
                    : std::is_nothrow_invocable_v<hasher const &, key_type const &>)
   {
-    return hash_value_impl_(key);
+    return hash_value_impl_(key, hash_seed_, hasher_);
   }
 
   template <class K>
@@ -1581,13 +1638,21 @@ public:
                    ? std::is_nothrow_invocable_v<hasher const &, K const &, std::uint64_t>
                    : std::is_nothrow_invocable_v<hasher const &, K const &>)
   {
-    return hash_value_impl_(key);
+    return hash_value_impl_(key, hash_seed_, hasher_);
   }
   
   [[nodiscard]] constexpr size_type index_from_hash_unchecked(std::uint64_t const hash) const noexcept
   {
     assert(!empty() && "stdex::ptr_hash::index_from_hash called on an empty table");
-    size_type const raw_index = index_from_hash_unfiltered_(hash);
+
+    size_type const raw_index = index_from_hash_unfiltered_(
+        ptr_hash_detail::ptr_hash_layout { index_table_.data(), index_table_.remap_offset(), index_table_.fingerprint_offset() },
+        key_count_,
+        slot_count_,
+        bucket_count_,
+        slot_scramble_multiplier_,
+        hash_seed_,
+        hash);
     if constexpr (has_fingerprint) {
       if (index_table_.template fingerprint<fingerprint_type>(static_cast<std::uint32_t>(raw_index)) != fingerprint_of_(hash)) {
         return npos;
@@ -1602,26 +1667,26 @@ public:
     return index_from_hash_unchecked(hash);
   }
 
-  [[nodiscard]] constexpr size_type index_unchecked(key_type const &key) const
+  [[nodiscard]] constexpr size_type index_unchecked(key_type const &key) const noexcept(noexcept(hash_value(key)))
   {
     return index_from_hash_unchecked(hash_value(key));
   }
 
   template <class K>
   requires (!std::same_as<std::remove_cvref_t<K>, key_type>) && ptr_hash_detail::key_hasher<hasher, K>
-  [[nodiscard]] constexpr size_type index_unchecked(K const &key) const
+  [[nodiscard]] constexpr size_type index_unchecked(K const &key) const noexcept(noexcept(hash_value(key)))
   {
     return index_from_hash_unchecked(hash_value(key));
   }
 
-  [[nodiscard]] constexpr size_type index(key_type const &key) const
+  [[nodiscard]] constexpr size_type index(key_type const &key) const noexcept(noexcept(hash_value(key)))
   {
     return index_from_hash(hash_value(key));
   }
 
   template <class K>
   requires (!std::same_as<std::remove_cvref_t<K>, key_type>) && ptr_hash_detail::key_hasher<hasher, K>
-  [[nodiscard]] constexpr size_type index(K const &key) const
+  [[nodiscard]] constexpr size_type index(K const &key) const noexcept(noexcept(hash_value(key)))
   {
     return index_from_hash(hash_value(key));
   }
@@ -1639,16 +1704,16 @@ private:
   /// slot_count).hi()` is always `< slot_count`, so the result is always a valid
   /// index, and the placement logic re-verifies slot distinctness - a true
   /// remainder is neither required nor relied upon.
-  [[nodiscard]] constexpr slot_index_type slot_index_(std::uint64_t const hash, std::uint64_t const pilot_hash) const noexcept
+  [[nodiscard]] static constexpr slot_index_type slot_index_(std::uint32_t const slot_count, std::uint64_t const scramble, std::uint64_t const hash, std::uint64_t const pilot_hash) noexcept
   {
-    assert(slot_count_ != 0);
-    std::uint64_t const low_bits = static_cast<std::uint64_t>(slot_scramble_multiplier_) * (hash ^ pilot_hash);
-    return static_cast<slot_index_type>(umul128(low_bits, slot_count_).hi());
+    assert(slot_count != 0);
+    std::uint64_t const low_bits = static_cast<std::uint64_t>(scramble) * (hash ^ pilot_hash);
+    return static_cast<slot_index_type>(umul128(low_bits, slot_count).hi());
   }
 
-  [[nodiscard]] constexpr bucket_index_type bucket_index_(std::uint64_t const hash) const noexcept
+  [[nodiscard]] static constexpr bucket_index_type bucket_index_(std::uint32_t const bucket_count, std::uint64_t const hash) noexcept
   {
-    return static_cast<bucket_index_type>(umul128(bucket_count_, transform_bucket_hash_(hash)).hi());
+    return static_cast<bucket_index_type>(umul128(bucket_count, transform_bucket_hash_(hash)).hi());
   }
 
   template <class Offsets>
@@ -1657,12 +1722,12 @@ private:
     return bucket_offsets[bucket + 1] - bucket_offsets[bucket];
   }
 
-  [[nodiscard]] constexpr std::uint64_t pilot_hash_value_(pilot_value_type const pilot) const noexcept
+  [[nodiscard]] static constexpr std::uint64_t pilot_hash_value_(std::uint64_t const seed, pilot_value_type const pilot) noexcept
   {
-    return kPiMixMultConstant * (static_cast<std::uint64_t>(pilot) ^ hash_seed_);
+    return kPiMixMultConstant * (static_cast<std::uint64_t>(pilot) ^ seed);
   }
 
-  [[nodiscard]] constexpr std::uint64_t transform_bucket_hash_(std::uint64_t const hash) const noexcept
+  [[nodiscard]] static constexpr std::uint64_t transform_bucket_hash_(std::uint64_t const hash) noexcept
   {
     static_assert(options_value.bucket_distribution == ptr_hash_bucket_distribution::linear ||
                   options_value.bucket_distribution == ptr_hash_bucket_distribution::cubic_eps);
@@ -1705,5 +1770,142 @@ private:
   std::uint64_t slot_scramble_multiplier_ {};
   std::uint64_t hash_seed_ {};
   [[no_unique_address]] hasher hasher_ {};
+
+public:
+  /// Non-owning read-only descriptor over a built index blob.
+  class const_view
+  {
+  public:
+    using key_type        = typename ptr_hash::key_type;
+    using hasher          = typename ptr_hash::hasher;
+    using size_type       = typename ptr_hash::size_type;
+    using difference_type = typename ptr_hash::difference_type;
+
+    static constexpr size_type npos = ptr_hash::npos;
+
+    const_view() = delete;
+
+    [[nodiscard]] constexpr bool empty() const noexcept { return key_count_ == 0; }
+    [[nodiscard]] constexpr size_type size() const noexcept { return key_count_; }
+    [[nodiscard]] constexpr size_type slot_count() const noexcept { return slot_count_; }
+    [[nodiscard]] constexpr size_type bucket_count() const noexcept { return bucket_count_; }
+    [[nodiscard]] constexpr std::uint64_t hash_seed() const noexcept { return hash_seed_; }
+    [[nodiscard]] constexpr hasher hash_function() const noexcept(std::is_nothrow_copy_constructible_v<hasher>) { return hasher_; }
+
+    [[nodiscard]] constexpr std::uint64_t hash_value(key_type const &key) const
+        noexcept(hash_value_uses_seeded_call_v<key_type>
+                    ? std::is_nothrow_invocable_v<hasher const &, key_type const &, std::uint64_t>
+                    : std::is_nothrow_invocable_v<hasher const &, key_type const &>)
+    {
+      return hash_value_impl_(key, hash_seed_, hasher_);
+    }
+
+    template <class K>
+    requires (!std::same_as<std::remove_cvref_t<K>, key_type>) && ptr_hash_detail::key_hasher<hasher, K>
+    [[nodiscard]] constexpr std::uint64_t hash_value(K const &key) const
+        noexcept(hash_value_uses_seeded_call_v<K>
+                     ? std::is_nothrow_invocable_v<hasher const &, K const &, std::uint64_t>
+                     : std::is_nothrow_invocable_v<hasher const &, K const &>)
+    {
+      return hash_value_impl_(key, hash_seed_, hasher_);
+    }
+
+    [[nodiscard]] constexpr size_type index_from_hash_unchecked(std::uint64_t const hash) const noexcept
+    {
+      size_type const raw_index = ptr_hash::index_from_hash_unfiltered_(
+          layout_,
+          key_count_,
+          slot_count_,
+          bucket_count_,
+          slot_scramble_multiplier_,
+          hash_seed_,
+          hash);
+
+      if constexpr (has_fingerprint) {
+        if (ptr_hash_detail::layout_fingerprint<fingerprint_type>(
+                layout_, static_cast<std::uint32_t>(raw_index)) != ptr_hash::fingerprint_of_(hash)) {
+          return npos;
+        }
+      }
+      return raw_index;
+    }
+
+    [[nodiscard]] constexpr size_type index_from_hash(std::uint64_t const hash) const noexcept
+    {
+      if (empty()) [[unlikely]] return npos;
+      return index_from_hash_unchecked(hash);
+    }
+
+    [[nodiscard]] constexpr size_type index_unchecked(key_type const &key) const noexcept(noexcept(hash_value(key)))
+    {
+      return index_from_hash_unchecked(hash_value(key));
+    }
+
+    template <class K>
+    requires (!std::same_as<std::remove_cvref_t<K>, key_type>) && ptr_hash_detail::key_hasher<hasher, K>
+    [[nodiscard]] constexpr size_type index_unchecked(K const &key) const noexcept(noexcept(hash_value(key)))
+    {
+      return index_from_hash_unchecked(hash_value(key));
+    }
+
+    [[nodiscard]] constexpr size_type index(key_type const &key) const noexcept(noexcept(hash_value(key)))
+    {
+      return index_from_hash(hash_value(key));
+    }
+
+    template <class K>
+    requires (!std::same_as<std::remove_cvref_t<K>, key_type>) && ptr_hash_detail::key_hasher<hasher, K>
+    [[nodiscard]] constexpr size_type index(K const &key) const noexcept(noexcept(hash_value(key)))
+    {
+      return index_from_hash(hash_value(key));
+    }
+
+  private:
+    friend class ptr_hash;
+
+    constexpr const_view(
+        ptr_hash_detail::ptr_hash_layout const layout,
+        std::uint32_t const key_count,
+        std::uint32_t const slot_count,
+        std::uint32_t const bucket_count,
+        std::uint64_t const slot_scramble_multiplier,
+        std::uint64_t const hash_seed,
+        hasher const &h) noexcept(std::is_nothrow_copy_constructible_v<hasher>)
+        : layout_ { layout }
+        , key_count_ { key_count }
+        , slot_count_ { slot_count }
+        , bucket_count_ { bucket_count }
+        , slot_scramble_multiplier_ { slot_scramble_multiplier }
+        , hash_seed_ { hash_seed }
+        , hasher_ { h }
+    {
+    }
+
+    ptr_hash_detail::ptr_hash_layout layout_ {};
+    std::uint32_t key_count_ {};
+    std::uint32_t slot_count_ {};
+    std::uint32_t bucket_count_ {};
+    std::uint64_t slot_scramble_multiplier_ {};
+    std::uint64_t hash_seed_ {};
+    [[no_unique_address]] hasher hasher_ {};
+  };
+
+  [[nodiscard]] constexpr const_view as_const_view() const noexcept(std::is_nothrow_copy_constructible_v<hasher>)
+  {
+    return const_view { { index_table_.data(), index_table_.remap_offset(), index_table_.fingerprint_offset() },
+                        key_count_, slot_count_, bucket_count_, slot_scramble_multiplier_, hash_seed_, hasher_
+    };
+  }
+
+#if defined(__cpp_lib_define_static)
+  /// Bake the index blob into static storage and return a read-only view over it.
+  [[nodiscard]] static consteval const_view freeze(ptr_hash const &src)
+  {
+    auto const baked = std::define_static_array(std::span<std::uint8_t const>(src.index_table_.data(), src.index_table_.size()));
+    return const_view { { baked.data(), src.index_table_.remap_offset(), src.index_table_.fingerprint_offset() },
+                        src.key_count_, src.slot_count_, src.bucket_count_, src.slot_scramble_multiplier_, src.hash_seed_, src.hasher_
+    };
+  }
+#endif
 };
 } // namespace stdex

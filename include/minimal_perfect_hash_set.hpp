@@ -65,6 +65,8 @@ public:
   using typename base::size_type;
   using typename base::value_type;
 
+  using typename base::const_view;
+
   using base::base;
 
   constexpr minimal_perfect_hash_set() = default;
