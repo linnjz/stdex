@@ -212,19 +212,9 @@ auto invoke_memcpy(InIt first, InSent last, OutIt dest_first, OutSent dest_last)
            dest_first + static_cast<std::iter_difference_t<OutIt>>(n) };
 }
 
-template <class T>
-struct is_byte_like : std::bool_constant<std::is_same_v<std::remove_cvref_t<T>, char> ||
-                         std::is_same_v<std::remove_cvref_t<T>, signed char> ||
-                         std::is_same_v<std::remove_cvref_t<T>, unsigned char> ||
-                         std::is_same_v<std::remove_cvref_t<T>, char8_t> ||
-                         std::is_same_v<std::remove_cvref_t<T>, std::byte> ||
-                         std::is_same_v<std::remove_cvref_t<T>, bool>>
-{
-};
-
 template <class OutIt, class T, bool = iterator_is_contiguous<OutIt>>
 constexpr bool fill_memset_is_safe = std::conjunction_v<std::is_scalar<T>,
-    is_byte_like<unwrap_enum_t<std::iter_value_t<OutIt>>>,
+    std::bool_constant<byte_sized_scalar<std::iter_value_t<OutIt>>>,
     std::negation<std::is_volatile<std::remove_reference_t<std::iter_reference_t<OutIt>>>>,
     std::is_assignable<std::iter_reference_t<OutIt>, T const &>>;
 
@@ -400,20 +390,13 @@ public:
     ++last_;
   }
 
-#if defined(__cpp_lib_constexpr_new)
-  constexpr
-#endif
-      void emplace_default() noexcept(
+  constexpr void emplace_default() noexcept(
           (has_custom_construct<Allocator, value_type *>
                ? noexcept(allocator_traits::construct(alloc_, std::to_address(last_)))
                : std::is_nothrow_default_constructible_v<value_type>) &&
           noexcept(++last_))
   {
-    if constexpr (has_custom_construct<Allocator, value_type *>) {
-      allocator_traits::construct(alloc_, std::to_address(last_));
-    } else {
-      default_construct_in_place(*last_);
-    }
+    allocator_traits::construct(alloc_, std::to_address(last_));
     ++last_;
   }
 

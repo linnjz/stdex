@@ -113,11 +113,20 @@ struct uint128_t;
 struct int128_t;
 
 template <class T>
-concept byte_like = std::same_as<std::remove_cvref_t<T>, std::byte> ||
-                    std::same_as<std::remove_cvref_t<T>, char> ||
-                    std::same_as<std::remove_cvref_t<T>, signed char> ||
-                    std::same_as<std::remove_cvref_t<T>, unsigned char> ||
-                    std::same_as<std::remove_cvref_t<T>, char8_t>;
+concept byte_like  =
+    std::same_as<std::remove_cvref_t<T>, std::byte> ||
+    std::same_as<std::remove_cvref_t<T>, char> ||
+    std::same_as<std::remove_cvref_t<T>, signed char> ||
+    std::same_as<std::remove_cvref_t<T>, unsigned char> ||
+    std::same_as<std::remove_cvref_t<T>, char8_t>;
+
+template <class T>
+concept byte_sized_scalar =
+    byte_like<T> ||
+    (std::same_as<std::remove_cvref_t<T>, bool> &&
+     sizeof(std::remove_cvref_t<T>) == 1) ||
+    (std::is_enum_v<std::remove_cvref_t<T>> &&
+     sizeof(std::remove_cvref_t<T>) == 1);
 
 template <std::size_t>
 struct unsigned_of_bits;
@@ -733,17 +742,19 @@ requires ((std::integral<T> || std::is_enum_v<T> || std::same_as<T, uint128_t> |
   }
 }
 
-template <byte_like T>
+template <byte_sized_scalar T>
 [[nodiscard]] constexpr std::uint8_t byte_value(T const value) noexcept
 {
   if constexpr (std::same_as<std::remove_cvref_t<T>, std::byte>) {
     return std::to_integer<std::uint8_t>(value);
+  } else if constexpr (std::is_enum_v<std::remove_cvref_t<T>>) {
+    return static_cast<std::uint8_t>(static_cast<std::underlying_type_t<std::remove_cvref_t<T>>>(value));
   } else {
     return static_cast<std::uint8_t>(value);
   }
 }
 
-template <byte_like Byte>
+template <byte_sized_scalar Byte>
 [[nodiscard]]
 #if !defined(DEBUG) && !defined(_DEBUG)
 [[msvc::forceinline, gnu::always_inline]]
@@ -754,10 +765,10 @@ constexpr std::uint64_t read64_le_unchecked(std::span<Byte const> const input, s
                 std::endian::native == std::endian::big,
                 "Unsupported native endianness: expected big or little.");
 
-  std::array buf {
-    input[offset], input[offset + 1], input[offset + 2], input[offset + 3],
-    input[offset + 4], input[offset + 5], input[offset + 6], input[offset + 7]
-  };
+  std::array buf { byte_value(input[offset]), byte_value(input[offset + 1]),
+                   byte_value(input[offset + 2]), byte_value(input[offset + 3]),
+                   byte_value(input[offset + 4]), byte_value(input[offset + 5]),
+                   byte_value(input[offset + 6]), byte_value(input[offset + 7]) };
 
   if constexpr (std::endian::native == std::endian::big) {
     return byteswap(std::bit_cast<std::uint64_t>(buf));
@@ -766,7 +777,7 @@ constexpr std::uint64_t read64_le_unchecked(std::span<Byte const> const input, s
   }
 }
 
-template <byte_like Byte>
+template <byte_sized_scalar Byte>
 [[nodiscard]]
 #if !defined(DEBUG) && !defined(_DEBUG)
 [[msvc::forceinline, gnu::always_inline]]
@@ -777,7 +788,8 @@ constexpr std::uint32_t read32_le_unchecked(std::span<Byte const> const input, s
                 std::endian::native == std::endian::big,
                 "Unsupported native endianness: expected big or little.");
 
-  std::array buf { input[offset], input[offset + 1], input[offset + 2], input[offset + 3] };
+  std::array buf { byte_value(input[offset]), byte_value(input[offset + 1]),
+                   byte_value(input[offset + 2]), byte_value(input[offset + 3]) };
 
   if constexpr (std::endian::native == std::endian::big) {
     return byteswap(std::bit_cast<std::uint32_t>(buf));

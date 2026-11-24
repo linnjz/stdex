@@ -168,15 +168,15 @@ template <typename T>
 template <typename Range>
 concept contiguous_byte_range = std::ranges::contiguous_range<Range> &&
                                 std::ranges::sized_range<Range> &&
-                                byte_like<std::ranges::range_value_t<Range>>;
+                                byte_sized_scalar<std::ranges::range_value_t<Range>>;
 
 template <typename Range>
 concept contiguous_object_range = std::ranges::contiguous_range<Range> &&
                                   std::ranges::sized_range<Range> &&
                                   std::is_trivially_copyable_v<std::ranges::range_value_t<Range>> &&
-                                  (!byte_like<std::ranges::range_value_t<Range>>);
+                                  (!byte_sized_scalar<std::ranges::range_value_t<Range>>);
 
-template <byte_like Byte, hash_mode Mode>
+template <byte_sized_scalar Byte, hash_mode Mode>
 [[nodiscard]] constexpr std::uint64_t hash_bytes_impl(Mode, std::span<Byte const> const input, std::uint64_t seed, std::array<std::uint64_t, 8> const &secret) noexcept
 {
   std::size_t const length = input.size();
@@ -207,7 +207,10 @@ template <byte_like Byte, hash_mode Mode>
       std::array<std::uint64_t, 7> lane { seed, seed, seed, seed, seed, seed, seed };
       do {
         for (std::size_t index = 0; index < traits::lane_count; ++index) {
-          lane[index] = umul128_xor_fold(read64_le_unchecked(input, offset + index * 16U) ^ secret[index], read64_le_unchecked(input, offset + index * 16U + 8U) ^ lane[index]);
+          size_t const pos { offset + index * 16U };
+          lane[index] = umul128_xor_fold(
+              read64_le_unchecked(input, pos) ^ secret[index],
+              read64_le_unchecked(input, pos + 8U) ^ lane[index]);
         }
         offset += traits::stripe;
         remaining -= traits::stripe;
@@ -257,13 +260,13 @@ template <byte_like Byte, hash_mode Mode>
 }
 } // namespace hash_detail
 
-template <byte_like Byte, hash_mode Mode = hash_standard_t>
+template <byte_sized_scalar Byte, hash_mode Mode = hash_standard_t>
 [[nodiscard]] constexpr std::uint64_t hash_bytes(std::span<Byte const> const input, std::uint64_t const seed = 0) noexcept
 {
   return hash_detail::hash_bytes_impl(Mode {}, input, seed, hash_detail::kDefaultSecret);
 }
 
-template <byte_like Byte, hash_mode Mode = hash_standard_t>
+template <byte_sized_scalar Byte, hash_mode Mode = hash_standard_t>
 [[nodiscard]] constexpr std::uint64_t hash_bytes(std::span<Byte const> const input, std::uint64_t const seed, std::array<std::uint64_t, 8> const &secret) noexcept
 {
   return hash_detail::hash_bytes_impl(Mode {}, input, seed, secret);

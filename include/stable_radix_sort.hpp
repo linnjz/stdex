@@ -49,6 +49,7 @@
 
 #include "bit.hpp" // unsigned_of_bits_t, highest_one_bit_index
 #include "hybrid_alloc.hpp" // HYBRID_ALIGNED_ALLOC_THRESHOLD、hybrid_free
+#include "uninitialized_algorithms.hpp"
 
 #pragma push_macro("RADIX_SORT_RESTRICT")
 #pragma push_macro("RADIX_SORT_ALWAYS_INLINE")
@@ -287,7 +288,7 @@ struct radix_sort_options
   radix_nans_assumption nans_assumption               = radix_nans_assumption::non_existence;
 
   /// MSD sub-problem size below which LSD is used
-  std::size_t msd_fallback_to_lsd_threshold   = 256U * 256U;
+  std::size_t msd_fallback_to_lsd_threshold   = 64U * 1024U;
   /// Stack-allocate histogram if under this
   std::size_t histogram_stack_threshold_bytes = 16U * 1024U;
 };
@@ -368,47 +369,54 @@ public:
   using pointer    = typename allocator_traits::pointer;
   using size_type  = typename allocator_traits::size_type;
 
+private:
+  struct allocation_guard
+  {
+    pointer data_;
+    size_type size_;
+    Alloc &alloc_;
+
+    allocation_guard &operator= (allocation_guard const &) = delete;
+    allocation_guard &operator= (allocation_guard &&)      = delete;
+
+    constexpr ~allocation_guard() noexcept
+    {
+      if (data_ != pointer {}) {
+        allocator_traits::deallocate(alloc_, data_, size_);
+      }
+    }
+
+    constexpr void dismiss() noexcept { data_ = pointer {}; }
+  };
+
+public:
   static_assert(std::default_initializable<value_type>,
                 "stable_radix_sort requires a default-constructible value type for its temporary buffer");
-
-  constexpr explicit allocator_holder(size_type size, Alloc const &alloc)
-      : alloc_(alloc)
-      , size_(size)
-      , fancy_buffer_(size == 0 ? pointer {} : allocator_traits::allocate(alloc_, size))
-      , raw_buffer_(fancy_buffer_ == pointer {} ? nullptr : std::to_address(fancy_buffer_))
-  {
-    construct();
-  }
 
   allocator_holder(allocator_holder const &)             = delete;
   allocator_holder &operator= (allocator_holder const &) = delete;
 
-  constexpr ~allocator_holder() { destroy(); }
-
-  constexpr value_type *data() noexcept { return raw_buffer_; }
-
-private:
-  constexpr void construct()
+  constexpr explicit allocator_holder(size_type size, Alloc const &alloc)
+      : alloc_(alloc)
+      , size_(size)
+      , fancy_buffer_(allocator_traits::allocate(alloc_, size))
+      , raw_buffer_(fancy_buffer_ == pointer {} ? nullptr : std::to_address(fancy_buffer_))
   {
-    if constexpr (!std::is_trivially_default_constructible_v<value_type> || !std::is_trivially_destructible_v<value_type>) {
-      size_type i = 0;
-      try {
-        for (; i < size_; ++i) {
-          allocator_traits::construct(alloc_, raw_buffer_ + i);
-        }
-      } catch (...) {
-        for (size_type j = 0; j < i; ++j) {
-          allocator_traits::destroy(alloc_, raw_buffer_ + j);
-        }
-        allocator_traits::deallocate(alloc_, fancy_buffer_, size_);
-        throw;
+    if constexpr (!std::is_trivially_default_constructible_v<value_type> ||
+                  has_custom_construct<Alloc, value_type *>) {
+      allocation_guard guard { fancy_buffer_, size_, alloc_ };
+      {
+        uninitialized_backout_al<Alloc, value_type *> backout { raw_buffer_, alloc_ };
+        for (; size > 0; --size) backout.emplace_default();
+        backout.release();
       }
+      guard.dismiss();
     }
   }
 
-  constexpr void destroy() noexcept
+  constexpr ~allocator_holder()
   {
-    if (fancy_buffer_ == pointer {}) return;
+    if (!raw_buffer_) [[unlikely]] return;
 
     if constexpr (!std::is_trivially_destructible_v<value_type>) {
       for (size_type i = 0; i < size_; ++i) {
@@ -418,6 +426,9 @@ private:
     allocator_traits::deallocate(alloc_, fancy_buffer_, size_);
   }
 
+  constexpr value_type *data() noexcept { return raw_buffer_; }
+
+private:
   [[no_unique_address]] Alloc alloc_;
   size_type size_ { 0 };
   pointer fancy_buffer_ {};
@@ -463,12 +474,8 @@ private:
   size_type size_ {};
 };
 
-struct hybrid_alloc_tag
-{
-};
-
 /// RAII wrapper around HYBRID_ALIGNED_ALLOC_THRESHOLD / hybrid_free.
-template <class T>
+template <class T, bool IsHybridAlloc>
 class histogram_heap_holder
 {
   static_assert(std::is_object_v<T>, "histogram_heap_holder requires an object type");
@@ -479,10 +486,9 @@ public:
   using pointer    = T *;
   using size_type  = std::size_t;
 
-  constexpr histogram_heap_holder(hybrid_alloc_tag, void *ptr, size_type size)
+  constexpr histogram_heap_holder(void *ptr, size_type size)
       : data_(static_cast<pointer>(ptr))
       , size_(size)
-      , is_hybrid_alloc_ { true }
   {
   }
 
@@ -501,28 +507,21 @@ public:
 
   constexpr ~histogram_heap_holder()
   {
-    if (data_ == nullptr) {
-      return;
-    }
-
+    if (data_ == nullptr) [[unlikely]] return;
     reset();
   }
 
   constexpr void reset() noexcept
   {
-    if (std::is_constant_evaluated()) {
-      delete data_;
-    } else {
-      if (!is_hybrid_alloc_) {
-        delete data_;
-      } else {
-        if constexpr (!std::is_trivially_destructible_v<value_type>) {
-          for (size_type i = 0; i < size_; ++i) {
-            std::destroy_at(data_ + i);
-          }
+    if constexpr (IsHybridAlloc) {
+      if constexpr (!std::is_trivially_destructible_v<value_type>) {
+        for (size_type i = 0; i < size_; ++i) {
+          std::destroy_at(data_ + i);
         }
-        hybrid_free(data_); // HYBRID_ALIGNED_ALLOC_THRESHOLD
       }
+      hybrid_free(data_); // HYBRID_ALIGNED_ALLOC_THRESHOLD
+    } else {
+      delete data_;
     }
     data_ = nullptr;
   }
@@ -535,19 +534,14 @@ public:
   }
 
   constexpr pointer data() noexcept { return data_; }
-
   constexpr pointer data() const noexcept { return data_; }
-
   constexpr size_type size() const noexcept { return size_; }
-
   constexpr T &operator[] (size_type i) noexcept { return data_[i]; }
-
   constexpr T const &operator[] (size_type i) const noexcept { return data_[i]; }
 
 private:
   pointer data_ { nullptr };
   size_type size_ { 0 };
-  bool is_hybrid_alloc_ { false };
 };
 
 // The standard integral concepts do not cover the 128-bit wrappers, so the
@@ -881,7 +875,7 @@ constexpr void integer_radix_sort(
     std::fill_n(hist1d, RadixTraits::num_buckets, hist_t { 0 });
 
     for (std::size_t i = 0; i < n; i++) {
-      auto x = proj.template operator()<IsSignBitHandling>(data[i]);
+      auto const x = proj.template operator()<IsSignBitHandling>(data[i]);
       ++hist1d[nth_radix<RadixTraits>(x, pass)];
     }
 
@@ -890,7 +884,7 @@ constexpr void integer_radix_sort(
     }
 
     for (std::size_t i = n; i-- > 0;) {
-      auto x = proj.template operator()<IsSignBitHandling>(data[i]);
+      auto const x = proj.template operator()<IsSignBitHandling>(data[i]);
 
       buffer[--hist1d[nth_radix<RadixTraits>(x, pass)]] = std::move(data[i]);
     }
@@ -1069,7 +1063,7 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
       aligned_hist2d_t hist2d {}; // init
       run_sort(hist2d.storage_);
     } else {
-      histogram_heap_holder<aligned_hist2d_t> hist2d {
+      histogram_heap_holder<aligned_hist2d_t, false> hist2d {
         new aligned_hist2d_t(), num_passes
       };
       run_sort(hist2d.data()->storage_);
@@ -1160,7 +1154,7 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
       Projection proj)
   {
     for (std::size_t i = 0; i < n; ++i) {
-      auto x = proj.template operator()<false>(data[i]);
+      auto const x = proj.template operator()<false>(data[i]);
       ++hist2d[pass][nth_radix<RadixTraits>(x, pass)];
     }
   }
@@ -1188,7 +1182,7 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
       Projection proj)
   {
     for (std::size_t i = n; i-- > 0;) {
-      auto x = proj.template operator()<IsSignBitHandling>(data[i]);
+      auto const x = proj.template operator()<IsSignBitHandling>(data[i]);
 
       buffer[--hist2d[pass][nth_radix<RadixTraits>(x, pass)]] = std::move(data[i]);
     }
@@ -1308,7 +1302,7 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
       aligned_hist2d_t hist2d; // not init
       run_sort(hist2d.storage_);
     } else {
-      histogram_heap_holder<aligned_hist2d_t> hist2d {
+      histogram_heap_holder<aligned_hist2d_t, false> hist2d {
         new aligned_hist2d_t, num_passes
       };
       run_sort(hist2d.data()->storage_);
@@ -1352,8 +1346,7 @@ struct radix_sort_par_helpers : RadixTraits
 
     using chunk_stats_t     = thread_chunk_stats<uint_t>;
     auto const thread_bytes = threads * sizeof(chunk_stats_t);
-    histogram_heap_holder<chunk_stats_t> stats_array {
-      hybrid_alloc_tag {},
+    histogram_heap_holder<chunk_stats_t, true> stats_array {
       HYBRID_ALIGNED_ALLOC_THRESHOLD(
           thread_bytes,
           std::hardware_constructive_interference_size,
@@ -1548,8 +1541,7 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
     std::size_t const hist_bytes = hist_size * sizeof(hist_t);
     thread_chunk_info const chunk_info(threads, n % threads, n / threads);
 
-    histogram_heap_holder<hist_t> hist_storage {
-      hybrid_alloc_tag {},
+    histogram_heap_holder<hist_t, true> hist_storage {
       HYBRID_ALIGNED_ALLOC_THRESHOLD(
           hist_bytes,
           std::hardware_constructive_interference_size,
@@ -1684,8 +1676,7 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
     std::size_t const hist_size  = std::size_t { threads } * num_buckets;
     std::size_t const hist_bytes = hist_size * sizeof(hist_t);
 
-    histogram_heap_holder<hist_t> hist_storage {
-      hybrid_alloc_tag {},
+    histogram_heap_holder<hist_t, true> hist_storage {
       HYBRID_ALIGNED_ALLOC_THRESHOLD(
           hist_bytes,
           std::hardware_constructive_interference_size,
@@ -1726,8 +1717,7 @@ struct radix_sort_impl_dispatcher<RadixTraits, RandIter, Allocator, Projection>
     std::size_t const hist_bytes = hist_size * sizeof(hist_t);
     thread_chunk_info const chunk_info(threads, n % threads, n / threads);
 
-    histogram_heap_holder<hist_t> hist_storage {
-      hybrid_alloc_tag {},
+    histogram_heap_holder<hist_t, true> hist_storage {
       HYBRID_ALIGNED_ALLOC_THRESHOLD(
           hist_bytes,
           std::hardware_constructive_interference_size,
